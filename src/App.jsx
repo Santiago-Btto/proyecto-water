@@ -1,0 +1,1639 @@
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import {
+  Droplet, Truck, Users, Receipt, Plus, Check, X,
+  ChevronRight, Undo2, Redo2, LogOut, CreditCard, Banknote,
+  HandCoins, AlertCircle, Search, Edit2, Trash2,
+  ArrowLeft, Lock, ClipboardList, CheckCircle2, Circle, BarChart3,
+  UserCog, Phone, MapPin, Save, Minus, Settings2,
+  Home as HomeIcon, WifiOff
+} from "lucide-react";
+import { doc, onSnapshot, setDoc } from "firebase/firestore";
+import { firestore, COLLECTION } from "./firebaseConfig";
+
+/* ============================================================
+   TOKENS DE DISEÑO
+   ============================================================ */
+const C = {
+  bg: "#F2F8F9",
+  surface: "#FFFFFF",
+  ink: "#0B2B3C",
+  muted: "#5E7A87",
+  mutedLight: "#93A9B1",
+  primary: "#0C6478",
+  primaryDark: "#082C38",
+  accent: "#0FA9B8",
+  accentSoft: "#DFF4F6",
+  success: "#1E9E5A",
+  successBg: "#E7F7EE",
+  warning: "#C97A17",
+  warningBg: "#FBF0DF",
+  danger: "#D14343",
+  dangerBg: "#FBEAEA",
+  border: "#DEE9EB",
+};
+
+const DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
+const DIAS_JS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
+const PRODUCTOS = [
+  { key: "b20", label: "Bidón 20L", corto: "20L" },
+  { key: "b12", label: "Bidón 12L", corto: "12L" },
+  { key: "sifon", label: "Sifón", corto: "Sifón" },
+  { key: "jugo", label: "Jugo", corto: "Jugo" },
+];
+const DEFAULT_CONFIG = {
+  adminPin: "",
+  repartidores: [],
+  precios: { b20: 0, b12: 0, sifon: 0, jugo: 0 },
+};
+
+/* ============================================================
+   UTILIDADES
+   ============================================================ */
+function uid() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "id-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+function hoyISO() {
+  const d = new Date();
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+function diaSemanaHoy() {
+  return DIAS_JS[new Date().getDay()];
+}
+function fechaLegible(iso) {
+  try {
+    const [y, m, d] = iso.split("-");
+    return `${d}/${m}/${y}`;
+  } catch {
+    return iso;
+  }
+}
+function formatMoney(n) {
+  const val = Number(n) || 0;
+  try {
+    return val.toLocaleString("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 });
+  } catch {
+    return "$" + val.toFixed(0);
+  }
+}
+function clone(o) {
+  return JSON.parse(JSON.stringify(o));
+}
+function totalPedido(items) {
+  return items.reduce((s, it) => s + it.cantidad * it.precioUnitario, 0);
+}
+
+/* ============================================================
+   ALMACENAMIENTO PERSISTENTE (Firebase Firestore)
+   Cada "key" (clientes, visitas, gastos, config) es un documento
+   dentro de la colección COLLECTION, con la forma { value: ... }.
+   Usamos onSnapshot para que los cambios se vean en vivo en todos
+   los celulares conectados, sin necesidad de refrescar a mano.
+   ============================================================ */
+function subscribeDoc(key, fallback, onData, onError) {
+  const ref = doc(firestore, COLLECTION, key);
+  return onSnapshot(
+    ref,
+    (snap) => onData(snap.exists() ? snap.data().value : fallback),
+    (err) => { console.error("Error escuchando", key, err); onError && onError(err); }
+  );
+}
+async function dbSet(key, value) {
+  try {
+    await setDoc(doc(firestore, COLLECTION, key), { value });
+    return true;
+  } catch (e) {
+    console.error("Error guardando", key, e);
+    return false;
+  }
+}
+
+/* Perfil recordado en ESTE dispositivo (no se comparte entre celulares) */
+function getLocalProfile() {
+  try {
+    const raw = localStorage.getItem("miPerfilReparto");
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+function setLocalProfile(p) {
+  try {
+    if (p === null) localStorage.removeItem("miPerfilReparto");
+    else localStorage.setItem("miPerfilReparto", JSON.stringify(p));
+  } catch {
+    /* ignorar si el navegador bloquea localStorage */
+  }
+}
+
+/* ============================================================
+   PRIMITIVOS DE UI
+   ============================================================ */
+function Screen({ children }) {
+  return (
+    <div
+      style={{
+        height: "100vh",
+        maxWidth: 460,
+        margin: "0 auto",
+        background: C.bg,
+        display: "flex",
+        flexDirection: "column",
+        fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif",
+        color: C.ink,
+        position: "relative",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function TopBar({ title, subtitle, onBack, right, tone = "light" }) {
+  const dark = tone === "dark";
+  return (
+    <div
+      style={{
+        background: dark ? C.primaryDark : C.surface,
+        borderBottom: `1px solid ${dark ? C.primaryDark : C.border}`,
+        flexShrink: 0,
+      }}
+      className="px-4 py-3 flex items-center gap-3"
+    >
+      {onBack && (
+        <button onClick={onBack} className="p-1 -ml-1 rounded-full active:bg-black/5">
+          <ArrowLeft size={20} color={dark ? "#fff" : C.ink} />
+        </button>
+      )}
+      <div className="flex-1 min-w-0">
+        <div
+          className="font-extrabold tracking-tight text-lg truncate"
+          style={{ color: dark ? "#fff" : C.ink }}
+        >
+          {title}
+        </div>
+        {subtitle && (
+          <div className="text-xs truncate" style={{ color: dark ? C.accentSoft : C.muted }}>
+            {subtitle}
+          </div>
+        )}
+      </div>
+      {right}
+    </div>
+  );
+}
+
+function Card({ children, style, className = "", onClick }) {
+  return (
+    <div
+      onClick={onClick}
+      className={"rounded-2xl p-4 " + className}
+      style={{ background: C.surface, border: `1px solid ${C.border}`, ...style }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Btn({ children, onClick, variant = "primary", size = "md", full, disabled, type = "button", icon: Icon }) {
+  const base = "inline-flex items-center justify-center gap-2 rounded-xl font-semibold active:scale-95 transition disabled:opacity-40 disabled:active:scale-100";
+  const sizes = { sm: "px-3 py-1.5 text-xs", md: "px-4 py-2.5 text-sm", lg: "px-5 py-3.5 text-base" };
+  const styles = {
+    primary: { background: C.primary, color: "#fff" },
+    accent: { background: C.accent, color: "#fff" },
+    ghost: { background: "transparent", color: C.primary, border: `1px solid ${C.border}` },
+    danger: { background: C.dangerBg, color: C.danger },
+    dark: { background: C.primaryDark, color: "#fff" },
+    subtle: { background: C.accentSoft, color: C.primary },
+  };
+  return (
+    <button
+      type={type}
+      onClick={onClick}
+      disabled={disabled}
+      className={base + " " + sizes[size] + (full ? " w-full" : "")}
+      style={styles[variant]}
+    >
+      {Icon && <Icon size={size === "lg" ? 18 : 16} />}
+      {children}
+    </button>
+  );
+}
+
+function Field({ label, children, hint }) {
+  return (
+    <div className="mb-3">
+      {label && <div className="text-xs font-semibold mb-1" style={{ color: C.muted }}>{label}</div>}
+      {children}
+      {hint && <div className="text-xs mt-1" style={{ color: C.mutedLight }}>{hint}</div>}
+    </div>
+  );
+}
+
+function Input(props) {
+  return (
+    <input
+      {...props}
+      className={"w-full rounded-xl px-3 py-2.5 text-sm outline-none " + (props.className || "")}
+      style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink, ...(props.style || {}) }}
+    />
+  );
+}
+
+function Textarea(props) {
+  return (
+    <textarea
+      {...props}
+      className="w-full rounded-xl px-3 py-2.5 text-sm outline-none resize-none"
+      style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}
+    />
+  );
+}
+
+function DayPills({ value, onChange }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {DIAS.map((d) => {
+        const active = value.includes(d);
+        return (
+          <button
+            key={d}
+            type="button"
+            onClick={() => onChange(active ? value.filter((x) => x !== d) : [...value, d])}
+            className="px-2.5 py-1.5 rounded-lg text-xs font-semibold"
+            style={{
+              background: active ? C.primary : C.bg,
+              color: active ? "#fff" : C.muted,
+              border: `1px solid ${active ? C.primary : C.border}`,
+            }}
+          >
+            {d.slice(0, 3)}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function Stepper({ value, onChange, min = 0 }) {
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={() => onChange(Math.max(min, value - 1))}
+        className="w-8 h-8 rounded-lg flex items-center justify-center font-bold"
+        style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}
+      >
+        <Minus size={14} />
+      </button>
+      <div className="w-8 text-center font-mono font-bold text-sm">{value}</div>
+      <button
+        type="button"
+        onClick={() => onChange(value + 1)}
+        className="w-8 h-8 rounded-lg flex items-center justify-center font-bold"
+        style={{ background: C.primary, color: "#fff" }}
+      >
+        <Plus size={14} />
+      </button>
+    </div>
+  );
+}
+
+function Sheet({ title, onClose, children, footer }) {
+  return (
+    <div className="absolute inset-0 z-50 flex flex-col justify-end" style={{ background: "rgba(11,43,60,0.45)" }} onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="rounded-t-3xl flex flex-col"
+        style={{ background: C.surface, maxHeight: "88%" }}
+      >
+        <div className="flex items-center justify-between px-4 py-3 flex-shrink-0" style={{ borderBottom: `1px solid ${C.border}` }}>
+          <div className="font-extrabold text-base">{title}</div>
+          <button onClick={onClose} className="p-1 rounded-full active:bg-black/5">
+            <X size={20} color={C.muted} />
+          </button>
+        </div>
+        <div className="overflow-y-auto px-4 py-3">{children}</div>
+        {footer && <div className="px-4 py-3 flex-shrink-0" style={{ borderTop: `1px solid ${C.border}` }}>{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ icon: Icon, title, text, action }) {
+  return (
+    <div className="flex flex-col items-center justify-center text-center py-12 px-6">
+      <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-3" style={{ background: C.accentSoft }}>
+        <Icon size={26} color={C.primary} />
+      </div>
+      <div className="font-bold text-sm mb-1">{title}</div>
+      <div className="text-xs mb-4" style={{ color: C.muted }}>{text}</div>
+      {action}
+    </div>
+  );
+}
+
+function Badge({ children, tone = "muted" }) {
+  const tones = {
+    muted: { bg: C.bg, fg: C.muted },
+    success: { bg: C.successBg, fg: C.success },
+    warning: { bg: C.warningBg, fg: C.warning },
+    danger: { bg: C.dangerBg, fg: C.danger },
+    accent: { bg: C.accentSoft, fg: C.primary },
+  };
+  const t = tones[tone];
+  return (
+    <span className="px-2 py-0.5 rounded-md text-xs font-bold" style={{ background: t.bg, color: t.fg }}>
+      {children}
+    </span>
+  );
+}
+
+/* Elemento "medidor de agua" — la firma visual de la app */
+function Meter({ label, value, unit }) {
+  return (
+    <div className="rounded-2xl p-3 flex-1" style={{ background: C.primaryDark, minWidth: 128 }}>
+      <div className="text-xs font-bold uppercase tracking-wider mb-1" style={{ color: C.accentSoft, opacity: 0.75 }}>
+        {label}
+      </div>
+      <div className="font-mono font-bold text-lg tabular-nums" style={{ color: "#fff", letterSpacing: "0.02em" }}>
+        {value}
+        {unit && <span className="text-xs font-semibold ml-1" style={{ color: C.accent }}>{unit}</span>}
+      </div>
+    </div>
+  );
+}
+
+function BrandMark({ size = 22, color = C.accent }) {
+  return <Droplet size={size} color={color} fill={color} fillOpacity={0.18} strokeWidth={2.2} />;
+}
+
+/* ============================================================
+   PANTALLA: SELECCIÓN DE PERFIL
+   ============================================================ */
+function ProfileSelect({ config, onPickAdmin, onPickRepartidor }) {
+  return (
+    <Screen>
+      <div className="flex-1 flex flex-col justify-center px-6">
+        <div className="flex flex-col items-center mb-8">
+          <div className="w-16 h-16 rounded-3xl flex items-center justify-center mb-3" style={{ background: C.primaryDark }}>
+            <BrandMark size={30} />
+          </div>
+          <div className="font-extrabold text-2xl tracking-tight">Reparto de Agua</div>
+          <div className="text-xs" style={{ color: C.muted }}>Elegí tu perfil para continuar</div>
+        </div>
+
+        <button
+          onClick={onPickAdmin}
+          className="w-full rounded-2xl p-4 flex items-center gap-3 mb-3 active:scale-95 transition"
+          style={{ background: C.primaryDark }}
+        >
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: "rgba(255,255,255,0.12)" }}>
+            <UserCog size={20} color="#fff" />
+          </div>
+          <div className="text-left flex-1">
+            <div className="font-bold text-sm" style={{ color: "#fff" }}>Administrador</div>
+            <div className="text-xs" style={{ color: C.accentSoft }}>Clientes, precios, gastos y caja</div>
+          </div>
+          <ChevronRight size={18} color={C.accentSoft} />
+        </button>
+
+        {config.repartidores.length === 0 ? (
+          <Card>
+            <div className="text-xs text-center" style={{ color: C.muted }}>
+              Todavía no hay repartidores creados. Entrá como Administrador → Ajustes para agregar el primero.
+            </div>
+          </Card>
+        ) : (
+          config.repartidores.map((r) => (
+            <button
+              key={r.id}
+              onClick={() => onPickRepartidor(r)}
+              className="w-full rounded-2xl p-4 flex items-center gap-3 mb-2 active:scale-95 transition"
+              style={{ background: C.surface, border: `1px solid ${C.border}` }}
+            >
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: C.accentSoft }}>
+                <Truck size={18} color={C.primary} />
+              </div>
+              <div className="text-left flex-1">
+                <div className="font-bold text-sm">{r.nombre}</div>
+                <div className="text-xs" style={{ color: C.muted }}>Repartidor</div>
+              </div>
+              <ChevronRight size={18} color={C.mutedLight} />
+            </button>
+          ))
+        )}
+      </div>
+    </Screen>
+  );
+}
+
+/* ============================================================
+   PANTALLA: PIN ADMINISTRADOR
+   ============================================================ */
+function AdminGate({ config, onUnlock, onBack, onSetPin }) {
+  const [pin, setPin] = useState("");
+  const [pin2, setPin2] = useState("");
+  const [error, setError] = useState("");
+  const creating = !config.adminPin;
+
+  function submit() {
+    if (creating) {
+      if (pin.length < 4) return setError("Usá al menos 4 dígitos.");
+      if (pin !== pin2) return setError("Los PIN no coinciden.");
+      onSetPin(pin);
+    } else {
+      if (pin === config.adminPin) onUnlock();
+      else setError("PIN incorrecto.");
+    }
+  }
+
+  return (
+    <Screen>
+      <TopBar title="Administrador" onBack={onBack} tone="dark" />
+      <div className="flex-1 flex flex-col justify-center px-6">
+        <div className="flex flex-col items-center mb-6">
+          <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-3" style={{ background: C.accentSoft }}>
+            <Lock size={24} color={C.primary} />
+          </div>
+          <div className="font-bold text-sm">{creating ? "Creá un PIN de acceso" : "Ingresá tu PIN"}</div>
+          <div className="text-xs text-center mt-1" style={{ color: C.muted }}>
+            {creating ? "Vas a usarlo cada vez que entres como administrador." : "Protege la información de tu negocio."}
+          </div>
+        </div>
+
+        <Field label={creating ? "Nuevo PIN (4 a 6 dígitos)" : "PIN"}>
+          <Input
+            type="password"
+            inputMode="numeric"
+            maxLength={6}
+            value={pin}
+            onChange={(e) => { setPin(e.target.value.replace(/\D/g, "")); setError(""); }}
+            placeholder="••••"
+            autoFocus
+          />
+        </Field>
+        {creating && (
+          <Field label="Repetí el PIN">
+            <Input
+              type="password"
+              inputMode="numeric"
+              maxLength={6}
+              value={pin2}
+              onChange={(e) => { setPin2(e.target.value.replace(/\D/g, "")); setError(""); }}
+              placeholder="••••"
+            />
+          </Field>
+        )}
+        {error && <div className="text-xs font-semibold mb-3" style={{ color: C.danger }}>{error}</div>}
+        <Btn full size="lg" onClick={submit}>{creating ? "Crear y entrar" : "Entrar"}</Btn>
+      </div>
+    </Screen>
+  );
+}
+
+/* ============================================================
+   APP ADMINISTRADOR
+   ============================================================ */
+function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo }) {
+  const [tab, setTab] = useState("inicio");
+
+  const tabs = [
+    { key: "inicio", label: "Inicio", icon: BarChart3 },
+    { key: "clientes", label: "Clientes", icon: Users },
+    { key: "historial", label: "Recorridos", icon: ClipboardList },
+    { key: "gastos", label: "Gastos", icon: Receipt },
+    { key: "ajustes", label: "Ajustes", icon: Settings2 },
+  ];
+
+  return (
+    <Screen>
+      <TopBar
+        title="Administrador"
+        subtitle={fechaLegible(hoyISO()) + " · " + diaSemanaHoy()}
+        tone="dark"
+        right={
+          <div className="flex items-center gap-1">
+            <span className="flex items-center gap-1 px-1.5 mr-1">
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: C.accent }} />
+              <span className="text-[10px] font-bold" style={{ color: C.accentSoft }}>en vivo</span>
+            </span>
+            <button onClick={undo} disabled={!canUndo} className="p-2 rounded-full active:bg-white/10 disabled:opacity-30"><Undo2 size={16} color="#fff" /></button>
+            <button onClick={redo} disabled={!canRedo} className="p-2 rounded-full active:bg-white/10 disabled:opacity-30"><Redo2 size={16} color="#fff" /></button>
+            <button onClick={onLogout} className="p-2 rounded-full active:bg-white/10"><LogOut size={16} color="#fff" /></button>
+          </div>
+        }
+      />
+      <div className="flex-1 overflow-y-auto px-4 py-4">
+        {tab === "inicio" && <AdminDashboard db={db} />}
+        {tab === "clientes" && <AdminClientes db={db} mutate={mutate} />}
+        {tab === "historial" && <AdminHistorial db={db} mutate={mutate} />}
+        {tab === "gastos" && <AdminGastos db={db} mutate={mutate} />}
+        {tab === "ajustes" && <AdminAjustes db={db} mutate={mutate} />}
+      </div>
+      <div className="flex-shrink-0 flex" style={{ background: C.surface, borderTop: `1px solid ${C.border}` }}>
+        {tabs.map((t) => {
+          const active = tab === t.key;
+          const Icon = t.icon;
+          return (
+            <button key={t.key} onClick={() => setTab(t.key)} className="flex-1 flex flex-col items-center gap-0.5 py-2.5">
+              <Icon size={18} color={active ? C.primary : C.mutedLight} strokeWidth={active ? 2.4 : 2} />
+              <span className="text-xs font-semibold" style={{ color: active ? C.primary : C.mutedLight }}>{t.label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </Screen>
+  );
+}
+
+/* ---------- Dashboard ---------- */
+function AdminDashboard({ db }) {
+  const [rango, setRango] = useState("hoy");
+  const hoy = hoyISO();
+
+  const visitasFiltradas = useMemo(() => {
+    return db.visitas.filter((v) => {
+      if (rango === "hoy") return v.fecha === hoy;
+      if (rango === "semana") {
+        const d = new Date(v.fecha);
+        const now = new Date(hoy);
+        const diff = (now - d) / 86400000;
+        return diff >= 0 && diff < 7;
+      }
+      if (rango === "mes") return v.fecha.slice(0, 7) === hoy.slice(0, 7);
+      return true;
+    });
+  }, [db.visitas, rango, hoy]);
+
+  const efectivo = visitasFiltradas.reduce((s, v) => s + (v.pagos?.efectivo || 0), 0);
+  const mp = visitasFiltradas.reduce((s, v) => s + (v.pagos?.mercadopago || 0), 0);
+  const deudaGenerada = visitasFiltradas.reduce((s, v) => s + (v.deudaGenerada || 0), 0);
+  const facturado = visitasFiltradas.reduce((s, v) => s + (v.total || 0), 0);
+
+  const gastosFiltrados = db.gastos.filter((g) => {
+    if (rango === "hoy") return g.fecha === hoy;
+    if (rango === "semana") { const d = new Date(g.fecha); const now = new Date(hoy); const diff = (now - d) / 86400000; return diff >= 0 && diff < 7; }
+    if (rango === "mes") return g.fecha.slice(0, 7) === hoy.slice(0, 7);
+    return true;
+  });
+  const totalGastos = gastosFiltrados.reduce((s, g) => s + g.monto, 0);
+
+  const deudaTotalClientes = db.clientes.reduce((s, c) => s + (c.deudaAcumulada || 0), 0);
+  const envasesEnCalle = db.clientes.reduce((s, c) => s + (c.envasesEnPoder || 0), 0);
+
+  const preciosSinConfigurar = Object.values(db.config.precios).some((p) => !p);
+
+  return (
+    <div>
+      {preciosSinConfigurar && (
+        <Card style={{ background: C.warningBg, border: "none" }} className="mb-3">
+          <div className="flex items-center gap-2 text-xs font-semibold" style={{ color: C.warning }}>
+            <AlertCircle size={16} /> Todavía tenés precios en $0. Configurálos en Ajustes.
+          </div>
+        </Card>
+      )}
+
+      <div className="flex gap-2 mb-4">
+        {[["hoy", "Hoy"], ["semana", "Semana"], ["mes", "Mes"], ["todo", "Todo"]].map(([k, l]) => (
+          <button
+            key={k}
+            onClick={() => setRango(k)}
+            className="px-3 py-1.5 rounded-lg text-xs font-bold"
+            style={{ background: rango === k ? C.primary : C.surface, color: rango === k ? "#fff" : C.muted, border: `1px solid ${rango === k ? C.primary : C.border}` }}
+          >
+            {l}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap gap-2 mb-4">
+        <Meter label="Facturado" value={formatMoney(facturado)} />
+        <Meter label="Efectivo" value={formatMoney(efectivo)} />
+        <Meter label="Mercado Pago" value={formatMoney(mp)} />
+        <Meter label="Fiado (nuevo)" value={formatMoney(deudaGenerada)} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        <Card>
+          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Deuda total clientes</div>
+          <div className="font-mono font-extrabold text-xl" style={{ color: deudaTotalClientes > 0 ? C.danger : C.ink }}>{formatMoney(deudaTotalClientes)}</div>
+        </Card>
+        <Card>
+          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Envases en la calle</div>
+          <div className="font-mono font-extrabold text-xl">{envasesEnCalle}</div>
+        </Card>
+        <Card>
+          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Gastos ({rango})</div>
+          <div className="font-mono font-extrabold text-xl">{formatMoney(totalGastos)}</div>
+        </Card>
+        <Card>
+          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Balance ({rango})</div>
+          <div className="font-mono font-extrabold text-xl" style={{ color: (efectivo + mp - totalGastos) >= 0 ? C.success : C.danger }}>
+            {formatMoney(efectivo + mp - totalGastos)}
+          </div>
+        </Card>
+      </div>
+
+      <div className="text-xs font-bold mb-2" style={{ color: C.muted }}>Visitas ({rango})</div>
+      {visitasFiltradas.length === 0 ? (
+        <div className="text-xs" style={{ color: C.mutedLight }}>Sin visitas registradas en este período.</div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {visitasFiltradas.slice().reverse().slice(0, 8).map((v) => {
+            const cliente = db.clientes.find((c) => c.id === v.clienteId);
+            const rep = db.config.repartidores.find((r) => r.id === v.repartidorId);
+            return (
+              <Card key={v.id}>
+                <div className="flex items-center justify-between">
+                  <div className="font-bold text-sm">{cliente?.nombre || "Cliente eliminado"}</div>
+                  {v.vendio ? <Badge tone="success">{formatMoney(v.total)}</Badge> : <Badge tone="muted">No vendió</Badge>}
+                </div>
+                <div className="text-xs mt-0.5" style={{ color: C.muted }}>
+                  {fechaLegible(v.fecha)} · {rep?.nombre || "—"}
+                  {v.vendio && v.metodoPago && " · " + ({ efectivo: "Efectivo", mercadopago: "Mercado Pago", deuda: "Fiado" }[v.metodoPago] || "")}
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Clientes (admin) ---------- */
+function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
+  const [f, setF] = useState(
+    initial || {
+      nombre: "", direccion: "", telefono: "", notas: "",
+      diasVisita: [], repartidorId: repartidores[0]?.id || "",
+      pedidoHabitual: { b20: 0, b12: 0, sifon: 0, jugo: 0 },
+      envasesEnPoder: 0, orden: "", activo: true,
+    }
+  );
+  const [error, setError] = useState("");
+
+  function submit() {
+    if (!f.nombre.trim()) return setError("Ingresá el nombre del cliente.");
+    if (!f.direccion.trim()) return setError("Ingresá la dirección.");
+    if (f.diasVisita.length === 0) return setError("Elegí al menos un día de visita.");
+    if (isAdmin && !f.repartidorId) return setError("Asigná un repartidor.");
+    onSave(f);
+  }
+
+  return (
+    <div>
+      <Field label="Nombre *"><Input value={f.nombre} onChange={(e) => setF({ ...f, nombre: e.target.value })} placeholder="Ej: Familia Gómez" /></Field>
+      <Field label="Dirección *"><Input value={f.direccion} onChange={(e) => setF({ ...f, direccion: e.target.value })} placeholder="Calle 123" /></Field>
+      <Field label="Teléfono"><Input value={f.telefono} onChange={(e) => setF({ ...f, telefono: e.target.value })} placeholder="Ej: 261 555 5555" inputMode="tel" /></Field>
+      <Field label="Día(s) de visita *"><DayPills value={f.diasVisita} onChange={(v) => setF({ ...f, diasVisita: v })} /></Field>
+      {isAdmin && (
+        <Field label="Repartidor asignado *">
+          <select
+            value={f.repartidorId}
+            onChange={(e) => setF({ ...f, repartidorId: e.target.value })}
+            className="w-full rounded-xl px-3 py-2.5 text-sm outline-none"
+            style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}
+          >
+            <option value="">Elegir…</option>
+            {repartidores.map((r) => <option key={r.id} value={r.id}>{r.nombre}</option>)}
+          </select>
+        </Field>
+      )}
+      <Field label="Pedido habitual" hint="Se prellena en cada venta, se puede ajustar al momento.">
+        <div className="flex flex-col gap-2">
+          {PRODUCTOS.map((p) => (
+            <div key={p.key} className="flex items-center justify-between">
+              <span className="text-xs font-semibold">{p.label}</span>
+              <Stepper value={f.pedidoHabitual[p.key] || 0} onChange={(v) => setF({ ...f, pedidoHabitual: { ...f.pedidoHabitual, [p.key]: v } })} />
+            </div>
+          ))}
+        </div>
+      </Field>
+      {isAdmin && (
+        <Field label="Envases actualmente en poder del cliente">
+          <Input type="number" inputMode="numeric" value={f.envasesEnPoder} onChange={(e) => setF({ ...f, envasesEnPoder: Number(e.target.value) || 0 })} />
+        </Field>
+      )}
+      <Field label="Orden en el recorrido (opcional)" hint="Número más bajo = se visita antes.">
+        <Input type="number" inputMode="numeric" value={f.orden} onChange={(e) => setF({ ...f, orden: e.target.value })} placeholder="Ej: 1" />
+      </Field>
+      <Field label="Dato extra / notas"><Textarea rows={2} value={f.notas} onChange={(e) => setF({ ...f, notas: e.target.value })} placeholder="Ej: dejar en portón, perro suelto, etc." /></Field>
+      {error && <div className="text-xs font-semibold mb-2" style={{ color: C.danger }}>{error}</div>}
+      <div className="flex gap-2 mt-2">
+        <Btn variant="ghost" onClick={onCancel} full>Cancelar</Btn>
+        <Btn onClick={submit} full icon={Save}>Guardar</Btn>
+      </div>
+    </div>
+  );
+}
+
+function AdminClientes({ db, mutate }) {
+  const [busca, setBusca] = useState("");
+  const [sheet, setSheet] = useState(null); // null | 'nuevo' | cliente
+  const [confirmDel, setConfirmDel] = useState(null);
+
+  const lista = db.clientes
+    .filter((c) => c.nombre.toLowerCase().includes(busca.toLowerCase()) || c.direccion.toLowerCase().includes(busca.toLowerCase()))
+    .sort((a, b) => a.nombre.localeCompare(b.nombre));
+
+  function guardarCliente(f) {
+    const next = clone(db);
+    if (f.id) {
+      const i = next.clientes.findIndex((c) => c.id === f.id);
+      next.clientes[i] = { ...next.clientes[i], ...f };
+    } else {
+      next.clientes.push({ ...f, id: uid(), deudaAcumulada: 0, creadoEl: hoyISO() });
+    }
+    mutate(next);
+    setSheet(null);
+  }
+
+  function eliminarCliente(c) {
+    const next = clone(db);
+    next.clientes = next.clientes.filter((x) => x.id !== c.id);
+    mutate(next);
+    setConfirmDel(null);
+  }
+
+  return (
+    <div>
+      <div className="flex gap-2 mb-3">
+        <div className="flex-1 relative">
+          <Search size={16} color={C.mutedLight} style={{ position: "absolute", left: 10, top: 11 }} />
+          <input
+            value={busca}
+            onChange={(e) => setBusca(e.target.value)}
+            placeholder="Buscar cliente…"
+            className="w-full rounded-xl pl-8 pr-3 py-2.5 text-sm outline-none"
+            style={{ background: C.surface, border: `1px solid ${C.border}` }}
+          />
+        </div>
+        <Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo</Btn>
+      </div>
+
+      {lista.length === 0 ? (
+        <EmptyState icon={Users} title="Sin clientes todavía" text="Agregá el primer cliente para empezar a armar los recorridos." action={<Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo cliente</Btn>} />
+      ) : (
+        <div className="flex flex-col gap-2">
+          {lista.map((c) => {
+            const rep = db.config.repartidores.find((r) => r.id === c.repartidorId);
+            return (
+              <Card key={c.id}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1" onClick={() => setSheet(c)}>
+                    <div className="font-bold text-sm truncate">{c.nombre}</div>
+                    <div className="text-xs truncate" style={{ color: C.muted }}>{c.direccion}</div>
+                    <div className="flex flex-wrap gap-1 mt-1.5">
+                      {c.diasVisita.map((d) => <Badge key={d} tone="accent">{d.slice(0, 3)}</Badge>)}
+                      {rep && <Badge tone="muted">{rep.nombre}</Badge>}
+                      {c.deudaAcumulada > 0 && <Badge tone="danger">Debe {formatMoney(c.deudaAcumulada)}</Badge>}
+                      {c.envasesEnPoder > 0 && <Badge tone="warning">{c.envasesEnPoder} envases</Badge>}
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <button onClick={() => setSheet(c)} className="p-1.5 rounded-lg active:bg-black/5"><Edit2 size={15} color={C.muted} /></button>
+                    <button onClick={() => setConfirmDel(c)} className="p-1.5 rounded-lg active:bg-black/5"><Trash2 size={15} color={C.danger} /></button>
+                  </div>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      {sheet && (
+        <Sheet title={sheet === "nuevo" ? "Nuevo cliente" : "Editar cliente"} onClose={() => setSheet(null)}>
+          <ClienteForm
+            initial={sheet === "nuevo" ? null : sheet}
+            repartidores={db.config.repartidores}
+            isAdmin
+            onSave={guardarCliente}
+            onCancel={() => setSheet(null)}
+          />
+        </Sheet>
+      )}
+
+      {confirmDel && (
+        <Sheet title="Eliminar cliente" onClose={() => setConfirmDel(null)}>
+          <div className="text-sm mb-4">
+            ¿Seguro que querés eliminar a <b>{confirmDel.nombre}</b>? Podés deshacerlo después con el botón deshacer.
+          </div>
+          <div className="flex gap-2">
+            <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>Cancelar</Btn>
+            <Btn variant="danger" full onClick={() => eliminarCliente(confirmDel)}>Eliminar</Btn>
+          </div>
+        </Sheet>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Historial (admin) ---------- */
+function AdminHistorial({ db, mutate }) {
+  const [filtroRep, setFiltroRep] = useState("todos");
+  const [confirmDel, setConfirmDel] = useState(null);
+
+  const visitas = db.visitas
+    .filter((v) => filtroRep === "todos" || v.repartidorId === filtroRep)
+    .slice()
+    .reverse();
+
+  function borrarVisita(v) {
+    const next = clone(db);
+    next.visitas = next.visitas.filter((x) => x.id !== v.id);
+    const ci = next.clientes.findIndex((c) => c.id === v.clienteId);
+    if (ci >= 0) {
+      if (v.deudaGenerada) next.clientes[ci].deudaAcumulada = Math.max(0, (next.clientes[ci].deudaAcumulada || 0) - v.deudaGenerada);
+      if (v.deudaCobrada) next.clientes[ci].deudaAcumulada = (next.clientes[ci].deudaAcumulada || 0) + v.deudaCobrada;
+      if (v.envasesPrestados) next.clientes[ci].envasesEnPoder = Math.max(0, (next.clientes[ci].envasesEnPoder || 0) - v.envasesPrestados);
+    }
+    mutate(next);
+    setConfirmDel(null);
+  }
+
+  return (
+    <div>
+      <div className="flex gap-2 mb-3 overflow-x-auto">
+        <button onClick={() => setFiltroRep("todos")} className="px-3 py-1.5 rounded-lg text-xs font-bold flex-shrink-0" style={{ background: filtroRep === "todos" ? C.primary : C.surface, color: filtroRep === "todos" ? "#fff" : C.muted, border: `1px solid ${filtroRep === "todos" ? C.primary : C.border}` }}>Todos</button>
+        {db.config.repartidores.map((r) => (
+          <button key={r.id} onClick={() => setFiltroRep(r.id)} className="px-3 py-1.5 rounded-lg text-xs font-bold flex-shrink-0" style={{ background: filtroRep === r.id ? C.primary : C.surface, color: filtroRep === r.id ? "#fff" : C.muted, border: `1px solid ${filtroRep === r.id ? C.primary : C.border}` }}>{r.nombre}</button>
+        ))}
+      </div>
+
+      {visitas.length === 0 ? (
+        <EmptyState icon={ClipboardList} title="Sin recorridos registrados" text="Cuando los repartidores empiecen a visitar clientes, va a aparecer acá." />
+      ) : (
+        <div className="flex flex-col gap-2">
+          {visitas.map((v) => {
+            const cliente = db.clientes.find((c) => c.id === v.clienteId);
+            const rep = db.config.repartidores.find((r) => r.id === v.repartidorId);
+            return (
+              <Card key={v.id}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-bold text-sm">{cliente?.nombre || "Cliente eliminado"}</div>
+                    <div className="text-xs" style={{ color: C.muted }}>{fechaLegible(v.fecha)} · {rep?.nombre || "—"}</div>
+                    {v.vendio ? (
+                      <div className="text-xs mt-1">
+                        {v.items.filter((it) => it.cantidad > 0).map((it) => `${it.cantidad}× ${PRODUCTOS.find((p) => p.key === it.tipo)?.corto}`).join(", ")}
+                        {" — "}<span className="font-mono font-bold">{formatMoney(v.total)}</span>
+                      </div>
+                    ) : (
+                      <div className="text-xs mt-1" style={{ color: C.mutedLight }}>No vendió{v.notas ? " · " + v.notas : ""}</div>
+                    )}
+                    {v.deudaCobrada > 0 && <div className="text-xs mt-0.5" style={{ color: C.success }}>Cobró deuda: {formatMoney(v.deudaCobrada)}</div>}
+                    {v.envasesPrestados > 0 && <div className="text-xs mt-0.5" style={{ color: C.warning }}>Prestó {v.envasesPrestados} envase(s)</div>}
+                  </div>
+                  <button onClick={() => setConfirmDel(v)} className="p-1.5 rounded-lg active:bg-black/5 flex-shrink-0"><Trash2 size={15} color={C.danger} /></button>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      {confirmDel && (
+        <Sheet title="Eliminar visita" onClose={() => setConfirmDel(null)}>
+          <div className="text-sm mb-4">Se va a revertir el efecto en la deuda y los envases del cliente. Podés deshacerlo con el botón deshacer.</div>
+          <div className="flex gap-2">
+            <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>Cancelar</Btn>
+            <Btn variant="danger" full onClick={() => borrarVisita(confirmDel)}>Eliminar</Btn>
+          </div>
+        </Sheet>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Gastos (admin) ---------- */
+function AdminGastos({ db, mutate }) {
+  const [sheet, setSheet] = useState(false);
+  const [concepto, setConcepto] = useState("");
+  const [monto, setMonto] = useState("");
+  const [confirmDel, setConfirmDel] = useState(null);
+
+  function guardar() {
+    if (!concepto.trim() || !monto) return;
+    const next = clone(db);
+    next.gastos.push({ id: uid(), concepto, monto: Number(monto), fecha: hoyISO() });
+    mutate(next);
+    setConcepto(""); setMonto(""); setSheet(false);
+  }
+
+  function borrar(g) {
+    const next = clone(db);
+    next.gastos = next.gastos.filter((x) => x.id !== g.id);
+    mutate(next);
+    setConfirmDel(null);
+  }
+
+  const total = db.gastos.reduce((s, g) => s + g.monto, 0);
+  const lista = db.gastos.slice().reverse();
+
+  return (
+    <div>
+      <Card style={{ background: C.primaryDark, border: "none" }} className="mb-3 flex items-center justify-between">
+        <div>
+          <div className="text-xs font-bold uppercase" style={{ color: C.accentSoft, opacity: 0.8 }}>Total gastado</div>
+          <div className="font-mono font-extrabold text-xl" style={{ color: "#fff" }}>{formatMoney(total)}</div>
+        </div>
+        <Btn variant="accent" icon={Plus} onClick={() => setSheet(true)}>Gasto</Btn>
+      </Card>
+
+      {lista.length === 0 ? (
+        <EmptyState icon={Receipt} title="Sin gastos cargados" text="Registrá combustible, mantenimiento u otros gastos del negocio." />
+      ) : (
+        <div className="flex flex-col gap-2">
+          {lista.map((g) => (
+            <Card key={g.id} className="flex items-center justify-between">
+              <div>
+                <div className="font-bold text-sm">{g.concepto}</div>
+                <div className="text-xs" style={{ color: C.muted }}>{fechaLegible(g.fecha)}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="font-mono font-bold text-sm">{formatMoney(g.monto)}</div>
+                <button onClick={() => setConfirmDel(g)} className="p-1 rounded-lg active:bg-black/5"><Trash2 size={14} color={C.danger} /></button>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {sheet && (
+        <Sheet title="Nuevo gasto" onClose={() => setSheet(false)}>
+          <Field label="Concepto"><Input value={concepto} onChange={(e) => setConcepto(e.target.value)} placeholder="Ej: Nafta" /></Field>
+          <Field label="Monto"><Input type="number" inputMode="decimal" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder="0" /></Field>
+          <div className="flex gap-2 mt-2">
+            <Btn variant="ghost" full onClick={() => setSheet(false)}>Cancelar</Btn>
+            <Btn full onClick={guardar}>Guardar</Btn>
+          </div>
+        </Sheet>
+      )}
+
+      {confirmDel && (
+        <Sheet title="Eliminar gasto" onClose={() => setConfirmDel(null)}>
+          <div className="text-sm mb-4">¿Eliminar "{confirmDel.concepto}" por {formatMoney(confirmDel.monto)}?</div>
+          <div className="flex gap-2">
+            <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>Cancelar</Btn>
+            <Btn variant="danger" full onClick={() => borrar(confirmDel)}>Eliminar</Btn>
+          </div>
+        </Sheet>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Ajustes (admin) ---------- */
+function AdminAjustes({ db, mutate }) {
+  const [precios, setPrecios] = useState(db.config.precios);
+  const [nuevoRep, setNuevoRep] = useState("");
+  const [confirmDelRep, setConfirmDelRep] = useState(null);
+  const [pinActual, setPinActual] = useState("");
+  const [pinNuevo, setPinNuevo] = useState("");
+  const [pinMsg, setPinMsg] = useState("");
+
+  function guardarPrecios() {
+    const next = clone(db);
+    next.config.precios = { b20: Number(precios.b20) || 0, b12: Number(precios.b12) || 0, sifon: Number(precios.sifon) || 0, jugo: Number(precios.jugo) || 0 };
+    mutate(next);
+  }
+
+  function agregarRepartidor() {
+    if (!nuevoRep.trim()) return;
+    const next = clone(db);
+    next.config.repartidores.push({ id: uid(), nombre: nuevoRep.trim() });
+    mutate(next);
+    setNuevoRep("");
+  }
+
+  function eliminarRepartidor(r) {
+    const next = clone(db);
+    next.config.repartidores = next.config.repartidores.filter((x) => x.id !== r.id);
+    mutate(next);
+    setConfirmDelRep(null);
+  }
+
+  function cambiarPin() {
+    if (pinActual !== db.config.adminPin) return setPinMsg("El PIN actual no coincide.");
+    if (pinNuevo.length < 4) return setPinMsg("El nuevo PIN debe tener al menos 4 dígitos.");
+    const next = clone(db);
+    next.config.adminPin = pinNuevo;
+    mutate(next);
+    setPinActual(""); setPinNuevo("");
+    setPinMsg("PIN actualizado ✓");
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Precios de envases</div>
+        <Card>
+          {PRODUCTOS.map((p) => (
+            <div key={p.key} className="flex items-center justify-between mb-2 last:mb-0">
+              <span className="text-sm font-semibold">{p.label}</span>
+              <Input
+                type="number" inputMode="decimal"
+                value={precios[p.key]}
+                onChange={(e) => setPrecios({ ...precios, [p.key]: e.target.value })}
+                style={{ width: 110, textAlign: "right" }}
+              />
+            </div>
+          ))}
+          <Btn full size="sm" onClick={guardarPrecios} icon={Save}>Guardar precios</Btn>
+        </Card>
+      </div>
+
+      <div>
+        <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Repartidores</div>
+        <Card>
+          {db.config.repartidores.length === 0 && <div className="text-xs mb-2" style={{ color: C.mutedLight }}>Agregá al menos uno para poder asignar clientes.</div>}
+          {db.config.repartidores.map((r) => (
+            <div key={r.id} className="flex items-center justify-between py-1.5">
+              <span className="text-sm font-semibold">{r.nombre}</span>
+              <button onClick={() => setConfirmDelRep(r)}><Trash2 size={15} color={C.danger} /></button>
+            </div>
+          ))}
+          <div className="flex gap-2 mt-2">
+            <Input value={nuevoRep} onChange={(e) => setNuevoRep(e.target.value)} placeholder="Nombre del repartidor" />
+            <Btn onClick={agregarRepartidor} icon={Plus}>Agregar</Btn>
+          </div>
+        </Card>
+      </div>
+
+      <div>
+        <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Seguridad</div>
+        <Card>
+          <Field label="PIN actual"><Input type="password" inputMode="numeric" value={pinActual} onChange={(e) => setPinActual(e.target.value.replace(/\D/g, ""))} /></Field>
+          <Field label="PIN nuevo"><Input type="password" inputMode="numeric" value={pinNuevo} onChange={(e) => setPinNuevo(e.target.value.replace(/\D/g, ""))} /></Field>
+          {pinMsg && <div className="text-xs font-semibold mb-2" style={{ color: pinMsg.includes("✓") ? C.success : C.danger }}>{pinMsg}</div>}
+          <Btn full size="sm" onClick={cambiarPin}>Cambiar PIN</Btn>
+        </Card>
+      </div>
+
+      {confirmDelRep && (
+        <Sheet title="Eliminar repartidor" onClose={() => setConfirmDelRep(null)}>
+          <div className="text-sm mb-4">¿Eliminar a <b>{confirmDelRep.nombre}</b>? Los clientes que tenía asignados van a quedar sin repartidor.</div>
+          <div className="flex gap-2">
+            <Btn variant="ghost" full onClick={() => setConfirmDelRep(null)}>Cancelar</Btn>
+            <Btn variant="danger" full onClick={() => eliminarRepartidor(confirmDelRep)}>Eliminar</Btn>
+          </div>
+        </Sheet>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   APP REPARTIDOR
+   ============================================================ */
+function RepartidorApp({ db, mutate, repartidor, onLogout }) {
+  const [vista, setVista] = useState("inicio"); // inicio | clientes | recorrido
+
+  const misClientes = db.clientes.filter((c) => c.repartidorId === repartidor.id);
+  const hoy = diaSemanaHoy();
+  const deHoy = misClientes.filter((c) => c.diasVisita.includes(hoy)).sort((a, b) => (Number(a.orden) || 999) - (Number(b.orden) || 999) || a.nombre.localeCompare(b.nombre));
+  const visitasHoy = db.visitas.filter((v) => v.repartidorId === repartidor.id && v.fecha === hoyISO());
+  const idsVisitados = new Set(visitasHoy.map((v) => v.clienteId));
+  const pendientes = deHoy.filter((c) => !idsVisitados.has(c.id));
+  const enProgreso = idsVisitados.size > 0 && idsVisitados.size < deHoy.length;
+
+  return (
+    <Screen>
+      <TopBar
+        title={repartidor.nombre}
+        subtitle={fechaLegible(hoyISO()) + " · " + hoy}
+        tone="dark"
+        right={
+          <div className="flex items-center gap-1">
+            <span className="flex items-center gap-1 px-1.5 mr-1">
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: C.accent }} />
+              <span className="text-[10px] font-bold" style={{ color: C.accentSoft }}>en vivo</span>
+            </span>
+            <button onClick={onLogout} className="p-2 rounded-full active:bg-white/10"><LogOut size={16} color="#fff" /></button>
+          </div>
+        }
+      />
+      <div className="flex-1 overflow-y-auto px-4 py-4">
+        {vista === "inicio" && (
+          <RepartidorInicio
+            deHoy={deHoy}
+            pendientes={pendientes}
+            visitadosCount={idsVisitados.size}
+            enProgreso={enProgreso}
+            onEmpezar={() => setVista("recorrido")}
+          />
+        )}
+        {vista === "clientes" && <RepartidorClientes db={db} mutate={mutate} repartidor={repartidor} />}
+        {vista === "recorrido" && (
+          <RepartidorRecorrido
+            db={db} mutate={mutate} repartidor={repartidor}
+            clientes={deHoy} visitadosIds={idsVisitados}
+            onSalir={() => setVista("inicio")}
+          />
+        )}
+      </div>
+      {vista !== "recorrido" && (
+        <div className="flex-shrink-0 flex" style={{ background: C.surface, borderTop: `1px solid ${C.border}` }}>
+          {[["inicio", "Inicio", HomeIcon], ["clientes", "Mis clientes", Users]].map(([key, label, Icon]) => {
+            const active = vista === key;
+            return (
+              <button key={key} onClick={() => setVista(key)} className="flex-1 flex flex-col items-center gap-0.5 py-2.5">
+                <Icon size={18} color={active ? C.primary : C.mutedLight} strokeWidth={active ? 2.4 : 2} />
+                <span className="text-xs font-semibold" style={{ color: active ? C.primary : C.mutedLight }}>{label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </Screen>
+  );
+}
+
+function RepartidorInicio({ deHoy, pendientes, visitadosCount, enProgreso, onEmpezar }) {
+  return (
+    <div className="flex flex-col items-center justify-center text-center pt-10">
+      <div className="w-20 h-20 rounded-3xl flex items-center justify-center mb-4" style={{ background: C.primaryDark }}>
+        <Truck size={34} color="#fff" />
+      </div>
+      {deHoy.length === 0 ? (
+        <>
+          <div className="font-bold text-base mb-1">No tenés clientes para hoy</div>
+          <div className="text-xs mb-6" style={{ color: C.muted }}>Revisá "Mis clientes" para ver tus días de visita.</div>
+        </>
+      ) : (
+        <>
+          <div className="font-extrabold text-xl mb-1">{deHoy.length} cliente{deHoy.length !== 1 ? "s" : ""} hoy</div>
+          <div className="text-xs mb-6" style={{ color: C.muted }}>
+            {visitadosCount > 0 ? `${visitadosCount} de ${deHoy.length} ya visitados` : "Todavía no arrancaste el recorrido"}
+          </div>
+          <Btn size="lg" onClick={onEmpezar} icon={pendientes.length === 0 ? CheckCircle2 : Truck}>
+            {pendientes.length === 0 ? "Ver recorrido completo" : enProgreso ? "Continuar recorrido" : "Empezar recorrido"}
+          </Btn>
+        </>
+      )}
+    </div>
+  );
+}
+
+function RepartidorClientes({ db, mutate, repartidor }) {
+  const [sheet, setSheet] = useState(null);
+  const misClientes = db.clientes.filter((c) => c.repartidorId === repartidor.id).sort((a, b) => a.nombre.localeCompare(b.nombre));
+
+  function guardar(f) {
+    const next = clone(db);
+    if (f.id) {
+      const i = next.clientes.findIndex((c) => c.id === f.id);
+      next.clientes[i] = { ...next.clientes[i], ...f, repartidorId: repartidor.id };
+    } else {
+      next.clientes.push({ ...f, id: uid(), repartidorId: repartidor.id, deudaAcumulada: 0, envasesEnPoder: 0, creadoEl: hoyISO() });
+    }
+    mutate(next);
+    setSheet(null);
+  }
+
+  return (
+    <div>
+      <div className="flex justify-end mb-3">
+        <Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo cliente</Btn>
+      </div>
+      {misClientes.length === 0 ? (
+        <EmptyState icon={Users} title="Todavía no tenés clientes" text="Agregá tu primer cliente para que aparezca en tu recorrido." action={<Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo cliente</Btn>} />
+      ) : (
+        <div className="flex flex-col gap-2">
+          {misClientes.map((c) => (
+            <Card key={c.id} onClick={() => setSheet(c)}>
+              <div className="font-bold text-sm">{c.nombre}</div>
+              <div className="text-xs" style={{ color: C.muted }}>{c.direccion}</div>
+              <div className="flex flex-wrap gap-1 mt-1.5">
+                {c.diasVisita.map((d) => <Badge key={d} tone="accent">{d.slice(0, 3)}</Badge>)}
+                {c.envasesEnPoder > 0 && <Badge tone="warning">{c.envasesEnPoder} envases</Badge>}
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+      {sheet && (
+        <Sheet title={sheet === "nuevo" ? "Nuevo cliente" : "Editar cliente"} onClose={() => setSheet(null)}>
+          <ClienteForm initial={sheet === "nuevo" ? null : sheet} repartidores={db.config.repartidores} isAdmin={false} onSave={guardar} onCancel={() => setSheet(null)} />
+        </Sheet>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Recorrido activo (repartidor) ---------- */
+function RepartidorRecorrido({ db, mutate, repartidor, clientes, visitadosIds, onSalir }) {
+  const [activo, setActivo] = useState(null);
+  const pendientes = clientes.filter((c) => !visitadosIds.has(c.id));
+  const hechos = clientes.filter((c) => visitadosIds.has(c.id));
+
+  function registrarVisita(cliente, visita) {
+    const next = clone(db);
+    next.visitas.push(visita);
+    const ci = next.clientes.findIndex((c) => c.id === cliente.id);
+    if (ci >= 0) {
+      let deuda = next.clientes[ci].deudaAcumulada || 0;
+      deuda -= visita.deudaCobrada || 0;
+      deuda += visita.deudaGenerada || 0;
+      next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
+      next.clientes[ci].envasesEnPoder = Math.max(0, (next.clientes[ci].envasesEnPoder || 0) + (visita.envasesPrestados || 0));
+    }
+    mutate(next, { history: false });
+    setActivo(null);
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <button onClick={onSalir} className="text-xs font-bold flex items-center gap-1" style={{ color: C.primary }}><ArrowLeft size={14} /> Volver a inicio</button>
+        <Badge tone="accent">{hechos.length}/{clientes.length}</Badge>
+      </div>
+
+      {pendientes.length > 0 && (
+        <>
+          <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Pendientes</div>
+          <div className="flex flex-col gap-2 mb-4">
+            {pendientes.map((c) => <ClienteVisitaCard key={c.id} cliente={c} onClick={() => setActivo(c)} />)}
+          </div>
+        </>
+      )}
+
+      {hechos.length > 0 && (
+        <>
+          <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Visitados</div>
+          <div className="flex flex-col gap-2">
+            {hechos.map((c) => <ClienteVisitaCard key={c.id} cliente={c} hecho />)}
+          </div>
+        </>
+      )}
+
+      {pendientes.length === 0 && (
+        <Card style={{ background: C.successBg, border: "none" }} className="mt-3 flex items-center gap-2">
+          <CheckCircle2 size={20} color={C.success} />
+          <div className="text-sm font-bold" style={{ color: C.success }}>¡Recorrido completo!</div>
+        </Card>
+      )}
+
+      {activo && (
+        <VisitaSheet
+          cliente={activo}
+          precios={db.config.precios}
+          onClose={() => setActivo(null)}
+          onGuardar={(visita) => registrarVisita(activo, visita)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ClienteVisitaCard({ cliente, hecho, onClick }) {
+  return (
+    <Card onClick={onClick} style={{ opacity: hecho ? 0.65 : 1 }}>
+      <div className="flex items-start gap-2">
+        <div className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5" style={{ background: hecho ? C.successBg : C.accentSoft }}>
+          {hecho ? <CheckCircle2 size={15} color={C.success} /> : <Circle size={15} color={C.primary} />}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="font-bold text-sm">{cliente.nombre}</div>
+          <div className="text-xs" style={{ color: C.muted }}>{cliente.direccion}</div>
+          <div className="flex flex-wrap gap-1 mt-1">
+            {cliente.deudaAcumulada > 0 && <Badge tone="danger">Debe {formatMoney(cliente.deudaAcumulada)}</Badge>}
+            {cliente.envasesEnPoder > 0 && <Badge tone="warning">{cliente.envasesEnPoder} envases</Badge>}
+            {cliente.notas && <Badge tone="muted">Nota</Badge>}
+          </div>
+        </div>
+        <div className="flex gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+          {cliente.telefono && (
+            <a href={`tel:${cliente.telefono}`} className="p-1.5 rounded-lg" style={{ background: C.bg }}><Phone size={13} color={C.primary} /></a>
+          )}
+          <a href={`https://maps.google.com/?q=${encodeURIComponent(cliente.direccion)}`} target="_blank" rel="noreferrer" className="p-1.5 rounded-lg" style={{ background: C.bg }}><MapPin size={13} color={C.primary} /></a>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+const NOTAS_RAPIDAS = ["No estaba", "No quiso hoy", "Volver más tarde"];
+
+function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
+  const [vendio, setVendio] = useState(true);
+  const [items, setItems] = useState(
+    PRODUCTOS.map((p) => ({ tipo: p.key, cantidad: cliente.pedidoHabitual?.[p.key] || 0, precioUnitario: precios[p.key] || 0 }))
+  );
+  const [metodoPago, setMetodoPago] = useState("efectivo");
+  const [montoPagado, setMontoPagado] = useState(null); // null = total completo
+  const [cobrarDeuda, setCobrarDeuda] = useState(false);
+  const [montoDeuda, setMontoDeuda] = useState(cliente.deudaAcumulada || 0);
+  const [metodoDeuda, setMetodoDeuda] = useState("efectivo");
+  const [prestoEnvase, setPrestoEnvase] = useState(false);
+  const [tipoPrestamo, setTipoPrestamo] = useState("b20");
+  const [cantidadPrestamo, setCantidadPrestamo] = useState(1);
+  const [notas, setNotas] = useState("");
+
+  const total = totalPedido(items);
+  const pagadoFinal = montoPagado === null ? total : Number(montoPagado) || 0;
+  const restante = Math.max(0, total - pagadoFinal);
+
+  function guardar() {
+    const visita = {
+      id: uid(),
+      clienteId: cliente.id,
+      repartidorId: cliente.repartidorId,
+      fecha: hoyISO(),
+      diaSemana: diaSemanaHoy(),
+      vendio,
+      items: vendio ? items : [],
+      total: vendio ? total : 0,
+      metodoPago: vendio ? metodoPago : null,
+      pagos: vendio && metodoPago !== "deuda" ? { [metodoPago]: pagadoFinal } : {},
+      deudaGenerada: vendio && metodoPago === "deuda" ? total : (vendio ? restante : 0),
+      deudaCobrada: cobrarDeuda ? Number(montoDeuda) || 0 : 0,
+      metodoDeuda: cobrarDeuda ? metodoDeuda : null,
+      envasesPrestados: prestoEnvase ? Number(cantidadPrestamo) || 0 : 0,
+      tipoPrestamo: prestoEnvase ? tipoPrestamo : null,
+      notas,
+      timestamp: Date.now(),
+    };
+    if (visita.deudaCobrada) {
+      visita.pagos = { ...visita.pagos, [metodoDeuda]: (visita.pagos[metodoDeuda] || 0) + visita.deudaCobrada };
+    }
+    onGuardar(visita);
+  }
+
+  return (
+    <Sheet
+      title={cliente.nombre}
+      onClose={onClose}
+      footer={<Btn full size="lg" onClick={guardar} icon={Check}>Guardar visita</Btn>}
+    >
+      <div className="text-xs mb-3" style={{ color: C.muted }}>{cliente.direccion}</div>
+
+      {cliente.deudaAcumulada > 0 && (
+        <Card style={{ background: C.dangerBg, border: "none" }} className="mb-3">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs font-bold" style={{ color: C.danger }}>Debe {formatMoney(cliente.deudaAcumulada)} de antes</div>
+            <button
+              onClick={() => setCobrarDeuda(!cobrarDeuda)}
+              className="px-2.5 py-1 rounded-lg text-xs font-bold"
+              style={{ background: cobrarDeuda ? C.danger : "#fff", color: cobrarDeuda ? "#fff" : C.danger, border: `1px solid ${C.danger}` }}
+            >
+              {cobrarDeuda ? "Cobrando" : "Cobrar deuda"}
+            </button>
+          </div>
+          {cobrarDeuda && (
+            <div className="flex gap-2 items-center">
+              <Input type="number" inputMode="decimal" value={montoDeuda} onChange={(e) => setMontoDeuda(e.target.value)} style={{ flex: 1 }} />
+              <select value={metodoDeuda} onChange={(e) => setMetodoDeuda(e.target.value)} className="rounded-xl px-2 py-2.5 text-xs" style={{ background: "#fff", border: `1px solid ${C.border}` }}>
+                <option value="efectivo">Efectivo</option>
+                <option value="mercadopago">Mercado Pago</option>
+              </select>
+            </div>
+          )}
+        </Card>
+      )}
+
+      <div className="flex gap-2 mb-4">
+        <button onClick={() => setVendio(true)} className="flex-1 py-3 rounded-xl font-bold text-sm" style={{ background: vendio ? C.success : C.bg, color: vendio ? "#fff" : C.muted }}>Sí vendió</button>
+        <button onClick={() => setVendio(false)} className="flex-1 py-3 rounded-xl font-bold text-sm" style={{ background: !vendio ? C.danger : C.bg, color: !vendio ? "#fff" : C.muted }}>No vendió</button>
+      </div>
+
+      {vendio ? (
+        <>
+          <div className="flex flex-col gap-2 mb-3">
+            {PRODUCTOS.map((p, idx) => (
+              <div key={p.key} className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-semibold">{p.label}</div>
+                  <div className="text-xs font-mono" style={{ color: C.mutedLight }}>{formatMoney(precios[p.key] || 0)} c/u</div>
+                </div>
+                <Stepper value={items[idx].cantidad} onChange={(v) => setItems(items.map((it, i) => i === idx ? { ...it, cantidad: v } : it))} />
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center justify-between mb-3 pt-2" style={{ borderTop: `1px dashed ${C.border}` }}>
+            <span className="text-sm font-bold">Total</span>
+            <span className="font-mono font-extrabold text-lg">{formatMoney(total)}</span>
+          </div>
+          <Field label="Forma de pago">
+            <div className="flex gap-2">
+              {[["efectivo", "Efectivo", Banknote], ["mercadopago", "Mercado Pago", CreditCard], ["deuda", "Fía (deuda)", HandCoins]].map(([k, l, Icon]) => (
+                <button key={k} onClick={() => setMetodoPago(k)} className="flex-1 flex flex-col items-center gap-1 py-2 rounded-xl" style={{ background: metodoPago === k ? C.primary : C.bg, color: metodoPago === k ? "#fff" : C.muted }}>
+                  <Icon size={16} />
+                  <span className="text-xs font-bold text-center">{l}</span>
+                </button>
+              ))}
+            </div>
+          </Field>
+          {metodoPago !== "deuda" && (
+            <Field label="Monto pagado ahora" hint={restante > 0 ? `Queda pendiente ${formatMoney(restante)}, se suma a la deuda.` : null}>
+              <Input type="number" inputMode="decimal" value={montoPagado === null ? total : montoPagado} onChange={(e) => setMontoPagado(e.target.value)} />
+            </Field>
+          )}
+        </>
+      ) : (
+        <Field label="Motivo (opcional)">
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {NOTAS_RAPIDAS.map((n) => (
+              <button key={n} onClick={() => setNotas(n)} className="px-2.5 py-1 rounded-lg text-xs font-semibold" style={{ background: notas === n ? C.primary : C.bg, color: notas === n ? "#fff" : C.muted }}>{n}</button>
+            ))}
+          </div>
+        </Field>
+      )}
+
+      <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.border}` }}>
+        <button onClick={() => setPrestoEnvase(!prestoEnvase)} className="flex items-center justify-between w-full">
+          <span className="text-xs font-bold" style={{ color: C.muted }}>¿Prestó algún envase? (extra)</span>
+          <div className="w-9 h-5 rounded-full flex items-center px-0.5" style={{ background: prestoEnvase ? C.primary : C.border, justifyContent: prestoEnvase ? "flex-end" : "flex-start" }}>
+            <div className="w-4 h-4 rounded-full bg-white" />
+          </div>
+        </button>
+        {prestoEnvase && (
+          <div className="flex items-center gap-2 mt-2">
+            <select value={tipoPrestamo} onChange={(e) => setTipoPrestamo(e.target.value)} className="flex-1 rounded-xl px-2 py-2 text-xs" style={{ background: C.bg, border: `1px solid ${C.border}` }}>
+              {PRODUCTOS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+            </select>
+            <Stepper value={cantidadPrestamo} onChange={setCantidadPrestamo} min={1} />
+          </div>
+        )}
+      </div>
+
+      {vendio && (
+        <Field label="Notas de la visita">
+          <Textarea rows={2} value={notas} onChange={(e) => setNotas(e.target.value)} />
+        </Field>
+      )}
+    </Sheet>
+  );
+}
+
+/* ============================================================
+   RAÍZ DE LA APLICACIÓN
+   ============================================================ */
+export default function App() {
+  const [loading, setLoading] = useState(true);
+  const [db, setDb] = useState({ clientes: [], visitas: [], gastos: [], config: clone(DEFAULT_CONFIG) });
+  const [profile, setProfile] = useState(null); // null(cargando) | 'picker' | {type:'admin'} | {type:'repartidor', id}
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [connError, setConnError] = useState(null);
+
+  const pastRef = useRef([]);
+  const futureRef = useRef([]);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+
+  useEffect(() => {
+    const loaded = new Set();
+    function markLoaded(key) {
+      loaded.add(key);
+      if (loaded.size === 4) {
+        setProfile(getLocalProfile() || "picker");
+        setLoading(false);
+      }
+    }
+    const unsubs = [
+      subscribeDoc("clientes", [], (v) => { setDb((p) => ({ ...p, clientes: v })); markLoaded("clientes"); setConnError(null); }, setConnError),
+      subscribeDoc("visitas", [], (v) => { setDb((p) => ({ ...p, visitas: v })); markLoaded("visitas"); setConnError(null); }, setConnError),
+      subscribeDoc("gastos", [], (v) => { setDb((p) => ({ ...p, gastos: v })); markLoaded("gastos"); setConnError(null); }, setConnError),
+      subscribeDoc("config", clone(DEFAULT_CONFIG), (v) => { setDb((p) => ({ ...p, config: v })); markLoaded("config"); setConnError(null); }, setConnError),
+    ];
+    return () => unsubs.forEach((u) => u());
+  }, []);
+
+  function persistChanged(prevDb, nextDb) {
+    if (nextDb.clientes !== prevDb.clientes) dbSet("clientes", nextDb.clientes);
+    if (nextDb.visitas !== prevDb.visitas) dbSet("visitas", nextDb.visitas);
+    if (nextDb.gastos !== prevDb.gastos) dbSet("gastos", nextDb.gastos);
+    if (nextDb.config !== prevDb.config) dbSet("config", nextDb.config);
+  }
+
+  const mutate = useCallback((nextDb, opts = { history: true }) => {
+    setDb((prevDb) => {
+      if (opts.history) {
+        pastRef.current = [...pastRef.current.slice(-29), prevDb];
+        futureRef.current = [];
+        setCanUndo(true);
+        setCanRedo(false);
+      }
+      persistChanged(prevDb, nextDb);
+      return nextDb;
+    });
+  }, []);
+
+  function undo() {
+    if (!pastRef.current.length) return;
+    setDb((current) => {
+      const prev = pastRef.current[pastRef.current.length - 1];
+      pastRef.current = pastRef.current.slice(0, -1);
+      futureRef.current = [current, ...futureRef.current].slice(0, 30);
+      persistChanged(current, prev);
+      setCanUndo(pastRef.current.length > 0);
+      setCanRedo(true);
+      return prev;
+    });
+  }
+  function redo() {
+    if (!futureRef.current.length) return;
+    setDb((current) => {
+      const next = futureRef.current[0];
+      futureRef.current = futureRef.current.slice(1);
+      pastRef.current = [...pastRef.current, current].slice(-30);
+      persistChanged(current, next);
+      setCanRedo(futureRef.current.length > 0);
+      setCanUndo(true);
+      return next;
+    });
+  }
+
+  function elegirAdmin() { setProfile({ type: "admin" }); setAdminUnlocked(false); }
+  function elegirRepartidor(r) {
+    const p = { type: "repartidor", id: r.id };
+    setProfile(p);
+    setLocalProfile(p);
+  }
+  function desloguear() {
+    setProfile("picker");
+    setAdminUnlocked(false);
+    setLocalProfile(null);
+  }
+  function volverAlPicker() { setProfile("picker"); }
+
+  if (connError) {
+    return (
+      <Screen>
+        <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
+          <WifiOff size={28} color={C.danger} />
+          <div className="text-sm font-bold mt-2">No se pudo conectar a la base de datos</div>
+          <div className="text-xs mt-1" style={{ color: C.muted }}>
+            Revisá que hayas pegado tus credenciales reales de Firebase en <code>src/firebaseConfig.js</code> y que Firestore esté creado y en modo de prueba.
+          </div>
+          <div className="text-[11px] mt-3 font-mono" style={{ color: C.mutedLight }}>{String(connError.message || connError)}</div>
+        </div>
+      </Screen>
+    );
+  }
+
+  if (loading || profile === null) {
+    return (
+      <Screen>
+        <div className="flex-1 flex flex-col items-center justify-center">
+          <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-3 animate-pulse" style={{ background: C.primaryDark }}>
+            <BrandMark size={26} />
+          </div>
+          <div className="text-xs" style={{ color: C.muted }}>Cargando…</div>
+        </div>
+      </Screen>
+    );
+  }
+
+  if (profile === "picker") {
+    return <ProfileSelect config={db.config} onPickAdmin={elegirAdmin} onPickRepartidor={elegirRepartidor} />;
+  }
+
+  if (profile.type === "admin") {
+    if (!adminUnlocked) {
+      return (
+        <AdminGate
+          config={db.config}
+          onBack={volverAlPicker}
+          onUnlock={() => setAdminUnlocked(true)}
+          onSetPin={(pin) => {
+            mutate({ ...db, config: { ...db.config, adminPin: pin } });
+            setAdminUnlocked(true);
+          }}
+        />
+      );
+    }
+    return (
+      <AdminApp
+        db={db}
+        mutate={mutate}
+        onLogout={desloguear}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        undo={undo}
+        redo={redo}
+      />
+    );
+  }
+
+  if (profile.type === "repartidor") {
+    const rep = db.config.repartidores.find((r) => r.id === profile.id);
+    if (!rep) {
+      return (
+        <Screen>
+          <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
+            <AlertCircle size={28} color={C.danger} />
+            <div className="text-sm font-bold mt-2">Tu perfil ya no existe</div>
+            <div className="text-xs mb-4" style={{ color: C.muted }}>Puede que el administrador lo haya eliminado.</div>
+            <Btn onClick={desloguear}>Volver a elegir perfil</Btn>
+          </div>
+        </Screen>
+      );
+    }
+    return <RepartidorApp db={db} mutate={mutate} repartidor={rep} onLogout={desloguear} />;
+  }
+
+  return null;
+}
