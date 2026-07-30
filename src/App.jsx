@@ -82,6 +82,17 @@ function clone(o) {
 function totalPedido(items) {
   return items.reduce((s, it) => s + it.cantidad * it.precioUnitario, 0);
 }
+function envasesVacio() {
+  return { b20: 0, b12: 0, sifon: 0, jugo: 0 };
+}
+function totalEnvasesPrestados(ep) {
+  if (!ep) return 0;
+  return PRODUCTOS.reduce((s, p) => s + (ep[p.key] || 0), 0);
+}
+function textoEnvasesPrestados(ep) {
+  if (!ep) return "";
+  return PRODUCTOS.filter((p) => (ep[p.key] || 0) > 0).map((p) => `${ep[p.key]}×${p.corto}`).join(", ");
+}
 
 /* ============================================================
    ALMACENAMIENTO PERSISTENTE (Firebase Firestore)
@@ -299,57 +310,22 @@ function Stepper({ value, onChange, min = 0 }) {
   );
 }
 
-function Sheet({
-  title,
-  onClose,
-  children,
-  footer,
-  closeOnBackdrop = false,
-}) {
-  function handleBackdropClick(e) {
-    // Solo cierra al tocar afuera cuando se habilita explícitamente.
-    if (closeOnBackdrop && e.target === e.currentTarget) {
-      onClose();
-    }
-  }
-
+function Sheet({ title, onClose, children, footer, closeOnBackdrop = true }) {
   return (
-    <div
-      className="absolute inset-0 z-50 flex flex-col justify-end"
-      style={{ background: "rgba(11,43,60,0.45)" }}
-      onClick={handleBackdropClick}
-    >
+    <div className="absolute inset-0 z-50 flex flex-col justify-end" style={{ background: "rgba(11,43,60,0.45)" }} onClick={closeOnBackdrop ? onClose : undefined}>
       <div
+        onClick={(e) => e.stopPropagation()}
         className="rounded-t-3xl flex flex-col"
         style={{ background: C.surface, maxHeight: "88%" }}
       >
-        <div
-          className="flex items-center justify-between px-4 py-3 flex-shrink-0"
-          style={{ borderBottom: `1px solid ${C.border}` }}
-        >
+        <div className="flex items-center justify-between px-4 py-3 flex-shrink-0" style={{ borderBottom: `1px solid ${C.border}` }}>
           <div className="font-extrabold text-base">{title}</div>
-
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1 rounded-full active:bg-black/5"
-          >
+          <button onClick={onClose} className="p-1 rounded-full active:bg-black/5">
             <X size={20} color={C.muted} />
           </button>
         </div>
-
-        <div className="overflow-y-auto px-4 py-3">
-          {children}
-        </div>
-
-        {footer && (
-          <div
-            className="px-4 py-3 flex-shrink-0"
-            style={{ borderTop: `1px solid ${C.border}` }}
-          >
-            {footer}
-          </div>
-        )}
+        <div className="overflow-y-auto px-4 py-3">{children}</div>
+        {footer && <div className="px-4 py-3 flex-shrink-0" style={{ borderTop: `1px solid ${C.border}` }}>{footer}</div>}
       </div>
     </div>
   );
@@ -615,7 +591,7 @@ function AdminDashboard({ db }) {
   const totalGastos = gastosFiltrados.reduce((s, g) => s + g.monto, 0);
 
   const deudaTotalClientes = db.clientes.reduce((s, c) => s + (c.deudaAcumulada || 0), 0);
-  const envasesEnCalle = db.clientes.reduce((s, c) => s + (c.envasesEnPoder || 0), 0);
+  const envasesEnCalle = db.clientes.reduce((s, c) => s + totalEnvasesPrestados(c.envasesPrestados), 0);
 
   const preciosSinConfigurar = Object.values(db.config.precios).some((p) => !p);
 
@@ -648,6 +624,34 @@ function AdminDashboard({ db }) {
         <Meter label="Mercado Pago" value={formatMoney(mp)} />
         <Meter label="Fiado (nuevo)" value={formatMoney(deudaGenerada)} />
       </div>
+
+      <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Por repartidor ({rango})</div>
+      {db.config.repartidores.length === 0 ? (
+        <div className="text-xs mb-4" style={{ color: C.mutedLight }}>Agregá repartidores en Ajustes para ver el desglose.</div>
+      ) : (
+        <div className="flex flex-col gap-2 mb-4">
+          {db.config.repartidores.map((r) => {
+            const vr = visitasFiltradas.filter((v) => v.repartidorId === r.id);
+            const fact = vr.reduce((s, v) => s + (v.total || 0), 0);
+            const ef = vr.reduce((s, v) => s + (v.pagos?.efectivo || 0), 0);
+            const mpr = vr.reduce((s, v) => s + (v.pagos?.mercadopago || 0), 0);
+            const fiado = vr.reduce((s, v) => s + (v.deudaGenerada || 0), 0);
+            return (
+              <Card key={r.id}>
+                <div className="flex items-center justify-between mb-1.5">
+                  <div className="font-bold text-sm flex items-center gap-1.5"><Truck size={14} color={C.primary} />{r.nombre}</div>
+                  <div className="font-mono font-extrabold text-sm">{formatMoney(fact)}</div>
+                </div>
+                <div className="flex gap-1.5 flex-wrap">
+                  <Badge tone="success">Efectivo {formatMoney(ef)}</Badge>
+                  <Badge tone="accent">MP {formatMoney(mpr)}</Badge>
+                  <Badge tone={fiado > 0 ? "danger" : "muted"}>Fió {formatMoney(fiado)}</Badge>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3 mb-4">
         <Card>
@@ -699,14 +703,21 @@ function AdminDashboard({ db }) {
 
 /* ---------- Clientes (admin) ---------- */
 function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
-  const [f, setF] = useState(
-    initial || {
+  const [f, setF] = useState(() => {
+    if (initial) {
+      return {
+        ...initial,
+        envasesPrestados: initial.envasesPrestados || envasesVacio(),
+        maquinaFrioCalor: initial.maquinaFrioCalor ?? false,
+      };
+    }
+    return {
       nombre: "", direccion: "", telefono: "", notas: "",
       diasVisita: [], repartidorId: repartidores[0]?.id || "",
-      pedidoHabitual: { b20: 0, b12: 0, sifon: 0, jugo: 0 },
-      envasesEnPoder: 0, orden: "", activo: true,
-    }
-  );
+      envasesPrestados: envasesVacio(), maquinaFrioCalor: false,
+      orden: "", activo: true,
+    };
+  });
   const [error, setError] = useState("");
 
   function submit() {
@@ -736,19 +747,22 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
           </select>
         </Field>
       )}
-      <Field label="Pedido habitual" hint="Se prellena en cada venta, se puede ajustar al momento.">
-        <div className="flex flex-col gap-2">
-          {PRODUCTOS.map((p) => (
-            <div key={p.key} className="flex items-center justify-between">
-              <span className="text-xs font-semibold">{p.label}</span>
-              <Stepper value={f.pedidoHabitual[p.key] || 0} onChange={(v) => setF({ ...f, pedidoHabitual: { ...f.pedidoHabitual, [p.key]: v } })} />
-            </div>
-          ))}
+      <Field label="¿Tiene máquina de frío/calor?">
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setF({ ...f, maquinaFrioCalor: true })} className="flex-1 py-2 rounded-xl font-bold text-sm" style={{ background: f.maquinaFrioCalor ? C.primary : C.bg, color: f.maquinaFrioCalor ? "#fff" : C.muted }}>Sí</button>
+          <button type="button" onClick={() => setF({ ...f, maquinaFrioCalor: false })} className="flex-1 py-2 rounded-xl font-bold text-sm" style={{ background: !f.maquinaFrioCalor ? C.primary : C.bg, color: !f.maquinaFrioCalor ? "#fff" : C.muted }}>No</button>
         </div>
       </Field>
       {isAdmin && (
-        <Field label="Envases actualmente en poder del cliente">
-          <Input type="number" inputMode="numeric" value={f.envasesEnPoder} onChange={(e) => setF({ ...f, envasesEnPoder: Number(e.target.value) || 0 })} />
+        <Field label="Envases prestados" hint="Cantidad de cada envase que la empresa tiene prestada a este cliente.">
+          <div className="flex flex-col gap-2">
+            {PRODUCTOS.map((p) => (
+              <div key={p.key} className="flex items-center justify-between">
+                <span className="text-xs font-semibold">{p.label}</span>
+                <Stepper value={f.envasesPrestados[p.key] || 0} onChange={(v) => setF({ ...f, envasesPrestados: { ...f.envasesPrestados, [p.key]: v } })} />
+              </div>
+            ))}
+          </div>
         </Field>
       )}
       <Field label="Orden en el recorrido (opcional)" hint="Número más bajo = se visita antes.">
@@ -768,10 +782,13 @@ function AdminClientes({ db, mutate }) {
   const [busca, setBusca] = useState("");
   const [sheet, setSheet] = useState(null); // null | 'nuevo' | cliente
   const [confirmDel, setConfirmDel] = useState(null);
+  const [detalleId, setDetalleId] = useState(null);
 
   const lista = db.clientes
     .filter((c) => c.nombre.toLowerCase().includes(busca.toLowerCase()) || c.direccion.toLowerCase().includes(busca.toLowerCase()))
     .sort((a, b) => a.nombre.localeCompare(b.nombre));
+
+  const clienteDetalle = detalleId ? db.clientes.find((c) => c.id === detalleId) : null;
 
   function guardarCliente(f) {
     const next = clone(db);
@@ -790,6 +807,31 @@ function AdminClientes({ db, mutate }) {
     next.clientes = next.clientes.filter((x) => x.id !== c.id);
     mutate(next);
     setConfirmDel(null);
+    if (detalleId === c.id) setDetalleId(null);
+  }
+
+  if (clienteDetalle) {
+    return (
+      <div>
+        <ClienteHistorial
+          cliente={clienteDetalle}
+          db={db}
+          onBack={() => setDetalleId(null)}
+          onEditar={() => setSheet(clienteDetalle)}
+        />
+        {sheet && (
+          <Sheet title="Editar cliente" onClose={() => setSheet(null)} closeOnBackdrop={false}>
+            <ClienteForm
+              initial={sheet === "nuevo" ? null : sheet}
+              repartidores={db.config.repartidores}
+              isAdmin
+              onSave={guardarCliente}
+              onCancel={() => setSheet(null)}
+            />
+          </Sheet>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -817,14 +859,15 @@ function AdminClientes({ db, mutate }) {
             return (
               <Card key={c.id}>
                 <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1" onClick={() => setSheet(c)}>
+                  <div className="min-w-0 flex-1" onClick={() => setDetalleId(c.id)}>
                     <div className="font-bold text-sm truncate">{c.nombre}</div>
                     <div className="text-xs truncate" style={{ color: C.muted }}>{c.direccion}</div>
                     <div className="flex flex-wrap gap-1 mt-1.5">
                       {c.diasVisita.map((d) => <Badge key={d} tone="accent">{d.slice(0, 3)}</Badge>)}
                       {rep && <Badge tone="muted">{rep.nombre}</Badge>}
                       {c.deudaAcumulada > 0 && <Badge tone="danger">Debe {formatMoney(c.deudaAcumulada)}</Badge>}
-                      {c.envasesEnPoder > 0 && <Badge tone="warning">{c.envasesEnPoder} envases</Badge>}
+                      {totalEnvasesPrestados(c.envasesPrestados) > 0 && <Badge tone="danger">Prestado: {textoEnvasesPrestados(c.envasesPrestados)}</Badge>}
+                      {c.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
                     </div>
                   </div>
                   <div className="flex flex-col gap-1">
@@ -839,7 +882,7 @@ function AdminClientes({ db, mutate }) {
       )}
 
       {sheet && (
-        <Sheet title={sheet === "nuevo" ? "Nuevo cliente" : "Editar cliente"} onClose={() => setSheet(null)}>
+        <Sheet title={sheet === "nuevo" ? "Nuevo cliente" : "Editar cliente"} onClose={() => setSheet(null)} closeOnBackdrop={false}>
           <ClienteForm
             initial={sheet === "nuevo" ? null : sheet}
             repartidores={db.config.repartidores}
@@ -865,6 +908,94 @@ function AdminClientes({ db, mutate }) {
   );
 }
 
+/* ---------- Historial de compras de un cliente (admin) ---------- */
+const NOMBRES_MES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+
+function ClienteHistorial({ cliente, db, onBack, onEditar }) {
+  const visitas = db.visitas
+    .filter((v) => v.clienteId === cliente.id)
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+  const grupos = {};
+  visitas.forEach((v) => {
+    const mes = v.fecha.slice(0, 7);
+    if (!grupos[mes]) grupos[mes] = [];
+    grupos[mes].push(v);
+  });
+  const meses = Object.keys(grupos).sort().reverse();
+
+  function nombreMes(mesKey) {
+    const [y, m] = mesKey.split("-");
+    return `${NOMBRES_MES[Number(m) - 1]} ${y}`;
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <button onClick={onBack} className="text-xs font-bold flex items-center gap-1" style={{ color: C.primary }}><ArrowLeft size={14} /> Volver a clientes</button>
+        <Btn size="sm" variant="ghost" icon={Edit2} onClick={onEditar}>Editar</Btn>
+      </div>
+
+      <Card className="mb-4">
+        <div className="font-extrabold text-base">{cliente.nombre}</div>
+        <div className="text-xs" style={{ color: C.muted }}>{cliente.direccion}</div>
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          {cliente.diasVisita.map((d) => <Badge key={d} tone="accent">{d.slice(0, 3)}</Badge>)}
+          {cliente.deudaAcumulada > 0 && <Badge tone="danger">Debe {formatMoney(cliente.deudaAcumulada)}</Badge>}
+          {totalEnvasesPrestados(cliente.envasesPrestados) > 0 && <Badge tone="danger">Prestado: {textoEnvasesPrestados(cliente.envasesPrestados)}</Badge>}
+          {cliente.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
+        </div>
+      </Card>
+
+      {meses.length === 0 ? (
+        <EmptyState icon={ClipboardList} title="Sin compras registradas" text="Todavía no hay historial para este cliente." />
+      ) : (
+        meses.map((mes) => {
+          const items = grupos[mes];
+          const facturado = items.reduce((s, v) => s + (v.total || 0), 0);
+          const efectivo = items.reduce((s, v) => s + (v.pagos?.efectivo || 0), 0);
+          const mp = items.reduce((s, v) => s + (v.pagos?.mercadopago || 0), 0);
+          const fiado = items.reduce((s, v) => s + (v.deudaGenerada || 0), 0);
+          return (
+            <div key={mes} className="mb-4">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-xs font-extrabold uppercase tracking-wide" style={{ color: C.muted }}>{nombreMes(mes)}</div>
+                <div className="font-mono text-xs font-bold">{formatMoney(facturado)}</div>
+              </div>
+              {(efectivo > 0 || mp > 0 || fiado > 0) && (
+                <div className="flex gap-1.5 mb-2 flex-wrap">
+                  {efectivo > 0 && <Badge tone="success">Efectivo {formatMoney(efectivo)}</Badge>}
+                  {mp > 0 && <Badge tone="accent">MP {formatMoney(mp)}</Badge>}
+                  {fiado > 0 && <Badge tone="danger">Fiado {formatMoney(fiado)}</Badge>}
+                </div>
+              )}
+              <div className="flex flex-col gap-2">
+                {items.map((v) => (
+                  <Card key={v.id}>
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs font-bold" style={{ color: C.muted }}>{fechaLegible(v.fecha)}</div>
+                      {v.vendio ? <Badge tone="success">{formatMoney(v.total)}</Badge> : <Badge tone="muted">No vendió</Badge>}
+                    </div>
+                    {v.vendio && (
+                      <div className="text-xs mt-1">
+                        {v.items.filter((it) => it.cantidad > 0).map((it) => `${it.cantidad}× ${PRODUCTOS.find((p) => p.key === it.tipo)?.corto}`).join(", ")}
+                        {" · "}{({ efectivo: "Efectivo", mercadopago: "Mercado Pago", deuda: "Fiado" })[v.metodoPago]}
+                      </div>
+                    )}
+                    {v.deudaCobrada > 0 && <div className="text-xs mt-0.5" style={{ color: C.success }}>Cobró deuda vieja: {formatMoney(v.deudaCobrada)}</div>}
+                    {v.envasesPrestados > 0 && <div className="text-xs mt-0.5" style={{ color: C.warning }}>Prestó {v.envasesPrestados}× {PRODUCTOS.find((p) => p.key === v.tipoPrestamo)?.corto}</div>}
+                    {v.notas && <div className="text-xs mt-0.5 italic" style={{ color: C.mutedLight }}>{v.notas}</div>}
+                  </Card>
+                ))}
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
 /* ---------- Historial (admin) ---------- */
 function AdminHistorial({ db, mutate }) {
   const [filtroRep, setFiltroRep] = useState("todos");
@@ -882,7 +1013,11 @@ function AdminHistorial({ db, mutate }) {
     if (ci >= 0) {
       if (v.deudaGenerada) next.clientes[ci].deudaAcumulada = Math.max(0, (next.clientes[ci].deudaAcumulada || 0) - v.deudaGenerada);
       if (v.deudaCobrada) next.clientes[ci].deudaAcumulada = (next.clientes[ci].deudaAcumulada || 0) + v.deudaCobrada;
-      if (v.envasesPrestados) next.clientes[ci].envasesEnPoder = Math.max(0, (next.clientes[ci].envasesEnPoder || 0) - v.envasesPrestados);
+      if (v.envasesPrestados > 0 && v.tipoPrestamo) {
+        const ep = { ...(next.clientes[ci].envasesPrestados || envasesVacio()) };
+        ep[v.tipoPrestamo] = Math.max(0, (ep[v.tipoPrestamo] || 0) - v.envasesPrestados);
+        next.clientes[ci].envasesPrestados = ep;
+      }
     }
     mutate(next);
     setConfirmDel(null);
@@ -997,7 +1132,7 @@ function AdminGastos({ db, mutate }) {
       )}
 
       {sheet && (
-        <Sheet title="Nuevo gasto" onClose={() => setSheet(false)}>
+        <Sheet title="Nuevo gasto" onClose={() => setSheet(false)} closeOnBackdrop={false}>
           <Field label="Concepto"><Input value={concepto} onChange={(e) => setConcepto(e.target.value)} placeholder="Ej: Nafta" /></Field>
           <Field label="Monto"><Input type="number" inputMode="decimal" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder="0" /></Field>
           <div className="flex gap-2 mt-2">
@@ -1222,7 +1357,7 @@ function RepartidorClientes({ db, mutate, repartidor }) {
       const i = next.clientes.findIndex((c) => c.id === f.id);
       next.clientes[i] = { ...next.clientes[i], ...f, repartidorId: repartidor.id };
     } else {
-      next.clientes.push({ ...f, id: uid(), repartidorId: repartidor.id, deudaAcumulada: 0, envasesEnPoder: 0, creadoEl: hoyISO() });
+      next.clientes.push({ ...f, id: uid(), repartidorId: repartidor.id, deudaAcumulada: 0, envasesPrestados: envasesVacio(), creadoEl: hoyISO() });
     }
     mutate(next);
     setSheet(null);
@@ -1243,14 +1378,15 @@ function RepartidorClientes({ db, mutate, repartidor }) {
               <div className="text-xs" style={{ color: C.muted }}>{c.direccion}</div>
               <div className="flex flex-wrap gap-1 mt-1.5">
                 {c.diasVisita.map((d) => <Badge key={d} tone="accent">{d.slice(0, 3)}</Badge>)}
-                {c.envasesEnPoder > 0 && <Badge tone="warning">{c.envasesEnPoder} envases</Badge>}
+                {totalEnvasesPrestados(c.envasesPrestados) > 0 && <Badge tone="danger">Prestado: {textoEnvasesPrestados(c.envasesPrestados)}</Badge>}
+                {c.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
               </div>
             </Card>
           ))}
         </div>
       )}
       {sheet && (
-        <Sheet title={sheet === "nuevo" ? "Nuevo cliente" : "Editar cliente"} onClose={() => setSheet(null)}>
+        <Sheet title={sheet === "nuevo" ? "Nuevo cliente" : "Editar cliente"} onClose={() => setSheet(null)} closeOnBackdrop={false}>
           <ClienteForm initial={sheet === "nuevo" ? null : sheet} repartidores={db.config.repartidores} isAdmin={false} onSave={guardar} onCancel={() => setSheet(null)} />
         </Sheet>
       )}
@@ -1273,7 +1409,11 @@ function RepartidorRecorrido({ db, mutate, repartidor, clientes, visitadosIds, o
       deuda -= visita.deudaCobrada || 0;
       deuda += visita.deudaGenerada || 0;
       next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
-      next.clientes[ci].envasesEnPoder = Math.max(0, (next.clientes[ci].envasesEnPoder || 0) + (visita.envasesPrestados || 0));
+      if (visita.envasesPrestados > 0 && visita.tipoPrestamo) {
+        const ep = { ...(next.clientes[ci].envasesPrestados || envasesVacio()) };
+        ep[visita.tipoPrestamo] = Math.max(0, (ep[visita.tipoPrestamo] || 0) + visita.envasesPrestados);
+        next.clientes[ci].envasesPrestados = ep;
+      }
     }
     mutate(next, { history: false });
     setActivo(null);
@@ -1335,7 +1475,8 @@ function ClienteVisitaCard({ cliente, hecho, onClick }) {
           <div className="text-xs" style={{ color: C.muted }}>{cliente.direccion}</div>
           <div className="flex flex-wrap gap-1 mt-1">
             {cliente.deudaAcumulada > 0 && <Badge tone="danger">Debe {formatMoney(cliente.deudaAcumulada)}</Badge>}
-            {cliente.envasesEnPoder > 0 && <Badge tone="warning">{cliente.envasesEnPoder} envases</Badge>}
+            {totalEnvasesPrestados(cliente.envasesPrestados) > 0 && <Badge tone="danger">Prestado: {textoEnvasesPrestados(cliente.envasesPrestados)}</Badge>}
+            {cliente.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
             {cliente.notas && <Badge tone="muted">Nota</Badge>}
           </div>
         </div>
@@ -1355,7 +1496,7 @@ const NOTAS_RAPIDAS = ["No estaba", "No quiso hoy", "Volver más tarde"];
 function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
   const [vendio, setVendio] = useState(true);
   const [items, setItems] = useState(
-    PRODUCTOS.map((p) => ({ tipo: p.key, cantidad: cliente.pedidoHabitual?.[p.key] || 0, precioUnitario: precios[p.key] || 0 }))
+    PRODUCTOS.map((p) => ({ tipo: p.key, cantidad: 0, precioUnitario: precios[p.key] || 0 }))
   );
   const [metodoPago, setMetodoPago] = useState("efectivo");
   const [montoPagado, setMontoPagado] = useState(null); // null = total completo
@@ -1401,6 +1542,7 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
     <Sheet
       title={cliente.nombre}
       onClose={onClose}
+      closeOnBackdrop={false}
       footer={<Btn full size="lg" onClick={guardar} icon={Check}>Guardar visita</Btn>}
     >
       <div className="text-xs mb-3" style={{ color: C.muted }}>{cliente.direccion}</div>
