@@ -299,22 +299,57 @@ function Stepper({ value, onChange, min = 0 }) {
   );
 }
 
-function Sheet({ title, onClose, children, footer }) {
+function Sheet({
+  title,
+  onClose,
+  children,
+  footer,
+  closeOnBackdrop = false,
+}) {
+  function handleBackdropClick(e) {
+    // Solo cierra al tocar afuera cuando se habilita explícitamente.
+    if (closeOnBackdrop && e.target === e.currentTarget) {
+      onClose();
+    }
+  }
+
   return (
-    <div className="absolute inset-0 z-50 flex flex-col justify-end" style={{ background: "rgba(11,43,60,0.45)" }} onClick={onClose}>
+    <div
+      className="absolute inset-0 z-50 flex flex-col justify-end"
+      style={{ background: "rgba(11,43,60,0.45)" }}
+      onClick={handleBackdropClick}
+    >
       <div
-        onClick={(e) => e.stopPropagation()}
         className="rounded-t-3xl flex flex-col"
         style={{ background: C.surface, maxHeight: "88%" }}
       >
-        <div className="flex items-center justify-between px-4 py-3 flex-shrink-0" style={{ borderBottom: `1px solid ${C.border}` }}>
+        <div
+          className="flex items-center justify-between px-4 py-3 flex-shrink-0"
+          style={{ borderBottom: `1px solid ${C.border}` }}
+        >
           <div className="font-extrabold text-base">{title}</div>
-          <button onClick={onClose} className="p-1 rounded-full active:bg-black/5">
+
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 rounded-full active:bg-black/5"
+          >
             <X size={20} color={C.muted} />
           </button>
         </div>
-        <div className="overflow-y-auto px-4 py-3">{children}</div>
-        {footer && <div className="px-4 py-3 flex-shrink-0" style={{ borderTop: `1px solid ${C.border}` }}>{footer}</div>}
+
+        <div className="overflow-y-auto px-4 py-3">
+          {children}
+        </div>
+
+        {footer && (
+          <div
+            className="px-4 py-3 flex-shrink-0"
+            style={{ borderTop: `1px solid ${C.border}` }}
+          >
+            {footer}
+          </div>
+        )}
       </div>
     </div>
   );
