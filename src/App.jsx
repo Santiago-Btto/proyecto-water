@@ -35,11 +35,12 @@ const C = {
 const DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
 const DIAS_JS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
 const PRODUCTOS = [
-  { key: "b20", label: "Bidón 20L", corto: "20L" },
-  { key: "b12", label: "Bidón 12L", corto: "12L" },
-  { key: "sifon", label: "Sifón", corto: "Sifón" },
-  { key: "jugo", label: "Jugo", corto: "Jugo" },
+  { key: "b20", label: "Bidón 20L", corto: "20L", retornable: true },
+  { key: "b12", label: "Bidón 12L", corto: "12L", retornable: true },
+  { key: "sifon", label: "Sifón", corto: "Sifón", retornable: true },
+  { key: "jugo", label: "Jugo", corto: "Jugo", retornable: false },
 ];
+const PRODUCTOS_RETORNABLES = PRODUCTOS.filter((p) => p.retornable);
 const DEFAULT_CONFIG = {
   adminPin: "",
   repartidores: [],
@@ -92,6 +93,28 @@ function totalEnvasesPrestados(ep) {
 function textoEnvasesPrestados(ep) {
   if (!ep) return "";
   return PRODUCTOS.filter((p) => (ep[p.key] || 0) > 0).map((p) => `${ep[p.key]}×${p.corto}`).join(", ");
+}
+/* delta = entregados - devueltos, solo para tipos retornables (no aplica a "jugo") */
+function calcularDeltaEnvases(visita) {
+  const delta = {};
+  PRODUCTOS_RETORNABLES.forEach((p) => {
+    const entregado = (visita.items || []).find((it) => it.tipo === p.key)?.cantidad || 0;
+    const devuelto = (visita.retornos && visita.retornos[p.key]) || 0;
+    const d = entregado - devuelto;
+    if (d !== 0) delta[p.key] = d;
+  });
+  return delta;
+}
+function aplicarDeltaEnvases(envasesPrestados, delta, signo = 1) {
+  const ep = { ...(envasesPrestados || envasesVacio()) };
+  Object.keys(delta).forEach((tipo) => {
+    ep[tipo] = Math.max(0, (ep[tipo] || 0) + signo * delta[tipo]);
+  });
+  return ep;
+}
+function textoDevoluciones(v) {
+  if (!v.retornos) return "";
+  return PRODUCTOS_RETORNABLES.filter((p) => (v.retornos[p.key] || 0) > 0).map((p) => `${v.retornos[p.key]}×${p.corto}`).join(", ");
 }
 
 /* ============================================================
@@ -756,7 +779,7 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
       {isAdmin && (
         <Field label="Envases prestados" hint="Cantidad de cada envase que la empresa tiene prestada a este cliente.">
           <div className="flex flex-col gap-2">
-            {PRODUCTOS.map((p) => (
+            {PRODUCTOS_RETORNABLES.map((p) => (
               <div key={p.key} className="flex items-center justify-between">
                 <span className="text-xs font-semibold">{p.label}</span>
                 <Stepper value={f.envasesPrestados[p.key] || 0} onChange={(v) => setF({ ...f, envasesPrestados: { ...f.envasesPrestados, [p.key]: v } })} />
@@ -983,7 +1006,7 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
                       </div>
                     )}
                     {v.deudaCobrada > 0 && <div className="text-xs mt-0.5" style={{ color: C.success }}>Cobró deuda vieja: {formatMoney(v.deudaCobrada)}</div>}
-                    {v.envasesPrestados > 0 && <div className="text-xs mt-0.5" style={{ color: C.warning }}>Prestó {v.envasesPrestados}× {PRODUCTOS.find((p) => p.key === v.tipoPrestamo)?.corto}</div>}
+                    {textoDevoluciones(v) && <div className="text-xs mt-0.5" style={{ color: C.success }}>Devolvió: {textoDevoluciones(v)}</div>}
                     {v.notas && <div className="text-xs mt-0.5 italic" style={{ color: C.mutedLight }}>{v.notas}</div>}
                   </Card>
                 ))}
@@ -1013,11 +1036,7 @@ function AdminHistorial({ db, mutate }) {
     if (ci >= 0) {
       if (v.deudaGenerada) next.clientes[ci].deudaAcumulada = Math.max(0, (next.clientes[ci].deudaAcumulada || 0) - v.deudaGenerada);
       if (v.deudaCobrada) next.clientes[ci].deudaAcumulada = (next.clientes[ci].deudaAcumulada || 0) + v.deudaCobrada;
-      if (v.envasesPrestados > 0 && v.tipoPrestamo) {
-        const ep = { ...(next.clientes[ci].envasesPrestados || envasesVacio()) };
-        ep[v.tipoPrestamo] = Math.max(0, (ep[v.tipoPrestamo] || 0) - v.envasesPrestados);
-        next.clientes[ci].envasesPrestados = ep;
-      }
+      next.clientes[ci].envasesPrestados = aplicarDeltaEnvases(next.clientes[ci].envasesPrestados, calcularDeltaEnvases(v), -1);
     }
     mutate(next);
     setConfirmDel(null);
@@ -1054,7 +1073,7 @@ function AdminHistorial({ db, mutate }) {
                       <div className="text-xs mt-1" style={{ color: C.mutedLight }}>No vendió{v.notas ? " · " + v.notas : ""}</div>
                     )}
                     {v.deudaCobrada > 0 && <div className="text-xs mt-0.5" style={{ color: C.success }}>Cobró deuda: {formatMoney(v.deudaCobrada)}</div>}
-                    {v.envasesPrestados > 0 && <div className="text-xs mt-0.5" style={{ color: C.warning }}>Prestó {v.envasesPrestados} envase(s)</div>}
+                    {textoDevoluciones(v) && <div className="text-xs mt-0.5" style={{ color: C.success }}>Devolvió: {textoDevoluciones(v)}</div>}
                   </div>
                   <button onClick={() => setConfirmDel(v)} className="p-1.5 rounded-lg active:bg-black/5 flex-shrink-0"><Trash2 size={15} color={C.danger} /></button>
                 </div>
@@ -1409,11 +1428,7 @@ function RepartidorRecorrido({ db, mutate, repartidor, clientes, visitadosIds, o
       deuda -= visita.deudaCobrada || 0;
       deuda += visita.deudaGenerada || 0;
       next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
-      if (visita.envasesPrestados > 0 && visita.tipoPrestamo) {
-        const ep = { ...(next.clientes[ci].envasesPrestados || envasesVacio()) };
-        ep[visita.tipoPrestamo] = Math.max(0, (ep[visita.tipoPrestamo] || 0) + visita.envasesPrestados);
-        next.clientes[ci].envasesPrestados = ep;
-      }
+      next.clientes[ci].envasesPrestados = aplicarDeltaEnvases(next.clientes[ci].envasesPrestados, calcularDeltaEnvases(visita), 1);
     }
     mutate(next, { history: false });
     setActivo(null);
@@ -1471,11 +1486,17 @@ function ClienteVisitaCard({ cliente, hecho, onClick }) {
           {hecho ? <CheckCircle2 size={15} color={C.success} /> : <Circle size={15} color={C.primary} />}
         </div>
         <div className="flex-1 min-w-0">
-          <div className="font-bold text-sm">{cliente.nombre}</div>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <div className="font-bold text-sm">{cliente.nombre}</div>
+            {PRODUCTOS_RETORNABLES.filter((p) => (cliente.envasesPrestados?.[p.key] || 0) > 0).map((p) => (
+              <span key={p.key} className="px-1.5 py-0.5 rounded-md text-[10px] font-mono font-extrabold flex-shrink-0" style={{ background: C.dangerBg, color: C.danger }}>
+                {cliente.envasesPrestados[p.key]}×{p.corto}
+              </span>
+            ))}
+          </div>
           <div className="text-xs" style={{ color: C.muted }}>{cliente.direccion}</div>
           <div className="flex flex-wrap gap-1 mt-1">
             {cliente.deudaAcumulada > 0 && <Badge tone="danger">Debe {formatMoney(cliente.deudaAcumulada)}</Badge>}
-            {totalEnvasesPrestados(cliente.envasesPrestados) > 0 && <Badge tone="danger">Prestado: {textoEnvasesPrestados(cliente.envasesPrestados)}</Badge>}
             {cliente.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
             {cliente.notas && <Badge tone="muted">Nota</Badge>}
           </div>
@@ -1494,25 +1515,51 @@ function ClienteVisitaCard({ cliente, hecho, onClick }) {
 const NOTAS_RAPIDAS = ["No estaba", "No quiso hoy", "Volver más tarde"];
 
 function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
+  const saldoActual = cliente.envasesPrestados || envasesVacio();
   const [vendio, setVendio] = useState(true);
   const [items, setItems] = useState(
     PRODUCTOS.map((p) => ({ tipo: p.key, cantidad: 0, precioUnitario: precios[p.key] || 0 }))
   );
+  const [retornos, setRetornos] = useState(() => {
+    const r = {};
+    PRODUCTOS_RETORNABLES.forEach((p) => { r[p.key] = 0; });
+    return r;
+  });
+  const [retornosTocados, setRetornosTocados] = useState(() => new Set());
   const [metodoPago, setMetodoPago] = useState("efectivo");
   const [montoPagado, setMontoPagado] = useState(null); // null = total completo
   const [cobrarDeuda, setCobrarDeuda] = useState(false);
   const [montoDeuda, setMontoDeuda] = useState(cliente.deudaAcumulada || 0);
   const [metodoDeuda, setMetodoDeuda] = useState("efectivo");
-  const [prestoEnvase, setPrestoEnvase] = useState(false);
-  const [tipoPrestamo, setTipoPrestamo] = useState("b20");
-  const [cantidadPrestamo, setCantidadPrestamo] = useState(1);
   const [notas, setNotas] = useState("");
 
   const total = totalPedido(items);
   const pagadoFinal = montoPagado === null ? total : Number(montoPagado) || 0;
   const restante = Math.max(0, total - pagadoFinal);
 
+  function actualizarCantidad(idx, valor) {
+    const p = PRODUCTOS[idx];
+    setItems(items.map((it, i) => (i === idx ? { ...it, cantidad: valor } : it)));
+    // Por defecto asumimos cambio 1x1 (devuelve lo mismo que se le entrega),
+    // salvo que el repartidor ya haya ajustado la devolución a mano.
+    if (p.retornable && !retornosTocados.has(p.key)) {
+      setRetornos((r) => ({ ...r, [p.key]: valor }));
+    }
+  }
+  function actualizarRetorno(tipo, valor) {
+    setRetornosTocados((prev) => new Set(prev).add(tipo));
+    setRetornos((r) => ({ ...r, [tipo]: Math.max(0, valor) }));
+  }
+
   function guardar() {
+    const retornosFinal = {};
+    PRODUCTOS_RETORNABLES.forEach((p) => {
+      const idx = PRODUCTOS.findIndex((x) => x.key === p.key);
+      const cant = items[idx]?.cantidad || 0;
+      const saldo = saldoActual[p.key] || 0;
+      const relevante = vendio ? (cant > 0 || saldo > 0) : (saldo > 0);
+      retornosFinal[p.key] = relevante ? (retornos[p.key] || 0) : 0;
+    });
     const visita = {
       id: uid(),
       clienteId: cliente.id,
@@ -1521,14 +1568,13 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
       diaSemana: diaSemanaHoy(),
       vendio,
       items: vendio ? items : [],
+      retornos: retornosFinal,
       total: vendio ? total : 0,
       metodoPago: vendio ? metodoPago : null,
       pagos: vendio && metodoPago !== "deuda" ? { [metodoPago]: pagadoFinal } : {},
       deudaGenerada: vendio && metodoPago === "deuda" ? total : (vendio ? restante : 0),
       deudaCobrada: cobrarDeuda ? Number(montoDeuda) || 0 : 0,
       metodoDeuda: cobrarDeuda ? metodoDeuda : null,
-      envasesPrestados: prestoEnvase ? Number(cantidadPrestamo) || 0 : 0,
-      tipoPrestamo: prestoEnvase ? tipoPrestamo : null,
       notas,
       timestamp: Date.now(),
     };
@@ -1579,15 +1625,30 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
       {vendio ? (
         <>
           <div className="flex flex-col gap-2 mb-3">
-            {PRODUCTOS.map((p, idx) => (
-              <div key={p.key} className="flex items-center justify-between">
-                <div>
-                  <div className="text-sm font-semibold">{p.label}</div>
-                  <div className="text-xs font-mono" style={{ color: C.mutedLight }}>{formatMoney(precios[p.key] || 0)} c/u</div>
+            {PRODUCTOS.map((p, idx) => {
+              const cant = items[idx].cantidad;
+              const saldo = saldoActual[p.key] || 0;
+              const mostrarRetorno = p.retornable && (cant > 0 || saldo > 0);
+              return (
+                <div key={p.key}>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-semibold">{p.label}</div>
+                      <div className="text-xs font-mono" style={{ color: C.mutedLight }}>{formatMoney(precios[p.key] || 0)} c/u</div>
+                    </div>
+                    <Stepper value={cant} onChange={(v) => actualizarCantidad(idx, v)} />
+                  </div>
+                  {mostrarRetorno && (
+                    <div className="flex items-center justify-between mt-1 ml-1 pl-2 py-1" style={{ borderLeft: `2px solid ${C.border}` }}>
+                      <span className="text-xs" style={{ color: C.muted }}>
+                        Vacíos que devolvió{saldo > 0 && <span style={{ color: C.danger, fontWeight: 700 }}> · debe {saldo}</span>}
+                      </span>
+                      <Stepper value={retornos[p.key] || 0} onChange={(v) => actualizarRetorno(p.key, v)} />
+                    </div>
+                  )}
                 </div>
-                <Stepper value={items[idx].cantidad} onChange={(v) => setItems(items.map((it, i) => i === idx ? { ...it, cantidad: v } : it))} />
-              </div>
-            ))}
+              );
+            })}
           </div>
           <div className="flex items-center justify-between mb-3 pt-2" style={{ borderTop: `1px dashed ${C.border}` }}>
             <span className="text-sm font-bold">Total</span>
@@ -1608,38 +1669,32 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
               <Input type="number" inputMode="decimal" value={montoPagado === null ? total : montoPagado} onChange={(e) => setMontoPagado(e.target.value)} />
             </Field>
           )}
+          <Field label="Notas de la visita">
+            <Textarea rows={2} value={notas} onChange={(e) => setNotas(e.target.value)} />
+          </Field>
         </>
       ) : (
-        <Field label="Motivo (opcional)">
-          <div className="flex flex-wrap gap-1.5 mb-2">
-            {NOTAS_RAPIDAS.map((n) => (
-              <button key={n} onClick={() => setNotas(n)} className="px-2.5 py-1 rounded-lg text-xs font-semibold" style={{ background: notas === n ? C.primary : C.bg, color: notas === n ? "#fff" : C.muted }}>{n}</button>
-            ))}
-          </div>
-        </Field>
-      )}
-
-      <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.border}` }}>
-        <button onClick={() => setPrestoEnvase(!prestoEnvase)} className="flex items-center justify-between w-full">
-          <span className="text-xs font-bold" style={{ color: C.muted }}>¿Prestó algún envase? (extra)</span>
-          <div className="w-9 h-5 rounded-full flex items-center px-0.5" style={{ background: prestoEnvase ? C.primary : C.border, justifyContent: prestoEnvase ? "flex-end" : "flex-start" }}>
-            <div className="w-4 h-4 rounded-full bg-white" />
-          </div>
-        </button>
-        {prestoEnvase && (
-          <div className="flex items-center gap-2 mt-2">
-            <select value={tipoPrestamo} onChange={(e) => setTipoPrestamo(e.target.value)} className="flex-1 rounded-xl px-2 py-2 text-xs" style={{ background: C.bg, border: `1px solid ${C.border}` }}>
-              {PRODUCTOS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
-            </select>
-            <Stepper value={cantidadPrestamo} onChange={setCantidadPrestamo} min={1} />
-          </div>
-        )}
-      </div>
-
-      {vendio && (
-        <Field label="Notas de la visita">
-          <Textarea rows={2} value={notas} onChange={(e) => setNotas(e.target.value)} />
-        </Field>
+        <>
+          <Field label="Motivo (opcional)">
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              {NOTAS_RAPIDAS.map((n) => (
+                <button key={n} onClick={() => setNotas(n)} className="px-2.5 py-1 rounded-lg text-xs font-semibold" style={{ background: notas === n ? C.primary : C.bg, color: notas === n ? "#fff" : C.muted }}>{n}</button>
+              ))}
+            </div>
+          </Field>
+          {PRODUCTOS_RETORNABLES.some((p) => (saldoActual[p.key] || 0) > 0) && (
+            <Field label="¿Te devolvió envases vacíos igual?" hint="Aunque no haya comprado, puede haberte dado envases pendientes de antes.">
+              <div className="flex flex-col gap-2">
+                {PRODUCTOS_RETORNABLES.filter((p) => (saldoActual[p.key] || 0) > 0).map((p) => (
+                  <div key={p.key} className="flex items-center justify-between">
+                    <span className="text-xs font-semibold">{p.label} <span style={{ color: C.danger }}>(debe {saldoActual[p.key]})</span></span>
+                    <Stepper value={retornos[p.key] || 0} onChange={(v) => actualizarRetorno(p.key, v)} />
+                  </div>
+                ))}
+              </div>
+            </Field>
+          )}
+        </>
       )}
     </Sheet>
   );
@@ -1652,7 +1707,9 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [db, setDb] = useState({ clientes: [], visitas: [], gastos: [], config: clone(DEFAULT_CONFIG) });
   const [profile, setProfile] = useState(null); // null(cargando) | 'picker' | {type:'admin'} | {type:'repartidor', id}
-  const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [adminUnlocked, setAdminUnlocked] = useState(() => {
+  return sessionStorage.getItem("adminUnlocked") === "true";
+});
   const [connError, setConnError] = useState(null);
 
   const pastRef = useRef([]);
@@ -1723,17 +1780,24 @@ export default function App() {
     });
   }
 
-  function elegirAdmin() { setProfile({ type: "admin" }); setAdminUnlocked(false); }
+  function elegirAdmin() {
+  const p = { type: "admin" };
+
+  setProfile(p);
+  setLocalProfile(p);
+  setAdminUnlocked(false);
+}
   function elegirRepartidor(r) {
     const p = { type: "repartidor", id: r.id };
     setProfile(p);
     setLocalProfile(p);
   }
   function desloguear() {
-    setProfile("picker");
-    setAdminUnlocked(false);
-    setLocalProfile(null);
-  }
+  setProfile("picker");
+  setAdminUnlocked(false);
+  setLocalProfile(null);
+  sessionStorage.removeItem("adminUnlocked");
+}
   function volverAlPicker() { setProfile("picker"); }
 
   if (connError) {
@@ -1774,11 +1838,15 @@ export default function App() {
         <AdminGate
           config={db.config}
           onBack={volverAlPicker}
-          onUnlock={() => setAdminUnlocked(true)}
+          onUnlock={() => {
+  setAdminUnlocked(true);
+  sessionStorage.setItem("adminUnlocked", "true");
+}}
           onSetPin={(pin) => {
-            mutate({ ...db, config: { ...db.config, adminPin: pin } });
-            setAdminUnlocked(true);
-          }}
+  mutate({ ...db, config: { ...db.config, adminPin: pin } });
+  setAdminUnlocked(true);
+  sessionStorage.setItem("adminUnlocked", "true");
+}}
         />
       );
     }
