@@ -5,9 +5,9 @@ import {
   HandCoins, AlertCircle, Search, Edit2, Trash2,
   ArrowLeft, Lock, ClipboardList, CheckCircle2, Circle, BarChart3,
   UserCog, Phone, MapPin, Save, Minus, Settings2,
-  Home as HomeIcon, WifiOff
+  Home as HomeIcon, WifiOff, Download
 } from "lucide-react";
-import { doc, onSnapshot, setDoc } from "firebase/firestore";
+import { collection, doc, onSnapshot, setDoc, deleteDoc, getDoc, getDocs } from "firebase/firestore";
 import { firestore, COLLECTION } from "./firebaseConfig";
 
 /* ============================================================
@@ -118,27 +118,149 @@ function textoDevoluciones(v) {
 }
 
 /* ============================================================
-   ALMACENAMIENTO PERSISTENTE (Firebase Firestore)
-   Cada "key" (clientes, visitas, gastos, config) es un documento
-   dentro de la colección COLLECTION, con la forma { value: ... }.
-   Usamos onSnapshot para que los cambios se vean en vivo en todos
-   los celulares conectados, sin necesidad de refrescar a mano.
+   EXPORTAR DATOS (CSV — se abre bien en Excel/Sheets/Numbers)
    ============================================================ */
-function subscribeDoc(key, fallback, onData, onError) {
-  const ref = doc(firestore, COLLECTION, key);
+function descargarCSV(filename, headers, rows) {
+  const escape = (v) => {
+    const s = String(v ?? "");
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const lineas = [headers.map(escape).join(","), ...rows.map((r) => r.map(escape).join(","))];
+  const csv = "\uFEFF" + lineas.join("\r\n"); // BOM: para que Excel muestre bien tildes y "ñ"
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+function exportarClientesCSV(db) {
+  const headers = ["Nombre", "Dirección", "Teléfono", "Días de visita", "Repartidor", "Deuda acumulada", "Envases prestados", "Máquina frío/calor", "Notas"];
+  const rows = db.clientes.map((c) => {
+    const rep = db.config.repartidores.find((r) => r.id === c.repartidorId);
+    return [
+      c.nombre, c.direccion, c.telefono || "", (c.diasVisita || []).join(" - "),
+      rep?.nombre || "", c.deudaAcumulada || 0, textoEnvasesPrestados(c.envasesPrestados) || "Ninguno",
+      c.maquinaFrioCalor ? "Sí" : "No", c.notas || "",
+    ];
+  });
+  descargarCSV(`clientes_${hoyISO()}.csv`, headers, rows);
+}
+function exportarVisitasCSV(db) {
+  const headers = ["Fecha", "Cliente", "Repartidor", "Vendió", "Productos", "Total", "Método de pago", "Deuda generada", "Deuda cobrada", "Devolvió", "Notas"];
+  const metodos = { efectivo: "Efectivo", mercadopago: "Mercado Pago", deuda: "Fiado" };
+  const rows = db.visitas.slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)).map((v) => {
+    const cliente = db.clientes.find((c) => c.id === v.clienteId);
+    const rep = db.config.repartidores.find((r) => r.id === v.repartidorId);
+    const productos = (v.items || []).filter((it) => it.cantidad > 0).map((it) => `${it.cantidad}x${PRODUCTOS.find((p) => p.key === it.tipo)?.corto}`).join(" + ");
+    return [
+      fechaLegible(v.fecha), cliente?.nombre || "Cliente eliminado", rep?.nombre || "",
+      v.vendio ? "Sí" : "No", productos, v.total || 0, v.vendio ? (metodos[v.metodoPago] || "") : "",
+      v.deudaGenerada || 0, v.deudaCobrada || 0, textoDevoluciones(v) || "", v.notas || "",
+    ];
+  });
+  descargarCSV(`ventas_${hoyISO()}.csv`, headers, rows);
+}
+function exportarGastosCSV(db) {
+  const headers = ["Fecha", "Concepto", "Monto"];
+  const rows = db.gastos.slice().sort((a, b) => a.fecha.localeCompare(b.fecha) || (a.timestamp || 0) - (b.timestamp || 0)).map((g) => [fechaLegible(g.fecha), g.concepto, g.monto]);
+  descargarCSV(`gastos_${hoyISO()}.csv`, headers, rows);
+}
+
+/* ============================================================
+   ALMACENAMIENTO PERSISTENTE (Firebase Firestore)
+
+   Cada cliente, cada visita y cada gasto es su PROPIO documento
+   dentro de su colección (repartoAgua_clientes, repartoAgua_visitas,
+   repartoAgua_gastos). Esto es clave: si dos repartidores guardan
+   una venta al mismo tiempo, cada uno escribe SU documento propio y
+   nunca pisa lo que guardó el otro (antes, los tres vivían juntos
+   adentro de un array gigante en un solo documento, y el que guardaba
+   último borraba lo que había cargado el otro sin que nadie lo notara).
+
+   "config" (precios, repartidores, PIN) sigue siendo un único
+   documento, porque solo lo edita el administrador.
+   ============================================================ */
+function colRef(name) {
+  return collection(firestore, `${COLLECTION}_${name}`);
+}
+function subscribeCollection(name, onData, onError) {
+  return onSnapshot(
+    colRef(name),
+    (snap) => onData(snap.docs.map((d) => ({ ...d.data(), id: d.id }))),
+    (err) => { console.error("Error escuchando", name, err); onError && onError(err); }
+  );
+}
+async function upsertDoc(name, item) {
+  try {
+    await setDoc(doc(colRef(name), item.id), item);
+    return true;
+  } catch (e) {
+    console.error("Error guardando", name, item.id, e);
+    return false;
+  }
+}
+async function removeDoc(name, id) {
+  try {
+    await deleteDoc(doc(colRef(name), id));
+    return true;
+  } catch (e) {
+    console.error("Error borrando", name, id, e);
+    return false;
+  }
+}
+function subscribeConfigDoc(fallback, onData, onError) {
+  const ref = doc(firestore, COLLECTION, "config");
   return onSnapshot(
     ref,
     (snap) => onData(snap.exists() ? snap.data().value : fallback),
-    (err) => { console.error("Error escuchando", key, err); onError && onError(err); }
+    (err) => { console.error("Error escuchando config", err); onError && onError(err); }
   );
 }
-async function dbSet(key, value) {
+async function setConfigDoc(value) {
   try {
-    await setDoc(doc(firestore, COLLECTION, key), { value });
+    await setDoc(doc(firestore, COLLECTION, "config"), { value });
     return true;
   } catch (e) {
-    console.error("Error guardando", key, e);
+    console.error("Error guardando config", e);
     return false;
+  }
+}
+
+/* Compara el array anterior con el nuevo y devuelve solo lo que hay
+   que escribir o borrar — así cada mutate() toca únicamente los
+   documentos que realmente cambiaron. */
+function diffArrayById(prevArr, nextArr) {
+  const prevById = new Map(prevArr.map((x) => [x.id, x]));
+  const nextById = new Map(nextArr.map((x) => [x.id, x]));
+  const upserts = [];
+  for (const [id, item] of nextById) {
+    const anterior = prevById.get(id);
+    if (!anterior || JSON.stringify(anterior) !== JSON.stringify(item)) upserts.push(item);
+  }
+  const deletes = [...prevById.keys()].filter((id) => !nextById.has(id));
+  return { upserts, deletes };
+}
+
+/* Migración única desde el formato viejo (un array gigante por
+   documento) al nuevo (un documento por registro). Si ya existen datos
+   en el formato nuevo, no hace nada. Es segura de dejar en el código. */
+async function migrarFormatoViejoSiHaceFalta() {
+  try {
+    for (const name of ["clientes", "visitas", "gastos"]) {
+      const nuevaCol = await getDocs(colRef(name));
+      if (!nuevaCol.empty) continue;
+      const viejoDoc = await getDoc(doc(firestore, COLLECTION, name));
+      if (!viejoDoc.exists()) continue;
+      const arrViejo = viejoDoc.data().value || [];
+      if (arrViejo.length === 0) continue;
+      await Promise.all(arrViejo.map((item) => upsertDoc(name, item)));
+    }
+  } catch (e) {
+    console.error("La migración de datos viejos falló (no crítico):", e);
   }
 }
 
@@ -529,7 +651,7 @@ function AdminGate({ config, onUnlock, onBack, onSetPin }) {
 /* ============================================================
    APP ADMINISTRADOR
    ============================================================ */
-function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo }) {
+function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo, offline }) {
   const [tab, setTab] = useState("inicio");
 
   const tabs = [
@@ -549,8 +671,8 @@ function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo }) {
         right={
           <div className="flex items-center gap-1">
             <span className="flex items-center gap-1 px-1.5 mr-1">
-              <span className="w-1.5 h-1.5 rounded-full" style={{ background: C.accent }} />
-              <span className="text-[10px] font-bold" style={{ color: C.accentSoft }}>en vivo</span>
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: offline ? C.warning : C.accent }} />
+              <span className="text-[10px] font-bold" style={{ color: C.accentSoft }}>{offline ? "sin conexión" : "en vivo"}</span>
             </span>
             <button onClick={undo} disabled={!canUndo} className="p-2 rounded-full active:bg-white/10 disabled:opacity-30"><Undo2 size={16} color="#fff" /></button>
             <button onClick={redo} disabled={!canRedo} className="p-2 rounded-full active:bg-white/10 disabled:opacity-30"><Redo2 size={16} color="#fff" /></button>
@@ -702,7 +824,7 @@ function AdminDashboard({ db }) {
         <div className="text-xs" style={{ color: C.mutedLight }}>Sin visitas registradas en este período.</div>
       ) : (
         <div className="flex flex-col gap-2">
-          {visitasFiltradas.slice().reverse().slice(0, 8).map((v) => {
+          {visitasFiltradas.slice().sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, 8).map((v) => {
             const cliente = db.clientes.find((c) => c.id === v.clienteId);
             const rep = db.config.repartidores.find((r) => r.id === v.repartidorId);
             return (
@@ -1024,10 +1146,48 @@ function AdminHistorial({ db, mutate }) {
   const [filtroRep, setFiltroRep] = useState("todos");
   const [confirmDel, setConfirmDel] = useState(null);
 
+  const hoy = diaSemanaHoy();
+  const fechaHoy = hoyISO();
+
+  // Clientes que forman parte del recorrido de HOY
+  const clientesHoy = db.clientes
+    .filter((c) => c.diasVisita?.includes(hoy))
+    .filter(
+      (c) =>
+        filtroRep === "todos" ||
+        c.repartidorId === filtroRep
+    )
+    .sort(
+      (a, b) =>
+        (Number(a.orden) || 999) -
+          (Number(b.orden) || 999) ||
+        a.nombre.localeCompare(b.nombre)
+    );
+
+  // Clientes ya visitados hoy
+  const idsVisitadosHoy = new Set(
+    db.visitas
+      .filter((v) => v.fecha === fechaHoy)
+      .map((v) => v.clienteId)
+  );
+
+  // Historial:
+  // solamente mostramos visitas cuyo cliente todavía existe
   const visitas = db.visitas
-    .filter((v) => filtroRep === "todos" || v.repartidorId === filtroRep)
+    .filter((v) =>
+      db.clientes.some((c) => c.id === v.clienteId)
+    )
+    .filter(
+      (v) =>
+        filtroRep === "todos" ||
+        v.repartidorId === filtroRep
+    )
     .slice()
-    .reverse();
+    .sort(
+      (a, b) =>
+        (b.timestamp || 0) -
+        (a.timestamp || 0)
+    );
 
   function borrarVisita(v) {
     const next = clone(db);
@@ -1050,6 +1210,78 @@ function AdminHistorial({ db, mutate }) {
           <button key={r.id} onClick={() => setFiltroRep(r.id)} className="px-3 py-1.5 rounded-lg text-xs font-bold flex-shrink-0" style={{ background: filtroRep === r.id ? C.primary : C.surface, color: filtroRep === r.id ? "#fff" : C.muted, border: `1px solid ${filtroRep === r.id ? C.primary : C.border}` }}>{r.nombre}</button>
         ))}
       </div>
+
+      <div
+  className="text-xs font-bold uppercase tracking-wide mb-2 mt-3"
+  style={{ color: C.muted }}
+>
+  Recorrido de hoy
+</div>
+
+{clientesHoy.length === 0 ? (
+  <Card>
+    <div
+      className="text-xs text-center"
+      style={{ color: C.mutedLight }}
+    >
+      No hay clientes programados para hoy.
+    </div>
+  </Card>
+) : (
+  <div className="flex flex-col gap-2 mb-5">
+    {clientesHoy.map((c) => {
+      const rep = db.config.repartidores.find(
+        (r) => r.id === c.repartidorId
+      );
+
+      const visitado = idsVisitadosHoy.has(c.id);
+
+      return (
+        <Card key={c.id}>
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="font-bold text-sm">
+                {c.nombre}
+              </div>
+
+              <div
+                className="text-xs"
+                style={{ color: C.muted }}
+              >
+                {c.direccion}
+              </div>
+
+              <div className="flex gap-1 mt-1.5 flex-wrap">
+                {rep && (
+                  <Badge tone="muted">
+                    {rep.nombre}
+                  </Badge>
+                )}
+
+                {c.orden && (
+                  <Badge tone="accent">
+                    Orden {c.orden}
+                  </Badge>
+                )}
+              </div>
+            </div>
+
+            <Badge tone={visitado ? "success" : "warning"}>
+              {visitado ? "Visitado" : "Pendiente"}
+            </Badge>
+          </div>
+        </Card>
+      );
+    })}
+  </div>
+)}
+
+<div
+  className="text-xs font-bold uppercase tracking-wide mb-2"
+  style={{ color: C.muted }}
+>
+  Historial
+</div>
 
       {visitas.length === 0 ? (
         <EmptyState icon={ClipboardList} title="Sin recorridos registrados" text="Cuando los repartidores empiecen a visitar clientes, va a aparecer acá." />
@@ -1106,7 +1338,7 @@ function AdminGastos({ db, mutate }) {
   function guardar() {
     if (!concepto.trim() || !monto) return;
     const next = clone(db);
-    next.gastos.push({ id: uid(), concepto, monto: Number(monto), fecha: hoyISO() });
+    next.gastos.push({ id: uid(), concepto, monto: Number(monto), fecha: hoyISO(), timestamp: Date.now() });
     mutate(next);
     setConcepto(""); setMonto(""); setSheet(false);
   }
@@ -1119,7 +1351,18 @@ function AdminGastos({ db, mutate }) {
   }
 
   const total = db.gastos.reduce((s, g) => s + g.monto, 0);
-  const lista = db.gastos.slice().reverse();
+
+  const gruposMes = {};
+  db.gastos.forEach((g) => {
+    const mes = g.fecha.slice(0, 7);
+    if (!gruposMes[mes]) gruposMes[mes] = [];
+    gruposMes[mes].push(g);
+  });
+  const meses = Object.keys(gruposMes).sort().reverse();
+  function nombreMesGasto(mesKey) {
+    const [y, m] = mesKey.split("-");
+    return `${NOMBRES_MES[Number(m) - 1]} ${y}`;
+  }
 
   return (
     <div>
@@ -1131,23 +1374,35 @@ function AdminGastos({ db, mutate }) {
         <Btn variant="accent" icon={Plus} onClick={() => setSheet(true)}>Gasto</Btn>
       </Card>
 
-      {lista.length === 0 ? (
+      {meses.length === 0 ? (
         <EmptyState icon={Receipt} title="Sin gastos cargados" text="Registrá combustible, mantenimiento u otros gastos del negocio." />
       ) : (
-        <div className="flex flex-col gap-2">
-          {lista.map((g) => (
-            <Card key={g.id} className="flex items-center justify-between">
-              <div>
-                <div className="font-bold text-sm">{g.concepto}</div>
-                <div className="text-xs" style={{ color: C.muted }}>{fechaLegible(g.fecha)}</div>
+        meses.map((mes) => {
+          const items = gruposMes[mes].slice().sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+          const subtotal = items.reduce((s, g) => s + g.monto, 0);
+          return (
+            <div key={mes} className="mb-4">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-xs font-extrabold uppercase tracking-wide" style={{ color: C.muted }}>{nombreMesGasto(mes)}</div>
+                <div className="font-mono text-xs font-bold">{formatMoney(subtotal)}</div>
               </div>
-              <div className="flex items-center gap-2">
-                <div className="font-mono font-bold text-sm">{formatMoney(g.monto)}</div>
-                <button onClick={() => setConfirmDel(g)} className="p-1 rounded-lg active:bg-black/5"><Trash2 size={14} color={C.danger} /></button>
+              <div className="flex flex-col gap-2">
+                {items.map((g) => (
+                  <Card key={g.id} className="flex items-center justify-between">
+                    <div>
+                      <div className="font-bold text-sm">{g.concepto}</div>
+                      <div className="text-xs" style={{ color: C.muted }}>{fechaLegible(g.fecha)}</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="font-mono font-bold text-sm">{formatMoney(g.monto)}</div>
+                      <button onClick={() => setConfirmDel(g)} className="p-1 rounded-lg active:bg-black/5"><Trash2 size={14} color={C.danger} /></button>
+                    </div>
+                  </Card>
+                ))}
               </div>
-            </Card>
-          ))}
-        </div>
+            </div>
+          );
+        })
       )}
 
       {sheet && (
@@ -1261,6 +1516,20 @@ function AdminAjustes({ db, mutate }) {
         </Card>
       </div>
 
+      <div>
+        <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Exportar datos</div>
+        <Card>
+          <div className="text-xs mb-3" style={{ color: C.muted }}>
+            Descarga archivos CSV (se abren con Excel, Google Sheets o Numbers) para respaldo propio o para pasarle a un contador.
+          </div>
+          <div className="flex flex-col gap-2">
+            <Btn variant="ghost" size="sm" icon={Download} onClick={() => exportarClientesCSV(db)}>Exportar clientes ({db.clientes.length})</Btn>
+            <Btn variant="ghost" size="sm" icon={Download} onClick={() => exportarVisitasCSV(db)}>Exportar ventas ({db.visitas.length})</Btn>
+            <Btn variant="ghost" size="sm" icon={Download} onClick={() => exportarGastosCSV(db)}>Exportar gastos ({db.gastos.length})</Btn>
+          </div>
+        </Card>
+      </div>
+
       {confirmDelRep && (
         <Sheet title="Eliminar repartidor" onClose={() => setConfirmDelRep(null)}>
           <div className="text-sm mb-4">¿Eliminar a <b>{confirmDelRep.nombre}</b>? Los clientes que tenía asignados van a quedar sin repartidor.</div>
@@ -1277,7 +1546,7 @@ function AdminAjustes({ db, mutate }) {
 /* ============================================================
    APP REPARTIDOR
    ============================================================ */
-function RepartidorApp({ db, mutate, repartidor, onLogout }) {
+function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
   const [vista, setVista] = useState("inicio"); // inicio | clientes | recorrido
 
   const misClientes = db.clientes.filter((c) => c.repartidorId === repartidor.id);
@@ -1297,8 +1566,8 @@ function RepartidorApp({ db, mutate, repartidor, onLogout }) {
         right={
           <div className="flex items-center gap-1">
             <span className="flex items-center gap-1 px-1.5 mr-1">
-              <span className="w-1.5 h-1.5 rounded-full" style={{ background: C.accent }} />
-              <span className="text-[10px] font-bold" style={{ color: C.accentSoft }}>en vivo</span>
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: offline ? C.warning : C.accent }} />
+              <span className="text-[10px] font-bold" style={{ color: C.accentSoft }}>{offline ? "sin conexión" : "en vivo"}</span>
             </span>
             <button onClick={onLogout} className="p-2 rounded-full active:bg-white/10"><LogOut size={16} color="#fff" /></button>
           </div>
@@ -1368,7 +1637,11 @@ function RepartidorInicio({ deHoy, pendientes, visitadosCount, enProgreso, onEmp
 
 function RepartidorClientes({ db, mutate, repartidor }) {
   const [sheet, setSheet] = useState(null);
-  const misClientes = db.clientes.filter((c) => c.repartidorId === repartidor.id).sort((a, b) => a.nombre.localeCompare(b.nombre));
+  const [busca, setBusca] = useState("");
+  const misClientes = db.clientes
+    .filter((c) => c.repartidorId === repartidor.id)
+    .filter((c) => c.nombre.toLowerCase().includes(busca.toLowerCase()) || c.direccion.toLowerCase().includes(busca.toLowerCase()))
+    .sort((a, b) => a.nombre.localeCompare(b.nombre));
 
   function guardar(f) {
     const next = clone(db);
@@ -1384,11 +1657,21 @@ function RepartidorClientes({ db, mutate, repartidor }) {
 
   return (
     <div>
-      <div className="flex justify-end mb-3">
-        <Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo cliente</Btn>
+      <div className="flex gap-2 mb-3">
+        <div className="flex-1 relative">
+          <Search size={16} color={C.mutedLight} style={{ position: "absolute", left: 10, top: 11 }} />
+          <input
+            value={busca}
+            onChange={(e) => setBusca(e.target.value)}
+            placeholder="Buscar cliente…"
+            className="w-full rounded-xl pl-8 pr-3 py-2.5 text-sm outline-none"
+            style={{ background: C.surface, border: `1px solid ${C.border}` }}
+          />
+        </div>
+        <Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo</Btn>
       </div>
       {misClientes.length === 0 ? (
-        <EmptyState icon={Users} title="Todavía no tenés clientes" text="Agregá tu primer cliente para que aparezca en tu recorrido." action={<Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo cliente</Btn>} />
+        <EmptyState icon={Users} title={busca ? "Sin resultados" : "Todavía no tenés clientes"} text={busca ? "Probá con otro nombre o dirección." : "Agregá tu primer cliente para que aparezca en tu recorrido."} action={!busca && <Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo cliente</Btn>} />
       ) : (
         <div className="flex flex-col gap-2">
           {misClientes.map((c) => (
@@ -1561,11 +1844,12 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
       retornosFinal[p.key] = relevante ? (retornos[p.key] || 0) : 0;
     });
     const visita = {
-      id: uid(),
-      clienteId: cliente.id,
-      repartidorId: cliente.repartidorId,
-      fecha: hoyISO(),
-      diaSemana: diaSemanaHoy(),
+    id: uid(),
+    clienteId: cliente.id,
+    clienteNombre: cliente.nombre,
+    repartidorId: cliente.repartidorId,
+    fecha: hoyISO(),
+    diaSemana: diaSemanaHoy(),
       vendio,
       items: vendio ? items : [],
       retornos: retornosFinal,
@@ -1711,11 +1995,23 @@ export default function App() {
   return sessionStorage.getItem("adminUnlocked") === "true";
 });
   const [connError, setConnError] = useState(null);
+  const [offline, setOffline] = useState(typeof navigator !== "undefined" ? !navigator.onLine : false);
 
   const pastRef = useRef([]);
   const futureRef = useRef([]);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
+
+  useEffect(() => {
+    const onOnline = () => setOffline(false);
+    const onOffline = () => setOffline(true);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
 
   useEffect(() => {
     const loaded = new Set();
@@ -1726,20 +2022,33 @@ export default function App() {
         setLoading(false);
       }
     }
+    migrarFormatoViejoSiHaceFalta();
     const unsubs = [
-      subscribeDoc("clientes", [], (v) => { setDb((p) => ({ ...p, clientes: v })); markLoaded("clientes"); setConnError(null); }, setConnError),
-      subscribeDoc("visitas", [], (v) => { setDb((p) => ({ ...p, visitas: v })); markLoaded("visitas"); setConnError(null); }, setConnError),
-      subscribeDoc("gastos", [], (v) => { setDb((p) => ({ ...p, gastos: v })); markLoaded("gastos"); setConnError(null); }, setConnError),
-      subscribeDoc("config", clone(DEFAULT_CONFIG), (v) => { setDb((p) => ({ ...p, config: v })); markLoaded("config"); setConnError(null); }, setConnError),
+      subscribeCollection("clientes", (v) => { setDb((p) => ({ ...p, clientes: v })); markLoaded("clientes"); setConnError(null); }, setConnError),
+      subscribeCollection("visitas", (v) => { setDb((p) => ({ ...p, visitas: v })); markLoaded("visitas"); setConnError(null); }, setConnError),
+      subscribeCollection("gastos", (v) => { setDb((p) => ({ ...p, gastos: v })); markLoaded("gastos"); setConnError(null); }, setConnError),
+      subscribeConfigDoc(clone(DEFAULT_CONFIG), (v) => { setDb((p) => ({ ...p, config: v })); markLoaded("config"); setConnError(null); }, setConnError),
     ];
     return () => unsubs.forEach((u) => u());
   }, []);
 
   function persistChanged(prevDb, nextDb) {
-    if (nextDb.clientes !== prevDb.clientes) dbSet("clientes", nextDb.clientes);
-    if (nextDb.visitas !== prevDb.visitas) dbSet("visitas", nextDb.visitas);
-    if (nextDb.gastos !== prevDb.gastos) dbSet("gastos", nextDb.gastos);
-    if (nextDb.config !== prevDb.config) dbSet("config", nextDb.config);
+    if (nextDb.clientes !== prevDb.clientes) {
+      const { upserts, deletes } = diffArrayById(prevDb.clientes, nextDb.clientes);
+      upserts.forEach((c) => upsertDoc("clientes", c));
+      deletes.forEach((id) => removeDoc("clientes", id));
+    }
+    if (nextDb.visitas !== prevDb.visitas) {
+      const { upserts, deletes } = diffArrayById(prevDb.visitas, nextDb.visitas);
+      upserts.forEach((v) => upsertDoc("visitas", v));
+      deletes.forEach((id) => removeDoc("visitas", id));
+    }
+    if (nextDb.gastos !== prevDb.gastos) {
+      const { upserts, deletes } = diffArrayById(prevDb.gastos, nextDb.gastos);
+      upserts.forEach((g) => upsertDoc("gastos", g));
+      deletes.forEach((id) => removeDoc("gastos", id));
+    }
+    if (nextDb.config !== prevDb.config) setConfigDoc(nextDb.config);
   }
 
   const mutate = useCallback((nextDb, opts = { history: true }) => {
@@ -1859,6 +2168,7 @@ export default function App() {
         canRedo={canRedo}
         undo={undo}
         redo={redo}
+        offline={offline}
       />
     );
   }
@@ -1877,7 +2187,7 @@ export default function App() {
         </Screen>
       );
     }
-    return <RepartidorApp db={db} mutate={mutate} repartidor={rep} onLogout={desloguear} />;
+    return <RepartidorApp db={db} mutate={mutate} repartidor={rep} onLogout={desloguear} offline={offline} />;
   }
 
   return null;
