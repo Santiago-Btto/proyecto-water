@@ -5,9 +5,11 @@ import {
   HandCoins, AlertCircle, Search, Edit2, Trash2,
   ArrowLeft, Lock, ClipboardList, CheckCircle2, Circle, BarChart3,
   UserCog, Phone, MapPin, Save, Minus, Settings2,
-  Home as HomeIcon, WifiOff, Download
+  Home as HomeIcon, WifiOff, Download, Boxes
 } from "lucide-react";
-import { collection, doc, onSnapshot, setDoc, deleteDoc, getDoc, getDocs } from "firebase/firestore";
+import {
+  collection, doc, onSnapshot, setDoc, deleteDoc, getDoc, getDocs, increment
+} from "firebase/firestore";
 import { firestore, COLLECTION } from "./firebaseConfig";
 
 /* ============================================================
@@ -45,6 +47,8 @@ const DEFAULT_CONFIG = {
   adminPin: "",
   repartidores: [],
   precios: { b20: 0, b12: 0, sifon: 0, jugo: 0 },
+  stockActivo: false,
+  stockTotal: { b20: 0, b12: 0, sifon: 0 },
 };
 
 /* ============================================================
@@ -85,6 +89,31 @@ function totalPedido(items) {
 }
 function envasesVacio() {
   return { b20: 0, b12: 0, sifon: 0, jugo: 0 };
+}
+function stockVacio() {
+  return { b20: 0, b12: 0, sifon: 0 };
+}
+function stockDeRepartidor(db, repartidorId) {
+  const encontrado = (db.stock || []).find((s) => s.id === repartidorId);
+  return { ...stockVacio(), ...(encontrado || {}) };
+}
+function stockPrestadoClientes(clientes) {
+  const resultado = stockVacio();
+  clientes.forEach((c) => {
+    PRODUCTOS_RETORNABLES.forEach((p) => {
+      resultado[p.key] += Number(c.envasesPrestados?.[p.key]) || 0;
+    });
+  });
+  return resultado;
+}
+function stockTrabajando(stockRepartidores) {
+  const resultado = stockVacio();
+  Object.values(stockRepartidores || {}).forEach((stock) => {
+    PRODUCTOS_RETORNABLES.forEach((p) => {
+      resultado[p.key] += Number(stock?.[p.key]) || 0;
+    });
+  });
+  return resultado;
 }
 function totalEnvasesPrestados(ep) {
   if (!ep) return 0;
@@ -157,7 +186,7 @@ function exportarVisitasCSV(db) {
     const rep = db.config.repartidores.find((r) => r.id === v.repartidorId);
     const productos = (v.items || []).filter((it) => it.cantidad > 0).map((it) => `${it.cantidad}x${PRODUCTOS.find((p) => p.key === it.tipo)?.corto}`).join(" + ");
     return [
-      fechaLegible(v.fecha), cliente?.nombre || "Cliente eliminado", rep?.nombre || "",
+      fechaLegible(v.fecha), cliente?.nombre || v.clienteNombre || "Cliente eliminado", rep?.nombre || "",
       v.vendio ? "Sí" : "No", productos, v.total || 0, v.vendio ? (metodos[v.metodoPago] || "") : "",
       v.deudaGenerada || 0, v.deudaCobrada || 0, textoDevoluciones(v) || "", v.notas || "",
     ];
@@ -186,6 +215,25 @@ function exportarGastosCSV(db) {
    ============================================================ */
 function colRef(name) {
   return collection(firestore, `${COLLECTION}_${name}`);
+}
+
+/* Movimiento atómico del stock de una camioneta.
+   delta positivo = salió de camioneta y quedó con el cliente.
+   delta negativo = volvió del cliente a la camioneta. */
+async function moverStockRepartidor(repartidorId, delta, signo = 1) {
+  const cambios = {};
+  PRODUCTOS_RETORNABLES.forEach((p) => {
+    const movimiento = Number(delta[p.key]) || 0;
+    if (movimiento !== 0) cambios[p.key] = increment(-movimiento * signo);
+  });
+  if (Object.keys(cambios).length === 0) return true;
+  try {
+    await setDoc(doc(colRef("stock"), repartidorId), cambios, { merge: true });
+    return true;
+  } catch (e) {
+    console.error("Error actualizando stock del repartidor", repartidorId, e);
+    return false;
+  }
 }
 function subscribeCollection(name, onData, onError) {
   return onSnapshot(
@@ -261,6 +309,35 @@ async function migrarFormatoViejoSiHaceFalta() {
     }
   } catch (e) {
     console.error("La migración de datos viejos falló (no crítico):", e);
+  }
+}
+
+/* Migra una única vez stockRepartidores guardado dentro de config
+   al nuevo formato: un documento por repartidor en repartoAgua_stock. */
+async function migrarStockViejoSiHaceFalta() {
+  try {
+    const nuevaCol = await getDocs(colRef("stock"));
+    if (!nuevaCol.empty) return;
+
+    const configSnap = await getDoc(doc(firestore, COLLECTION, "config"));
+    if (!configSnap.exists()) return;
+
+    const config = configSnap.data().value || {};
+    const viejo = config.stockRepartidores;
+    if (!viejo || Object.keys(viejo).length === 0) return;
+
+    await Promise.all(
+      Object.entries(viejo).map(([repartidorId, stock]) =>
+        upsertDoc("stock", {
+          id: repartidorId,
+          b20: Number(stock?.b20) || 0,
+          b12: Number(stock?.b12) || 0,
+          sifon: Number(stock?.sifon) || 0,
+        })
+      )
+    );
+  } catch (e) {
+    console.error("La migración de stock viejo falló (no crítico):", e);
   }
 }
 
@@ -658,6 +735,7 @@ function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo, offline 
     { key: "inicio", label: "Inicio", icon: BarChart3 },
     { key: "clientes", label: "Clientes", icon: Users },
     { key: "historial", label: "Recorridos", icon: ClipboardList },
+    { key: "stock", label: "Stock", icon: Boxes },
     { key: "gastos", label: "Gastos", icon: Receipt },
     { key: "ajustes", label: "Ajustes", icon: Settings2 },
   ];
@@ -684,6 +762,7 @@ function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo, offline 
         {tab === "inicio" && <AdminDashboard db={db} />}
         {tab === "clientes" && <AdminClientes db={db} mutate={mutate} />}
         {tab === "historial" && <AdminHistorial db={db} mutate={mutate} />}
+        {tab === "stock" && <AdminStock db={db} mutate={mutate} />}
         {tab === "gastos" && <AdminGastos db={db} mutate={mutate} />}
         {tab === "ajustes" && <AdminAjustes db={db} mutate={mutate} />}
       </div>
@@ -804,7 +883,7 @@ function AdminDashboard({ db }) {
           <div className="font-mono font-extrabold text-xl" style={{ color: deudaTotalClientes > 0 ? C.danger : C.ink }}>{formatMoney(deudaTotalClientes)}</div>
         </Card>
         <Card>
-          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Envases en la calle</div>
+          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Prestados a clientes</div>
           <div className="font-mono font-extrabold text-xl">{envasesEnCalle}</div>
         </Card>
         <Card>
@@ -830,7 +909,7 @@ function AdminDashboard({ db }) {
             return (
               <Card key={v.id}>
                 <div className="flex items-center justify-between">
-                  <div className="font-bold text-sm">{cliente?.nombre || "Cliente eliminado"}</div>
+                  <div className="font-bold text-sm">{cliente?.nombre || v.clienteNombre || "Cliente eliminado"}</div>
                   {v.vendio ? <Badge tone="success">{formatMoney(v.total)}</Badge> : <Badge tone="muted">No vendió</Badge>}
                 </div>
                 <div className="text-xs mt-0.5" style={{ color: C.muted }}>
@@ -948,6 +1027,7 @@ function AdminClientes({ db, mutate }) {
   }
 
   function eliminarCliente(c) {
+    if (totalEnvasesPrestados(c.envasesPrestados) > 0) return;
     const next = clone(db);
     next.clientes = next.clientes.filter((x) => x.id !== c.id);
     mutate(next);
@@ -1040,13 +1120,33 @@ function AdminClientes({ db, mutate }) {
 
       {confirmDel && (
         <Sheet title="Eliminar cliente" onClose={() => setConfirmDel(null)}>
-          <div className="text-sm mb-4">
-            ¿Seguro que querés eliminar a <b>{confirmDel.nombre}</b>? Podés deshacerlo después con el botón deshacer.
-          </div>
-          <div className="flex gap-2">
-            <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>Cancelar</Btn>
-            <Btn variant="danger" full onClick={() => eliminarCliente(confirmDel)}>Eliminar</Btn>
-          </div>
+          {totalEnvasesPrestados(confirmDel.envasesPrestados) > 0 ? (
+            <>
+              <Card style={{ background: C.warningBg, border: "none" }} className="mb-3">
+                <div className="text-sm font-bold" style={{ color: C.warning }}>No se puede eliminar este cliente.</div>
+                <div className="text-xs mt-1" style={{ color: C.muted }}>
+                  La empresa todavía tiene envases prestados a este cliente.
+                </div>
+                <div className="font-bold text-sm mt-2" style={{ color: C.danger }}>
+                  {textoEnvasesPrestados(confirmDel.envasesPrestados)}
+                </div>
+                <div className="text-xs mt-2" style={{ color: C.muted }}>
+                  Primero registrá la devolución de los envases y después vas a poder eliminarlo.
+                </div>
+              </Card>
+              <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>Volver</Btn>
+            </>
+          ) : (
+            <>
+              <div className="text-sm mb-4">
+                ¿Seguro que querés eliminar a <b>{confirmDel.nombre}</b>? Podés deshacerlo después con el botón deshacer.
+              </div>
+              <div className="flex gap-2">
+                <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>Cancelar</Btn>
+                <Btn variant="danger" full onClick={() => eliminarCliente(confirmDel)}>Eliminar</Btn>
+              </div>
+            </>
+          )}
         </Sheet>
       )}
     </div>
@@ -1141,7 +1241,7 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
   );
 }
 
-/* ---------- Historial (admin) ---------- */
+/* ---------- Recorridos + historial (admin) ---------- */
 function AdminHistorial({ db, mutate }) {
   const [filtroRep, setFiltroRep] = useState("todos");
   const [confirmDel, setConfirmDel] = useState(null);
@@ -1149,55 +1249,38 @@ function AdminHistorial({ db, mutate }) {
   const hoy = diaSemanaHoy();
   const fechaHoy = hoyISO();
 
-  // Clientes que forman parte del recorrido de HOY
+  // Todos los clientes programados para hoy, aunque todavía no tengan visita.
   const clientesHoy = db.clientes
     .filter((c) => c.diasVisita?.includes(hoy))
-    .filter(
-      (c) =>
-        filtroRep === "todos" ||
-        c.repartidorId === filtroRep
-    )
-    .sort(
-      (a, b) =>
-        (Number(a.orden) || 999) -
-          (Number(b.orden) || 999) ||
-        a.nombre.localeCompare(b.nombre)
-    );
+    .filter((c) => filtroRep === "todos" || c.repartidorId === filtroRep)
+    .sort((a, b) => (Number(a.orden) || 999) - (Number(b.orden) || 999) || a.nombre.localeCompare(b.nombre));
 
-  // Clientes ya visitados hoy
   const idsVisitadosHoy = new Set(
-    db.visitas
-      .filter((v) => v.fecha === fechaHoy)
-      .map((v) => v.clienteId)
+    db.visitas.filter((v) => v.fecha === fechaHoy).map((v) => v.clienteId)
   );
 
-  // Historial:
-  // solamente mostramos visitas cuyo cliente todavía existe
+  // En el historial no mostramos visitas de clientes que ya fueron eliminados.
+  // Los registros siguen guardados en Firebase y siguen contando en los totales contables.
   const visitas = db.visitas
-    .filter((v) =>
-      db.clientes.some((c) => c.id === v.clienteId)
-    )
-    .filter(
-      (v) =>
-        filtroRep === "todos" ||
-        v.repartidorId === filtroRep
-    )
+    .filter((v) => db.clientes.some((c) => c.id === v.clienteId))
+    .filter((v) => filtroRep === "todos" || v.repartidorId === filtroRep)
     .slice()
-    .sort(
-      (a, b) =>
-        (b.timestamp || 0) -
-        (a.timestamp || 0)
-    );
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
   function borrarVisita(v) {
     const next = clone(db);
+    const delta = calcularDeltaEnvases(v);
+
     next.visitas = next.visitas.filter((x) => x.id !== v.id);
     const ci = next.clientes.findIndex((c) => c.id === v.clienteId);
     if (ci >= 0) {
       if (v.deudaGenerada) next.clientes[ci].deudaAcumulada = Math.max(0, (next.clientes[ci].deudaAcumulada || 0) - v.deudaGenerada);
       if (v.deudaCobrada) next.clientes[ci].deudaAcumulada = (next.clientes[ci].deudaAcumulada || 0) + v.deudaCobrada;
-      next.clientes[ci].envasesPrestados = aplicarDeltaEnvases(next.clientes[ci].envasesPrestados, calcularDeltaEnvases(v), -1);
+      next.clientes[ci].envasesPrestados = aplicarDeltaEnvases(next.clientes[ci].envasesPrestados, delta, -1);
     }
+
+    if (db.config.stockActivo) moverStockRepartidor(v.repartidorId, delta, -1);
+
     mutate(next);
     setConfirmDel(null);
   }
@@ -1211,80 +1294,38 @@ function AdminHistorial({ db, mutate }) {
         ))}
       </div>
 
-      <div
-  className="text-xs font-bold uppercase tracking-wide mb-2 mt-3"
-  style={{ color: C.muted }}
->
-  Recorrido de hoy
-</div>
-
-{clientesHoy.length === 0 ? (
-  <Card>
-    <div
-      className="text-xs text-center"
-      style={{ color: C.mutedLight }}
-    >
-      No hay clientes programados para hoy.
-    </div>
-  </Card>
-) : (
-  <div className="flex flex-col gap-2 mb-5">
-    {clientesHoy.map((c) => {
-      const rep = db.config.repartidores.find(
-        (r) => r.id === c.repartidorId
-      );
-
-      const visitado = idsVisitadosHoy.has(c.id);
-
-      return (
-        <Card key={c.id}>
-          <div className="flex items-center justify-between gap-2">
-            <div className="min-w-0 flex-1">
-              <div className="font-bold text-sm">
-                {c.nombre}
-              </div>
-
-              <div
-                className="text-xs"
-                style={{ color: C.muted }}
-              >
-                {c.direccion}
-              </div>
-
-              <div className="flex gap-1 mt-1.5 flex-wrap">
-                {rep && (
-                  <Badge tone="muted">
-                    {rep.nombre}
-                  </Badge>
-                )}
-
-                {c.orden && (
-                  <Badge tone="accent">
-                    Orden {c.orden}
-                  </Badge>
-                )}
-              </div>
-            </div>
-
-            <Badge tone={visitado ? "success" : "warning"}>
-              {visitado ? "Visitado" : "Pendiente"}
-            </Badge>
-          </div>
+      <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Recorrido de hoy</div>
+      {clientesHoy.length === 0 ? (
+        <Card className="mb-5">
+          <div className="text-xs text-center" style={{ color: C.mutedLight }}>No hay clientes programados para hoy.</div>
         </Card>
-      );
-    })}
-  </div>
-)}
+      ) : (
+        <div className="flex flex-col gap-2 mb-5">
+          {clientesHoy.map((c) => {
+            const rep = db.config.repartidores.find((r) => r.id === c.repartidorId);
+            const visitado = idsVisitadosHoy.has(c.id);
+            return (
+              <Card key={c.id}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-bold text-sm">{c.nombre}</div>
+                    <div className="text-xs" style={{ color: C.muted }}>{c.direccion}</div>
+                    <div className="flex gap-1 mt-1.5 flex-wrap">
+                      {rep && <Badge tone="muted">{rep.nombre}</Badge>}
+                      {c.orden && <Badge tone="accent">Orden {c.orden}</Badge>}
+                    </div>
+                  </div>
+                  <Badge tone={visitado ? "success" : "warning"}>{visitado ? "Visitado" : "Pendiente"}</Badge>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
 
-<div
-  className="text-xs font-bold uppercase tracking-wide mb-2"
-  style={{ color: C.muted }}
->
-  Historial
-</div>
-
+      <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Historial</div>
       {visitas.length === 0 ? (
-        <EmptyState icon={ClipboardList} title="Sin recorridos registrados" text="Cuando los repartidores empiecen a visitar clientes, va a aparecer acá." />
+        <EmptyState icon={ClipboardList} title="Sin visitas registradas" text="Cuando los repartidores registren visitas, van a aparecer acá." />
       ) : (
         <div className="flex flex-col gap-2">
           {visitas.map((v) => {
@@ -1294,11 +1335,11 @@ function AdminHistorial({ db, mutate }) {
               <Card key={v.id}>
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
-                    <div className="font-bold text-sm">{cliente?.nombre || "Cliente eliminado"}</div>
+                    <div className="font-bold text-sm">{cliente?.nombre || v.clienteNombre || "Cliente"}</div>
                     <div className="text-xs" style={{ color: C.muted }}>{fechaLegible(v.fecha)} · {rep?.nombre || "—"}</div>
                     {v.vendio ? (
                       <div className="text-xs mt-1">
-                        {v.items.filter((it) => it.cantidad > 0).map((it) => `${it.cantidad}× ${PRODUCTOS.find((p) => p.key === it.tipo)?.corto}`).join(", ")}
+                        {(v.items || []).filter((it) => it.cantidad > 0).map((it) => `${it.cantidad}× ${PRODUCTOS.find((p) => p.key === it.tipo)?.corto}`).join(", ")}
                         {" — "}<span className="font-mono font-bold">{formatMoney(v.total)}</span>
                       </div>
                     ) : (
@@ -1317,13 +1358,132 @@ function AdminHistorial({ db, mutate }) {
 
       {confirmDel && (
         <Sheet title="Eliminar visita" onClose={() => setConfirmDel(null)}>
-          <div className="text-sm mb-4">Se va a revertir el efecto en la deuda y los envases del cliente. Podés deshacerlo con el botón deshacer.</div>
+          <div className="text-sm mb-4">Se va a revertir el efecto en la deuda, los envases del cliente y el stock de la camioneta.</div>
           <div className="flex gap-2">
             <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>Cancelar</Btn>
             <Btn variant="danger" full onClick={() => borrarVisita(confirmDel)}>Eliminar</Btn>
           </div>
         </Sheet>
       )}
+    </div>
+  );
+}
+
+/* ---------- Stock general (admin) ---------- */
+function AdminStock({ db, mutate }) {
+  const [total, setTotal] = useState(() => ({ ...stockVacio(), ...(db.config.stockTotal || {}) }));
+  const [porRepartidor, setPorRepartidor] = useState(() => {
+    const resultado = {};
+    db.config.repartidores.forEach((r) => { resultado[r.id] = stockDeRepartidor(db, r.id); });
+    return resultado;
+  });
+  const [mensaje, setMensaje] = useState("");
+
+  // Si cambian los repartidores o llega stock nuevo desde Firestore,
+  // mantenemos la pantalla sincronizada.
+  useEffect(() => {
+    setTotal({ ...stockVacio(), ...(db.config.stockTotal || {}) });
+    const resultado = {};
+    db.config.repartidores.forEach((r) => { resultado[r.id] = stockDeRepartidor(db, r.id); });
+    setPorRepartidor(resultado);
+  }, [db.config.stockTotal, db.config.repartidores, db.stock]);
+
+  const prestados = stockPrestadoClientes(db.clientes);
+  const trabajando = stockTrabajando(porRepartidor);
+  const galpon = stockVacio();
+  PRODUCTOS_RETORNABLES.forEach((p) => {
+    galpon[p.key] = (Number(total[p.key]) || 0) - (trabajando[p.key] || 0) - (prestados[p.key] || 0);
+  });
+
+  function cambiarStockRep(repId, tipo, valor) {
+    setMensaje("");
+    setPorRepartidor((prev) => ({
+      ...prev,
+      [repId]: { ...stockVacio(), ...(prev[repId] || {}), [tipo]: Math.max(0, Number(valor) || 0) },
+    }));
+  }
+
+  function guardarStock() {
+    const productoConError = PRODUCTOS_RETORNABLES.find((p) => galpon[p.key] < 0);
+    if (productoConError) {
+      setMensaje(`Error: asignaste más ${productoConError.label} de los que posee la empresa.`);
+      return;
+    }
+
+    const next = clone(db);
+    next.config.stockActivo = true;
+    delete next.config.stockRepartidores;
+    next.config.stockTotal = {
+      b20: Number(total.b20) || 0,
+      b12: Number(total.b12) || 0,
+      sifon: Number(total.sifon) || 0,
+    };
+    next.stock = db.config.repartidores.map((r) => ({
+      id: r.id,
+      ...stockVacio(),
+      ...(porRepartidor[r.id] || {}),
+    }));
+
+    mutate(next);
+    setMensaje("Stock guardado ✓");
+  }
+
+  return (
+    <div>
+      {!db.config.stockActivo && (
+        <Card style={{ background: C.warningBg, border: "none" }} className="mb-3">
+          <div className="text-xs font-semibold" style={{ color: C.warning }}>
+            Cargá el stock total y el stock de cada camioneta. Al guardar se activa el control automático de stock.
+          </div>
+        </Card>
+      )}
+
+      <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Stock general</div>
+      <Card className="mb-4">
+        <div className="text-xs mb-3" style={{ color: C.muted }}>
+          Total propiedad = Galpón + Camionetas + Prestados a clientes.
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs" style={{ minWidth: Math.max(650, 390 + db.config.repartidores.length * 90) }}>
+            <thead>
+              <tr style={{ color: C.muted }}>
+                <th className="text-left py-2 pr-2">Producto</th>
+                <th className="text-center py-2">Total</th>
+                <th className="text-center py-2">Galpón</th>
+                {db.config.repartidores.map((r) => <th key={r.id} className="text-center py-2 px-1">{r.nombre}</th>)}
+                <th className="text-center py-2">Prestados</th>
+                <th className="text-center py-2">Trabajando</th>
+              </tr>
+            </thead>
+            <tbody>
+              {PRODUCTOS_RETORNABLES.map((p) => (
+                <tr key={p.key} style={{ borderTop: `1px solid ${C.border}` }}>
+                  <td className="py-2 pr-2 font-bold whitespace-nowrap">{p.label}</td>
+                  <td className="p-1">
+                    <Input type="number" inputMode="numeric" value={total[p.key]} onChange={(e) => setTotal({ ...total, [p.key]: Math.max(0, Number(e.target.value) || 0) })} style={{ width: 70, textAlign: "center" }} />
+                  </td>
+                  <td className="text-center font-bold" style={{ color: galpon[p.key] < 0 ? C.danger : C.ink }}>{galpon[p.key]}</td>
+                  {db.config.repartidores.map((r) => (
+                    <td key={r.id} className="p-1">
+                      <Input type="number" inputMode="numeric" value={porRepartidor[r.id]?.[p.key] || 0} onChange={(e) => cambiarStockRep(r.id, p.key, e.target.value)} style={{ width: 65, textAlign: "center" }} />
+                    </td>
+                  ))}
+                  <td className="text-center font-bold" style={{ color: C.danger }}>{prestados[p.key]}</td>
+                  <td className="text-center font-bold" style={{ color: C.primary }}>{trabajando[p.key]}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="text-[11px] mt-3" style={{ color: C.mutedLight }}>
+          Galpón se calcula solo. Para pasar envases del galpón a una camioneta, aumentá la cantidad de ese repartidor y guardá.
+        </div>
+
+        {mensaje && <div className="text-xs font-bold mt-3" style={{ color: mensaje.includes("✓") ? C.success : C.danger }}>{mensaje}</div>}
+        <div className="mt-3"><Btn full icon={Save} onClick={guardarStock}>Guardar stock</Btn></div>
+      </Card>
     </div>
   );
 }
@@ -1455,6 +1615,7 @@ function AdminAjustes({ db, mutate }) {
   function eliminarRepartidor(r) {
     const next = clone(db);
     next.config.repartidores = next.config.repartidores.filter((x) => x.id !== r.id);
+    next.stock = (next.stock || []).filter((x) => x.id !== r.id);
     mutate(next);
     setConfirmDelRep(null);
   }
@@ -1705,15 +1866,21 @@ function RepartidorRecorrido({ db, mutate, repartidor, clientes, visitadosIds, o
   function registrarVisita(cliente, visita) {
     const next = clone(db);
     next.visitas.push(visita);
+
+    const delta = calcularDeltaEnvases(visita);
     const ci = next.clientes.findIndex((c) => c.id === cliente.id);
     if (ci >= 0) {
       let deuda = next.clientes[ci].deudaAcumulada || 0;
       deuda -= visita.deudaCobrada || 0;
       deuda += visita.deudaGenerada || 0;
       next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
-      next.clientes[ci].envasesPrestados = aplicarDeltaEnvases(next.clientes[ci].envasesPrestados, calcularDeltaEnvases(visita), 1);
+      next.clientes[ci].envasesPrestados = aplicarDeltaEnvases(next.clientes[ci].envasesPrestados, delta, 1);
     }
+
+    // Visita y cliente se guardan normalmente; el stock de la camioneta
+    // se mueve por separado con increment() para evitar escrituras pisadas.
     mutate(next, { history: false });
+    if (db.config.stockActivo) moverStockRepartidor(repartidor.id, delta);
     setActivo(null);
   }
 
@@ -1753,6 +1920,8 @@ function RepartidorRecorrido({ db, mutate, repartidor, clientes, visitadosIds, o
         <VisitaSheet
           cliente={activo}
           precios={db.config.precios}
+          stockActivo={db.config.stockActivo}
+          stockRepartidor={stockDeRepartidor(db, repartidor.id)}
           onClose={() => setActivo(null)}
           onGuardar={(visita) => registrarVisita(activo, visita)}
         />
@@ -1797,7 +1966,7 @@ function ClienteVisitaCard({ cliente, hecho, onClick }) {
 
 const NOTAS_RAPIDAS = ["No estaba", "No quiso hoy", "Volver más tarde"];
 
-function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
+function VisitaSheet({ cliente, precios, stockActivo, stockRepartidor, onClose, onGuardar }) {
   const saldoActual = cliente.envasesPrestados || envasesVacio();
   const [vendio, setVendio] = useState(true);
   const [items, setItems] = useState(
@@ -1810,11 +1979,12 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
   });
   const [retornosTocados, setRetornosTocados] = useState(() => new Set());
   const [metodoPago, setMetodoPago] = useState("efectivo");
-  const [montoPagado, setMontoPagado] = useState(null); // null = total completo
+  const [montoPagado, setMontoPagado] = useState(null);
   const [cobrarDeuda, setCobrarDeuda] = useState(false);
   const [montoDeuda, setMontoDeuda] = useState(cliente.deudaAcumulada || 0);
   const [metodoDeuda, setMetodoDeuda] = useState("efectivo");
   const [notas, setNotas] = useState("");
+  const [errorStock, setErrorStock] = useState("");
 
   const total = totalPedido(items);
   const pagadoFinal = montoPagado === null ? total : Number(montoPagado) || 0;
@@ -1822,19 +1992,46 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
 
   function actualizarCantidad(idx, valor) {
     const p = PRODUCTOS[idx];
+    setErrorStock("");
     setItems(items.map((it, i) => (i === idx ? { ...it, cantidad: valor } : it)));
-    // Por defecto asumimos cambio 1x1 (devuelve lo mismo que se le entrega),
-    // salvo que el repartidor ya haya ajustado la devolución a mano.
     if (p.retornable && !retornosTocados.has(p.key)) {
       setRetornos((r) => ({ ...r, [p.key]: valor }));
     }
   }
+
   function actualizarRetorno(tipo, valor) {
+    setErrorStock("");
     setRetornosTocados((prev) => new Set(prev).add(tipo));
     setRetornos((r) => ({ ...r, [tipo]: Math.max(0, valor) }));
   }
 
   function guardar() {
+    setErrorStock("");
+
+    // No se puede entregar más producto retornable del que lleva la camioneta.
+    if (vendio && stockActivo) {
+      for (const p of PRODUCTOS_RETORNABLES) {
+        const cantidad = Number(items.find((it) => it.tipo === p.key)?.cantidad) || 0;
+        const disponible = Number(stockRepartidor?.[p.key]) || 0;
+        if (cantidad > disponible) {
+          setErrorStock(`No hay suficientes ${p.label}. La camioneta tiene ${disponible} y estás intentando entregar ${cantidad}.`);
+          return;
+        }
+      }
+    }
+
+    // El cliente no puede devolver más envases que los que debía + los que recibe hoy.
+    for (const p of PRODUCTOS_RETORNABLES) {
+      const entregados = vendio ? (Number(items.find((it) => it.tipo === p.key)?.cantidad) || 0) : 0;
+      const debeAntes = Number(saldoActual[p.key]) || 0;
+      const devolvio = Number(retornos[p.key]) || 0;
+      const maximo = debeAntes + entregados;
+      if (devolvio > maximo) {
+        setErrorStock(`${cliente.nombre} no puede devolver ${devolvio} ${p.label}. Como máximo puede devolver ${maximo}.`);
+        return;
+      }
+    }
+
     const retornosFinal = {};
     PRODUCTOS_RETORNABLES.forEach((p) => {
       const idx = PRODUCTOS.findIndex((x) => x.key === p.key);
@@ -1843,13 +2040,14 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
       const relevante = vendio ? (cant > 0 || saldo > 0) : (saldo > 0);
       retornosFinal[p.key] = relevante ? (retornos[p.key] || 0) : 0;
     });
+
     const visita = {
-    id: uid(),
-    clienteId: cliente.id,
-    clienteNombre: cliente.nombre,
-    repartidorId: cliente.repartidorId,
-    fecha: hoyISO(),
-    diaSemana: diaSemanaHoy(),
+      id: uid(),
+      clienteId: cliente.id,
+      clienteNombre: cliente.nombre,
+      repartidorId: cliente.repartidorId,
+      fecha: hoyISO(),
+      diaSemana: diaSemanaHoy(),
       vendio,
       items: vendio ? items : [],
       retornos: retornosFinal,
@@ -1862,6 +2060,7 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
       notas,
       timestamp: Date.now(),
     };
+
     if (visita.deudaCobrada) {
       visita.pagos = { ...visita.pagos, [metodoDeuda]: (visita.pagos[metodoDeuda] || 0) + visita.deudaCobrada };
     }
@@ -1877,15 +2076,20 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
     >
       <div className="text-xs mb-3" style={{ color: C.muted }}>{cliente.direccion}</div>
 
+      {stockActivo && (
+        <Card style={{ background: C.accentSoft, border: "none" }} className="mb-3">
+          <div className="text-[11px] font-bold uppercase tracking-wide mb-1" style={{ color: C.primary }}>Stock en camioneta</div>
+          <div className="flex gap-2 flex-wrap">
+            {PRODUCTOS_RETORNABLES.map((p) => <Badge key={p.key} tone="accent">{p.corto}: {Number(stockRepartidor?.[p.key]) || 0}</Badge>)}
+          </div>
+        </Card>
+      )}
+
       {cliente.deudaAcumulada > 0 && (
         <Card style={{ background: C.dangerBg, border: "none" }} className="mb-3">
           <div className="flex items-center justify-between mb-2">
             <div className="text-xs font-bold" style={{ color: C.danger }}>Debe {formatMoney(cliente.deudaAcumulada)} de antes</div>
-            <button
-              onClick={() => setCobrarDeuda(!cobrarDeuda)}
-              className="px-2.5 py-1 rounded-lg text-xs font-bold"
-              style={{ background: cobrarDeuda ? C.danger : "#fff", color: cobrarDeuda ? "#fff" : C.danger, border: `1px solid ${C.danger}` }}
-            >
+            <button onClick={() => setCobrarDeuda(!cobrarDeuda)} className="px-2.5 py-1 rounded-lg text-xs font-bold" style={{ background: cobrarDeuda ? C.danger : "#fff", color: cobrarDeuda ? "#fff" : C.danger, border: `1px solid ${C.danger}` }}>
               {cobrarDeuda ? "Cobrando" : "Cobrar deuda"}
             </button>
           </div>
@@ -1934,28 +2138,29 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
               );
             })}
           </div>
+
           <div className="flex items-center justify-between mb-3 pt-2" style={{ borderTop: `1px dashed ${C.border}` }}>
             <span className="text-sm font-bold">Total</span>
             <span className="font-mono font-extrabold text-lg">{formatMoney(total)}</span>
           </div>
+
           <Field label="Forma de pago">
             <div className="flex gap-2">
               {[["efectivo", "Efectivo", Banknote], ["mercadopago", "Mercado Pago", CreditCard], ["deuda", "Fía (deuda)", HandCoins]].map(([k, l, Icon]) => (
                 <button key={k} onClick={() => setMetodoPago(k)} className="flex-1 flex flex-col items-center gap-1 py-2 rounded-xl" style={{ background: metodoPago === k ? C.primary : C.bg, color: metodoPago === k ? "#fff" : C.muted }}>
-                  <Icon size={16} />
-                  <span className="text-xs font-bold text-center">{l}</span>
+                  <Icon size={16} /><span className="text-xs font-bold text-center">{l}</span>
                 </button>
               ))}
             </div>
           </Field>
+
           {metodoPago !== "deuda" && (
             <Field label="Monto pagado ahora" hint={restante > 0 ? `Queda pendiente ${formatMoney(restante)}, se suma a la deuda.` : null}>
               <Input type="number" inputMode="decimal" value={montoPagado === null ? total : montoPagado} onChange={(e) => setMontoPagado(e.target.value)} />
             </Field>
           )}
-          <Field label="Notas de la visita">
-            <Textarea rows={2} value={notas} onChange={(e) => setNotas(e.target.value)} />
-          </Field>
+
+          <Field label="Notas de la visita"><Textarea rows={2} value={notas} onChange={(e) => setNotas(e.target.value)} /></Field>
         </>
       ) : (
         <>
@@ -1966,6 +2171,7 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
               ))}
             </div>
           </Field>
+
           {PRODUCTOS_RETORNABLES.some((p) => (saldoActual[p.key] || 0) > 0) && (
             <Field label="¿Te devolvió envases vacíos igual?" hint="Aunque no haya comprado, puede haberte dado envases pendientes de antes.">
               <div className="flex flex-col gap-2">
@@ -1980,6 +2186,15 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
           )}
         </>
       )}
+
+      {errorStock && (
+        <Card style={{ background: C.dangerBg, border: "none" }} className="mt-3">
+          <div className="text-xs font-bold flex items-start gap-1.5" style={{ color: C.danger }}>
+            <AlertCircle size={14} className="flex-shrink-0 mt-0.5" />
+            <span>{errorStock}</span>
+          </div>
+        </Card>
+      )}
     </Sheet>
   );
 }
@@ -1989,7 +2204,7 @@ function VisitaSheet({ cliente, precios, onClose, onGuardar }) {
    ============================================================ */
 export default function App() {
   const [loading, setLoading] = useState(true);
-  const [db, setDb] = useState({ clientes: [], visitas: [], gastos: [], config: clone(DEFAULT_CONFIG) });
+  const [db, setDb] = useState({ clientes: [], visitas: [], gastos: [], stock: [], config: clone(DEFAULT_CONFIG) });
   const [profile, setProfile] = useState(null); // null(cargando) | 'picker' | {type:'admin'} | {type:'repartidor', id}
   const [adminUnlocked, setAdminUnlocked] = useState(() => {
   return sessionStorage.getItem("adminUnlocked") === "true";
@@ -2017,17 +2232,29 @@ export default function App() {
     const loaded = new Set();
     function markLoaded(key) {
       loaded.add(key);
-      if (loaded.size === 4) {
+      if (loaded.size === 5) {
         setProfile(getLocalProfile() || "picker");
         setLoading(false);
       }
     }
     migrarFormatoViejoSiHaceFalta();
+    migrarStockViejoSiHaceFalta();
     const unsubs = [
       subscribeCollection("clientes", (v) => { setDb((p) => ({ ...p, clientes: v })); markLoaded("clientes"); setConnError(null); }, setConnError),
       subscribeCollection("visitas", (v) => { setDb((p) => ({ ...p, visitas: v })); markLoaded("visitas"); setConnError(null); }, setConnError),
       subscribeCollection("gastos", (v) => { setDb((p) => ({ ...p, gastos: v })); markLoaded("gastos"); setConnError(null); }, setConnError),
-      subscribeConfigDoc(clone(DEFAULT_CONFIG), (v) => { setDb((p) => ({ ...p, config: v })); markLoaded("config"); setConnError(null); }, setConnError),
+      subscribeCollection("stock", (v) => { setDb((p) => ({ ...p, stock: v })); markLoaded("stock"); setConnError(null); }, setConnError),
+      subscribeConfigDoc(clone(DEFAULT_CONFIG), (v) => {
+        const normalizada = {
+          ...clone(DEFAULT_CONFIG),
+          ...v,
+          precios: { ...DEFAULT_CONFIG.precios, ...(v?.precios || {}) },
+          stockTotal: { ...DEFAULT_CONFIG.stockTotal, ...(v?.stockTotal || {}) },
+        };
+        setDb((p) => ({ ...p, config: normalizada }));
+        markLoaded("config");
+        setConnError(null);
+      }, setConnError),
     ];
     return () => unsubs.forEach((u) => u());
   }, []);
@@ -2047,6 +2274,11 @@ export default function App() {
       const { upserts, deletes } = diffArrayById(prevDb.gastos, nextDb.gastos);
       upserts.forEach((g) => upsertDoc("gastos", g));
       deletes.forEach((id) => removeDoc("gastos", id));
+    }
+    if (nextDb.stock !== prevDb.stock) {
+      const { upserts, deletes } = diffArrayById(prevDb.stock || [], nextDb.stock || []);
+      upserts.forEach((st) => upsertDoc("stock", st));
+      deletes.forEach((id) => removeDoc("stock", id));
     }
     if (nextDb.config !== prevDb.config) setConfigDoc(nextDb.config);
   }
