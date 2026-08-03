@@ -97,14 +97,58 @@ function stockDeRepartidor(db, repartidorId) {
   const encontrado = (db.stock || []).find((s) => s.id === repartidorId);
   return { ...stockVacio(), ...(encontrado || {}) };
 }
-function stockPrestadoClientes(clientes) {
+function envasesPermanentesDe(cliente) {
+  return {
+    ...envasesVacio(),
+    ...(cliente?.envasesPermanentes || cliente?.envasesPrestados || {}),
+  };
+}
+function envasesExtraDe(cliente) {
+  return {
+    ...envasesVacio(),
+    ...(cliente?.envasesExtra || {}),
+  };
+}
+function envasesTotalesDe(cliente) {
+  const permanentes = envasesPermanentesDe(cliente);
+  const extras = envasesExtraDe(cliente);
+  const total = envasesVacio();
+  PRODUCTOS_RETORNABLES.forEach((p) => {
+    total[p.key] = (Number(permanentes[p.key]) || 0) + (Number(extras[p.key]) || 0);
+  });
+  return total;
+}
+function stockPermanenteClientes(clientes) {
   const resultado = stockVacio();
   clientes.forEach((c) => {
+    const permanentes = envasesPermanentesDe(c);
     PRODUCTOS_RETORNABLES.forEach((p) => {
-      resultado[p.key] += Number(c.envasesPrestados?.[p.key]) || 0;
+      resultado[p.key] += Number(permanentes[p.key]) || 0;
     });
   });
   return resultado;
+}
+function stockExtraClientes(clientes) {
+  const resultado = stockVacio();
+  clientes.forEach((c) => {
+    const extras = envasesExtraDe(c);
+    PRODUCTOS_RETORNABLES.forEach((p) => {
+      resultado[p.key] += Number(extras[p.key]) || 0;
+    });
+  });
+  return resultado;
+}
+function stockPrestadoClientes(clientes) {
+  const permanentes = stockPermanenteClientes(clientes);
+  const extras = stockExtraClientes(clientes);
+  const resultado = stockVacio();
+  PRODUCTOS_RETORNABLES.forEach((p) => {
+    resultado[p.key] = permanentes[p.key] + extras[p.key];
+  });
+  return resultado;
+}
+function totalEnvasesCliente(cliente) {
+  return totalEnvasesPrestados(envasesTotalesDe(cliente));
 }
 function stockTrabajando(stockRepartidores) {
   const resultado = stockVacio();
@@ -167,12 +211,14 @@ function descargarCSV(filename, headers, rows) {
   URL.revokeObjectURL(url);
 }
 function exportarClientesCSV(db) {
-  const headers = ["Nombre", "Dirección", "Teléfono", "Días de visita", "Repartidor", "Deuda acumulada", "Envases prestados", "Máquina frío/calor", "Notas"];
+  const headers = ["Nombre", "Dirección", "Teléfono", "Días de visita", "Repartidor", "Deuda acumulada", "Envases permanentes", "Envases extra", "Máquina frío/calor", "Notas"];
   const rows = db.clientes.map((c) => {
     const rep = db.config.repartidores.find((r) => r.id === c.repartidorId);
     return [
       c.nombre, c.direccion, c.telefono || "", (c.diasVisita || []).join(" - "),
-      rep?.nombre || "", c.deudaAcumulada || 0, textoEnvasesPrestados(c.envasesPrestados) || "Ninguno",
+      rep?.nombre || "", c.deudaAcumulada || 0,
+      textoEnvasesPrestados(envasesPermanentesDe(c)) || "Ninguno",
+      textoEnvasesPrestados(envasesExtraDe(c)) || "Ninguno",
       c.maquinaFrioCalor ? "Sí" : "No", c.notas || "",
     ];
   });
@@ -338,6 +384,32 @@ async function migrarStockViejoSiHaceFalta() {
     );
   } catch (e) {
     console.error("La migración de stock viejo falló (no crítico):", e);
+  }
+}
+
+/* Migra el antiguo campo envasesPrestados al nuevo modelo.
+   Todo valor existente se toma como PERMANENTE, porque hasta ahora
+   ese dato solo podía cargarse manualmente desde el administrador. */
+async function migrarEnvasesClientesSiHaceFalta() {
+  try {
+    const snap = await getDocs(colRef("clientes"));
+    const pendientes = snap.docs.map((d) => ({ ...d.data(), id: d.id })).filter(
+      (c) => !c.envasesPermanentes || !c.envasesExtra || c.envasesPrestados
+    );
+
+    await Promise.all(
+      pendientes.map((c) => {
+        const actualizado = {
+          ...c,
+          envasesPermanentes: envasesPermanentesDe(c),
+          envasesExtra: envasesExtraDe(c),
+        };
+        delete actualizado.envasesPrestados;
+        return upsertDoc("clientes", actualizado);
+      })
+    );
+  } catch (e) {
+    console.error("La migración de envases de clientes falló (no crítico):", e);
   }
 }
 
@@ -815,7 +887,7 @@ function AdminDashboard({ db }) {
   const totalGastos = gastosFiltrados.reduce((s, g) => s + g.monto, 0);
 
   const deudaTotalClientes = db.clientes.reduce((s, c) => s + (c.deudaAcumulada || 0), 0);
-  const envasesEnCalle = db.clientes.reduce((s, c) => s + totalEnvasesPrestados(c.envasesPrestados), 0);
+  const envasesEnCalle = db.clientes.reduce((s, c) => s + totalEnvasesCliente(c), 0);
 
   const preciosSinConfigurar = Object.values(db.config.precios).some((p) => !p);
 
@@ -883,7 +955,7 @@ function AdminDashboard({ db }) {
           <div className="font-mono font-extrabold text-xl" style={{ color: deudaTotalClientes > 0 ? C.danger : C.ink }}>{formatMoney(deudaTotalClientes)}</div>
         </Card>
         <Card>
-          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Prestados a clientes</div>
+          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Envases en clientes</div>
           <div className="font-mono font-extrabold text-xl">{envasesEnCalle}</div>
         </Card>
         <Card>
@@ -931,15 +1003,16 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
     if (initial) {
       return {
         ...initial,
-        envasesPrestados: initial.envasesPrestados || envasesVacio(),
+        envasesPermanentes: envasesPermanentesDe(initial),
+        envasesExtra: envasesExtraDe(initial),
         maquinaFrioCalor: initial.maquinaFrioCalor ?? false,
       };
     }
     return {
       nombre: "", direccion: "", telefono: "", notas: "",
       diasVisita: [], repartidorId: repartidores[0]?.id || "",
-      envasesPrestados: envasesVacio(), maquinaFrioCalor: false,
-      orden: "", activo: true,
+      envasesPermanentes: envasesVacio(), envasesExtra: envasesVacio(),
+      maquinaFrioCalor: false, orden: "", activo: true,
     };
   });
   const [error, setError] = useState("");
@@ -978,16 +1051,38 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
         </div>
       </Field>
       {isAdmin && (
-        <Field label="Envases prestados" hint="Cantidad de cada envase que la empresa tiene prestada a este cliente.">
-          <div className="flex flex-col gap-2">
-            {PRODUCTOS_RETORNABLES.map((p) => (
-              <div key={p.key} className="flex items-center justify-between">
-                <span className="text-xs font-semibold">{p.label}</span>
-                <Stepper value={f.envasesPrestados[p.key] || 0} onChange={(v) => setF({ ...f, envasesPrestados: { ...f.envasesPrestados, [p.key]: v } })} />
+        <>
+          <Field label="Envases permanentes" hint="Stock fijo asignado al cliente. Solo el administrador puede modificarlo.">
+            <div className="flex flex-col gap-2">
+              {PRODUCTOS_RETORNABLES.map((p) => (
+                <div key={p.key} className="flex items-center justify-between">
+                  <span className="text-xs font-semibold">{p.label}</span>
+                  <Stepper value={f.envasesPermanentes[p.key] || 0} onChange={(v) => setF({ ...f, envasesPermanentes: { ...f.envasesPermanentes, [p.key]: v } })} />
+                </div>
+              ))}
+            </div>
+          </Field>
+          {totalEnvasesPrestados(f.envasesExtra) > 0 && (
+            <Card style={{ background: C.warningBg, border: "none" }} className="mb-3">
+              <div className="text-xs font-bold" style={{ color: C.warning }}>Envases extra actuales</div>
+              <div className="text-xs mt-1" style={{ color: C.muted }}>
+                {textoEnvasesPrestados(f.envasesExtra)}. Los extras se generan o devuelven desde los recorridos; no se editan manualmente.
               </div>
-            ))}
-          </div>
-        </Field>
+            </Card>
+          )}
+        </>
+      )}
+      {!isAdmin && totalEnvasesPrestados(f.envasesPermanentes) > 0 && (
+        <Card style={{ background: C.accentSoft, border: "none" }} className="mb-3">
+          <div className="text-xs font-bold" style={{ color: C.primary }}>Envases permanentes</div>
+          <div className="text-xs mt-1" style={{ color: C.muted }}>{textoEnvasesPrestados(f.envasesPermanentes)}</div>
+        </Card>
+      )}
+      {!isAdmin && totalEnvasesPrestados(f.envasesExtra) > 0 && (
+        <Card style={{ background: C.warningBg, border: "none" }} className="mb-3">
+          <div className="text-xs font-bold" style={{ color: C.warning }}>Envases extra</div>
+          <div className="text-xs mt-1" style={{ color: C.muted }}>{textoEnvasesPrestados(f.envasesExtra)}</div>
+        </Card>
       )}
       <Field label="Orden en el recorrido (opcional)" hint="Número más bajo = se visita antes.">
         <Input type="number" inputMode="numeric" value={f.orden} onChange={(e) => setF({ ...f, orden: e.target.value })} placeholder="Ej: 1" />
@@ -1016,18 +1111,58 @@ function AdminClientes({ db, mutate }) {
 
   function guardarCliente(f) {
     const next = clone(db);
+
     if (f.id) {
       const i = next.clientes.findIndex((c) => c.id === f.id);
-      next.clientes[i] = { ...next.clientes[i], ...f };
+      const actual = next.clientes[i];
+      const permanentesAntes = envasesPermanentesDe(actual);
+      const extrasAntes = envasesExtraDe(actual);
+      const permanentesNuevos = { ...envasesVacio(), ...(f.envasesPermanentes || {}) };
+      const extrasNuevos = { ...extrasAntes };
+
+      PRODUCTOS_RETORNABLES.forEach((p) => {
+        const antes = Number(permanentesAntes[p.key]) || 0;
+        const despues = Number(permanentesNuevos[p.key]) || 0;
+        const diferencia = despues - antes;
+
+        if (diferencia > 0) {
+          // Si ya había extras, primero los convertimos en permanentes.
+          const convertir = Math.min(diferencia, Number(extrasNuevos[p.key]) || 0);
+          extrasNuevos[p.key] = Math.max(0, (Number(extrasNuevos[p.key]) || 0) - convertir);
+        } else if (diferencia < 0) {
+          // Al reducir permanentes, no "teletransportamos" el envase al galpón:
+          // pasa a extra hasta que el repartidor lo retire en un recorrido.
+          extrasNuevos[p.key] = (Number(extrasNuevos[p.key]) || 0) + Math.abs(diferencia);
+        }
+      });
+
+      const actualizado = {
+        ...actual,
+        ...f,
+        envasesPermanentes: permanentesNuevos,
+        envasesExtra: extrasNuevos,
+      };
+      delete actualizado.envasesPrestados;
+      next.clientes[i] = actualizado;
     } else {
-      next.clientes.push({ ...f, id: uid(), deudaAcumulada: 0, creadoEl: hoyISO() });
+      const nuevo = {
+        ...f,
+        id: uid(),
+        deudaAcumulada: 0,
+        envasesPermanentes: { ...envasesVacio(), ...(f.envasesPermanentes || {}) },
+        envasesExtra: envasesVacio(),
+        creadoEl: hoyISO(),
+      };
+      delete nuevo.envasesPrestados;
+      next.clientes.push(nuevo);
     }
+
     mutate(next);
     setSheet(null);
   }
 
   function eliminarCliente(c) {
-    if (totalEnvasesPrestados(c.envasesPrestados) > 0) return;
+    if (totalEnvasesCliente(c) > 0) return;
     const next = clone(db);
     next.clientes = next.clientes.filter((x) => x.id !== c.id);
     mutate(next);
@@ -1091,7 +1226,8 @@ function AdminClientes({ db, mutate }) {
                       {c.diasVisita.map((d) => <Badge key={d} tone="accent">{d.slice(0, 3)}</Badge>)}
                       {rep && <Badge tone="muted">{rep.nombre}</Badge>}
                       {c.deudaAcumulada > 0 && <Badge tone="danger">Debe {formatMoney(c.deudaAcumulada)}</Badge>}
-                      {totalEnvasesPrestados(c.envasesPrestados) > 0 && <Badge tone="danger">Prestado: {textoEnvasesPrestados(c.envasesPrestados)}</Badge>}
+                      {totalEnvasesPrestados(envasesPermanentesDe(c)) > 0 && <Badge tone="accent">Permanentes: {textoEnvasesPrestados(envasesPermanentesDe(c))}</Badge>}
+                      {totalEnvasesPrestados(envasesExtraDe(c)) > 0 && <Badge tone="warning">Extra: {textoEnvasesPrestados(envasesExtraDe(c))}</Badge>}
                       {c.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
                     </div>
                   </div>
@@ -1120,15 +1256,16 @@ function AdminClientes({ db, mutate }) {
 
       {confirmDel && (
         <Sheet title="Eliminar cliente" onClose={() => setConfirmDel(null)}>
-          {totalEnvasesPrestados(confirmDel.envasesPrestados) > 0 ? (
+          {totalEnvasesCliente(confirmDel) > 0 ? (
             <>
               <Card style={{ background: C.warningBg, border: "none" }} className="mb-3">
                 <div className="text-sm font-bold" style={{ color: C.warning }}>No se puede eliminar este cliente.</div>
                 <div className="text-xs mt-1" style={{ color: C.muted }}>
-                  La empresa todavía tiene envases prestados a este cliente.
+                  La empresa todavía tiene envases en poder de este cliente.
                 </div>
                 <div className="font-bold text-sm mt-2" style={{ color: C.danger }}>
-                  {textoEnvasesPrestados(confirmDel.envasesPrestados)}
+                  {totalEnvasesPrestados(envasesPermanentesDe(confirmDel)) > 0 && <div>Permanentes: {textoEnvasesPrestados(envasesPermanentesDe(confirmDel))}</div>}
+                  {totalEnvasesPrestados(envasesExtraDe(confirmDel)) > 0 && <div>Extras: {textoEnvasesPrestados(envasesExtraDe(confirmDel))}</div>}
                 </div>
                 <div className="text-xs mt-2" style={{ color: C.muted }}>
                   Primero registrá la devolución de los envases y después vas a poder eliminarlo.
@@ -1187,7 +1324,8 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
         <div className="flex flex-wrap gap-1.5 mt-2">
           {cliente.diasVisita.map((d) => <Badge key={d} tone="accent">{d.slice(0, 3)}</Badge>)}
           {cliente.deudaAcumulada > 0 && <Badge tone="danger">Debe {formatMoney(cliente.deudaAcumulada)}</Badge>}
-          {totalEnvasesPrestados(cliente.envasesPrestados) > 0 && <Badge tone="danger">Prestado: {textoEnvasesPrestados(cliente.envasesPrestados)}</Badge>}
+          {totalEnvasesPrestados(envasesPermanentesDe(cliente)) > 0 && <Badge tone="accent">Permanentes: {textoEnvasesPrestados(envasesPermanentesDe(cliente))}</Badge>}
+          {totalEnvasesPrestados(envasesExtraDe(cliente)) > 0 && <Badge tone="warning">Extra: {textoEnvasesPrestados(envasesExtraDe(cliente))}</Badge>}
           {cliente.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
         </div>
       </Card>
@@ -1276,7 +1414,8 @@ function AdminHistorial({ db, mutate }) {
     if (ci >= 0) {
       if (v.deudaGenerada) next.clientes[ci].deudaAcumulada = Math.max(0, (next.clientes[ci].deudaAcumulada || 0) - v.deudaGenerada);
       if (v.deudaCobrada) next.clientes[ci].deudaAcumulada = (next.clientes[ci].deudaAcumulada || 0) + v.deudaCobrada;
-      next.clientes[ci].envasesPrestados = aplicarDeltaEnvases(next.clientes[ci].envasesPrestados, delta, -1);
+      next.clientes[ci].envasesExtra = aplicarDeltaEnvases(envasesExtraDe(next.clientes[ci]), delta, -1);
+      delete next.clientes[ci].envasesPrestados;
     }
 
     if (db.config.stockActivo) moverStockRepartidor(v.repartidorId, delta, -1);
@@ -1388,11 +1527,13 @@ function AdminStock({ db, mutate }) {
     setPorRepartidor(resultado);
   }, [db.config.stockTotal, db.config.repartidores, db.stock]);
 
-  const prestados = stockPrestadoClientes(db.clientes);
+  const permanentes = stockPermanenteClientes(db.clientes);
+  const extras = stockExtraClientes(db.clientes);
+  const enClientes = stockPrestadoClientes(db.clientes);
   const trabajando = stockTrabajando(porRepartidor);
   const galpon = stockVacio();
   PRODUCTOS_RETORNABLES.forEach((p) => {
-    galpon[p.key] = (Number(total[p.key]) || 0) - (trabajando[p.key] || 0) - (prestados[p.key] || 0);
+    galpon[p.key] = (Number(total[p.key]) || 0) - (trabajando[p.key] || 0) - (enClientes[p.key] || 0);
   });
 
   function cambiarStockRep(repId, tipo, valor) {
@@ -1441,18 +1582,20 @@ function AdminStock({ db, mutate }) {
       <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Stock general</div>
       <Card className="mb-4">
         <div className="text-xs mb-3" style={{ color: C.muted }}>
-          Total propiedad = Galpón + Camionetas + Prestados a clientes.
+          Total propiedad = Galpón + Camionetas + Permanentes en clientes + Extras en clientes.
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-xs" style={{ minWidth: Math.max(650, 390 + db.config.repartidores.length * 90) }}>
+          <table className="w-full text-xs" style={{ minWidth: Math.max(820, 510 + db.config.repartidores.length * 90) }}>
             <thead>
               <tr style={{ color: C.muted }}>
                 <th className="text-left py-2 pr-2">Producto</th>
                 <th className="text-center py-2">Total</th>
                 <th className="text-center py-2">Galpón</th>
                 {db.config.repartidores.map((r) => <th key={r.id} className="text-center py-2 px-1">{r.nombre}</th>)}
-                <th className="text-center py-2">Prestados</th>
+                <th className="text-center py-2">Permanentes</th>
+                <th className="text-center py-2">Extras</th>
+                <th className="text-center py-2">En clientes</th>
                 <th className="text-center py-2">Trabajando</th>
               </tr>
             </thead>
@@ -1469,7 +1612,9 @@ function AdminStock({ db, mutate }) {
                       <Input type="number" inputMode="numeric" value={porRepartidor[r.id]?.[p.key] || 0} onChange={(e) => cambiarStockRep(r.id, p.key, e.target.value)} style={{ width: 65, textAlign: "center" }} />
                     </td>
                   ))}
-                  <td className="text-center font-bold" style={{ color: C.danger }}>{prestados[p.key]}</td>
+                  <td className="text-center font-bold" style={{ color: C.primary }}>{permanentes[p.key]}</td>
+                  <td className="text-center font-bold" style={{ color: C.warning }}>{extras[p.key]}</td>
+                  <td className="text-center font-bold" style={{ color: C.danger }}>{enClientes[p.key]}</td>
                   <td className="text-center font-bold" style={{ color: C.primary }}>{trabajando[p.key]}</td>
                 </tr>
               ))}
@@ -1808,9 +1953,27 @@ function RepartidorClientes({ db, mutate, repartidor }) {
     const next = clone(db);
     if (f.id) {
       const i = next.clientes.findIndex((c) => c.id === f.id);
-      next.clientes[i] = { ...next.clientes[i], ...f, repartidorId: repartidor.id };
+      const actualizado = {
+        ...next.clientes[i],
+        ...f,
+        repartidorId: repartidor.id,
+        envasesPermanentes: envasesPermanentesDe(next.clientes[i]),
+        envasesExtra: envasesExtraDe(next.clientes[i]),
+      };
+      delete actualizado.envasesPrestados;
+      next.clientes[i] = actualizado;
     } else {
-      next.clientes.push({ ...f, id: uid(), repartidorId: repartidor.id, deudaAcumulada: 0, envasesPrestados: envasesVacio(), creadoEl: hoyISO() });
+      const nuevo = {
+        ...f,
+        id: uid(),
+        repartidorId: repartidor.id,
+        deudaAcumulada: 0,
+        envasesPermanentes: envasesVacio(),
+        envasesExtra: envasesVacio(),
+        creadoEl: hoyISO(),
+      };
+      delete nuevo.envasesPrestados;
+      next.clientes.push(nuevo);
     }
     mutate(next);
     setSheet(null);
@@ -1841,7 +2004,8 @@ function RepartidorClientes({ db, mutate, repartidor }) {
               <div className="text-xs" style={{ color: C.muted }}>{c.direccion}</div>
               <div className="flex flex-wrap gap-1 mt-1.5">
                 {c.diasVisita.map((d) => <Badge key={d} tone="accent">{d.slice(0, 3)}</Badge>)}
-                {totalEnvasesPrestados(c.envasesPrestados) > 0 && <Badge tone="danger">Prestado: {textoEnvasesPrestados(c.envasesPrestados)}</Badge>}
+                {totalEnvasesPrestados(envasesPermanentesDe(c)) > 0 && <Badge tone="accent">Permanentes: {textoEnvasesPrestados(envasesPermanentesDe(c))}</Badge>}
+                      {totalEnvasesPrestados(envasesExtraDe(c)) > 0 && <Badge tone="warning">Extra: {textoEnvasesPrestados(envasesExtraDe(c))}</Badge>}
                 {c.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
               </div>
             </Card>
@@ -1874,7 +2038,8 @@ function RepartidorRecorrido({ db, mutate, repartidor, clientes, visitadosIds, o
       deuda -= visita.deudaCobrada || 0;
       deuda += visita.deudaGenerada || 0;
       next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
-      next.clientes[ci].envasesPrestados = aplicarDeltaEnvases(next.clientes[ci].envasesPrestados, delta, 1);
+      next.clientes[ci].envasesExtra = aplicarDeltaEnvases(envasesExtraDe(next.clientes[ci]), delta, 1);
+      delete next.clientes[ci].envasesPrestados;
     }
 
     // Visita y cliente se guardan normalmente; el stock de la camioneta
@@ -1931,6 +2096,9 @@ function RepartidorRecorrido({ db, mutate, repartidor, clientes, visitadosIds, o
 }
 
 function ClienteVisitaCard({ cliente, hecho, onClick }) {
+  const permanentes = envasesPermanentesDe(cliente);
+  const extras = envasesExtraDe(cliente);
+
   return (
     <Card onClick={onClick} style={{ opacity: hecho ? 0.65 : 1 }}>
       <div className="flex items-start gap-2">
@@ -1938,16 +2106,11 @@ function ClienteVisitaCard({ cliente, hecho, onClick }) {
           {hecho ? <CheckCircle2 size={15} color={C.success} /> : <Circle size={15} color={C.primary} />}
         </div>
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <div className="font-bold text-sm">{cliente.nombre}</div>
-            {PRODUCTOS_RETORNABLES.filter((p) => (cliente.envasesPrestados?.[p.key] || 0) > 0).map((p) => (
-              <span key={p.key} className="px-1.5 py-0.5 rounded-md text-[10px] font-mono font-extrabold flex-shrink-0" style={{ background: C.dangerBg, color: C.danger }}>
-                {cliente.envasesPrestados[p.key]}×{p.corto}
-              </span>
-            ))}
-          </div>
+          <div className="font-bold text-sm">{cliente.nombre}</div>
           <div className="text-xs" style={{ color: C.muted }}>{cliente.direccion}</div>
           <div className="flex flex-wrap gap-1 mt-1">
+            {totalEnvasesPrestados(permanentes) > 0 && <Badge tone="accent">Permanentes: {textoEnvasesPrestados(permanentes)}</Badge>}
+            {totalEnvasesPrestados(extras) > 0 && <Badge tone="warning">Extra: {textoEnvasesPrestados(extras)}</Badge>}
             {cliente.deudaAcumulada > 0 && <Badge tone="danger">Debe {formatMoney(cliente.deudaAcumulada)}</Badge>}
             {cliente.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
             {cliente.notas && <Badge tone="muted">Nota</Badge>}
@@ -1967,7 +2130,8 @@ function ClienteVisitaCard({ cliente, hecho, onClick }) {
 const NOTAS_RAPIDAS = ["No estaba", "No quiso hoy", "Volver más tarde"];
 
 function VisitaSheet({ cliente, precios, stockActivo, stockRepartidor, onClose, onGuardar }) {
-  const saldoActual = cliente.envasesPrestados || envasesVacio();
+  const permanentes = envasesPermanentesDe(cliente);
+  const saldoActual = envasesExtraDe(cliente);
   const [vendio, setVendio] = useState(true);
   const [items, setItems] = useState(
     PRODUCTOS.map((p) => ({ tipo: p.key, cantidad: 0, precioUnitario: precios[p.key] || 0 }))
@@ -2020,14 +2184,14 @@ function VisitaSheet({ cliente, precios, stockActivo, stockRepartidor, onClose, 
       }
     }
 
-    // El cliente no puede devolver más envases que los que debía + los que recibe hoy.
+    // Los permanentes no se modifican desde el recorrido. Solo puede devolver extras pendientes + envases recibidos hoy.
     for (const p of PRODUCTOS_RETORNABLES) {
       const entregados = vendio ? (Number(items.find((it) => it.tipo === p.key)?.cantidad) || 0) : 0;
-      const debeAntes = Number(saldoActual[p.key]) || 0;
+      const extraAntes = Number(saldoActual[p.key]) || 0;
       const devolvio = Number(retornos[p.key]) || 0;
-      const maximo = debeAntes + entregados;
+      const maximo = extraAntes + entregados;
       if (devolvio > maximo) {
-        setErrorStock(`${cliente.nombre} no puede devolver ${devolvio} ${p.label}. Como máximo puede devolver ${maximo}.`);
+        setErrorStock(`${cliente.nombre} no puede devolver ${devolvio} ${p.label} desde el recorrido. Como máximo puede devolver ${maximo} entre extras pendientes y envases recibidos hoy.`);
         return;
       }
     }
@@ -2075,6 +2239,16 @@ function VisitaSheet({ cliente, precios, stockActivo, stockRepartidor, onClose, 
       footer={<Btn full size="lg" onClick={guardar} icon={Check}>Guardar visita</Btn>}
     >
       <div className="text-xs mb-3" style={{ color: C.muted }}>{cliente.direccion}</div>
+
+      {(totalEnvasesPrestados(permanentes) > 0 || totalEnvasesPrestados(saldoActual) > 0) && (
+        <Card className="mb-3">
+          <div className="text-[11px] font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Envases del cliente</div>
+          <div className="flex gap-1.5 flex-wrap">
+            {totalEnvasesPrestados(permanentes) > 0 && <Badge tone="accent">Permanentes: {textoEnvasesPrestados(permanentes)}</Badge>}
+            {totalEnvasesPrestados(saldoActual) > 0 && <Badge tone="warning">Extra: {textoEnvasesPrestados(saldoActual)}</Badge>}
+          </div>
+        </Card>
+      )}
 
       {stockActivo && (
         <Card style={{ background: C.accentSoft, border: "none" }} className="mb-3">
@@ -2129,7 +2303,7 @@ function VisitaSheet({ cliente, precios, stockActivo, stockRepartidor, onClose, 
                   {mostrarRetorno && (
                     <div className="flex items-center justify-between mt-1 ml-1 pl-2 py-1" style={{ borderLeft: `2px solid ${C.border}` }}>
                       <span className="text-xs" style={{ color: C.muted }}>
-                        Vacíos que devolvió{saldo > 0 && <span style={{ color: C.danger, fontWeight: 700 }}> · debe {saldo}</span>}
+                        Vacíos que devolvió{saldo > 0 && <span style={{ color: C.warning, fontWeight: 700 }}> · extra pendiente {saldo}</span>}
                       </span>
                       <Stepper value={retornos[p.key] || 0} onChange={(v) => actualizarRetorno(p.key, v)} />
                     </div>
@@ -2173,11 +2347,11 @@ function VisitaSheet({ cliente, precios, stockActivo, stockRepartidor, onClose, 
           </Field>
 
           {PRODUCTOS_RETORNABLES.some((p) => (saldoActual[p.key] || 0) > 0) && (
-            <Field label="¿Te devolvió envases vacíos igual?" hint="Aunque no haya comprado, puede haberte dado envases pendientes de antes.">
+            <Field label="¿Te devolvió envases extra vacíos?" hint="Aunque no haya comprado, puede devolverte envases extra pendientes.">
               <div className="flex flex-col gap-2">
                 {PRODUCTOS_RETORNABLES.filter((p) => (saldoActual[p.key] || 0) > 0).map((p) => (
                   <div key={p.key} className="flex items-center justify-between">
-                    <span className="text-xs font-semibold">{p.label} <span style={{ color: C.danger }}>(debe {saldoActual[p.key]})</span></span>
+                    <span className="text-xs font-semibold">{p.label} <span style={{ color: C.warning }}>(extra {saldoActual[p.key]})</span></span>
                     <Stepper value={retornos[p.key] || 0} onChange={(v) => actualizarRetorno(p.key, v)} />
                   </div>
                 ))}
@@ -2239,6 +2413,7 @@ export default function App() {
     }
     migrarFormatoViejoSiHaceFalta();
     migrarStockViejoSiHaceFalta();
+    migrarEnvasesClientesSiHaceFalta();
     const unsubs = [
       subscribeCollection("clientes", (v) => { setDb((p) => ({ ...p, clientes: v })); markLoaded("clientes"); setConnError(null); }, setConnError),
       subscribeCollection("visitas", (v) => { setDb((p) => ({ ...p, visitas: v })); markLoaded("visitas"); setConnError(null); }, setConnError),
