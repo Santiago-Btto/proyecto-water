@@ -1940,13 +1940,74 @@ function AdminAjustes({ db, mutate }) {
 function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
   const [vista, setVista] = useState("inicio"); // inicio | clientes | recorrido
 
-  const misClientes = db.clientes.filter((c) => c.repartidorId === repartidor.id);
-  const hoy = diaSemanaHoy();
-  const deHoy = misClientes.filter((c) => c.diasVisita.includes(hoy)).sort((a, b) => (Number(a.orden) || 999) - (Number(b.orden) || 999) || a.nombre.localeCompare(b.nombre));
-  const visitasHoy = db.visitas.filter((v) => v.repartidorId === repartidor.id && v.fecha === hoyISO());
-  const idsVisitados = new Set(visitasHoy.map((v) => v.clienteId));
-  const pendientes = deHoy.filter((c) => !idsVisitados.has(c.id));
-  const enProgreso = idsVisitados.size > 0 && idsVisitados.size < deHoy.length;
+  const misClientes = db.clientes.filter(
+  (c) => c.repartidorId === repartidor.id
+);
+
+const hoy = diaSemanaHoy();
+
+const deHoy = misClientes
+  .filter((c) => c.diasVisita.includes(hoy))
+  .sort((a, b) => {
+    const ordenA =
+      a.orden === "" ||
+      a.orden === null ||
+      a.orden === undefined
+        ? Infinity
+        : Number(a.orden);
+
+    const ordenB =
+      b.orden === "" ||
+      b.orden === null ||
+      b.orden === undefined
+        ? Infinity
+        : Number(b.orden);
+
+    if (ordenA !== ordenB) {
+      return ordenA - ordenB;
+    }
+
+    return a.nombre.localeCompare(b.nombre);
+  });
+
+const visitasHoy = db.visitas.filter(
+  (v) =>
+    v.repartidorId === repartidor.id &&
+    v.fecha === hoyISO()
+);
+
+// Clientes a los que SÍ se les vendió hoy
+const idsVendidosHoy = new Set(
+  visitasHoy
+    .filter((v) => v.vendio)
+    .map((v) => v.clienteId)
+);
+
+// Clientes visitados pero a los que NO se les vendió
+const idsNoVendidosHoy = new Set(
+  visitasHoy
+    .filter((v) => !v.vendio)
+    .map((v) => v.clienteId)
+);
+
+// Todavía no se pasó por ellos
+const pendientes = deHoy.filter(
+  (c) =>
+    !idsVendidosHoy.has(c.id) &&
+    !idsNoVendidosHoy.has(c.id)
+);
+
+const noVendidos = deHoy.filter(
+  (c) => idsNoVendidosHoy.has(c.id)
+);
+
+const vendidos = deHoy.filter(
+  (c) => idsVendidosHoy.has(c.id)
+);
+
+const enProgreso =
+  pendientes.length < deHoy.length &&
+  vendidos.length < deHoy.length;
 
   return (
     <Screen>
@@ -1969,16 +2030,22 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
           <RepartidorInicio
             deHoy={deHoy}
             pendientes={pendientes}
-            visitadosCount={idsVisitados.size}
+            visitadosCount={vendidos.length}
+            porReintentarCount={noVendidos.length}
             enProgreso={enProgreso}
-            onEmpezar={() => setVista("recorrido")}
+            onEmpezar={() =>
+              setVista("recorrido")
+            }
           />
         )}
         {vista === "clientes" && <RepartidorClientes db={db} mutate={mutate} repartidor={repartidor} />}
         {vista === "recorrido" && (
           <RepartidorRecorrido
-            db={db} mutate={mutate} repartidor={repartidor}
-            clientes={deHoy} visitadosIds={idsVisitados}
+            db={db}
+            mutate={mutate}
+            repartidor={repartidor}
+            clientes={deHoy}
+            visitasHoy={visitasHoy}
             onSalir={() => setVista("inicio")}
           />
         )}
@@ -2000,7 +2067,17 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
   );
 }
 
-function RepartidorInicio({ deHoy, pendientes, visitadosCount, enProgreso, onEmpezar }) {
+function RepartidorInicio({
+  deHoy,
+  pendientes,
+  visitadosCount,
+  porReintentarCount = 0,
+  enProgreso,
+  onEmpezar,
+}) {
+  const quedanPorAtender =
+  pendientes.length > 0 ||
+  porReintentarCount > 0;
   return (
     <div className="flex flex-col items-center justify-center text-center pt-10">
       <div className="w-20 h-20 rounded-3xl flex items-center justify-center mb-4" style={{ background: C.primaryDark }}>
@@ -2017,8 +2094,16 @@ function RepartidorInicio({ deHoy, pendientes, visitadosCount, enProgreso, onEmp
           <div className="text-xs mb-6" style={{ color: C.muted }}>
             {visitadosCount > 0 ? `${visitadosCount} de ${deHoy.length} ya visitados` : "Todavía no arrancaste el recorrido"}
           </div>
-          <Btn size="lg" onClick={onEmpezar} icon={pendientes.length === 0 ? CheckCircle2 : Truck}>
-            {pendientes.length === 0 ? "Ver recorrido completo" : enProgreso ? "Continuar recorrido" : "Empezar recorrido"}
+          <Btn size="lg" onClick={onEmpezar} icon={
+  !quedanPorAtender
+    ? CheckCircle2
+    : Truck
+}>
+            {!quedanPorAtender
+  ? "Ver recorrido completo"
+  : enProgreso
+  ? "Continuar recorrido"
+  : "Empezar recorrido"}
           </Btn>
         </>
       )}
@@ -2107,105 +2192,635 @@ function RepartidorClientes({ db, mutate, repartidor }) {
 }
 
 /* ---------- Recorrido activo (repartidor) ---------- */
-function RepartidorRecorrido({ db, mutate, repartidor, clientes, visitadosIds, onSalir }) {
+function RepartidorRecorrido({
+  db,
+  mutate,
+  repartidor,
+  clientes,
+  visitasHoy,
+  onSalir,
+}) {
   const [activo, setActivo] = useState(null);
-  const pendientes = clientes.filter((c) => !visitadosIds.has(c.id));
-  const hechos = clientes.filter((c) => visitadosIds.has(c.id));
+  const [visitaEditando, setVisitaEditando] = useState(null);
+  const [mostrarVisitados, setMostrarVisitados] = useState(false);
+  const [busca, setBusca] = useState("");
 
-  function registrarVisita(cliente, visita) {
+  // Si por algún motivo hubiese más de una visita del mismo cliente hoy,
+  // tomamos la más reciente.
+  const visitaPorCliente = new Map();
+
+  visitasHoy
+    .slice()
+    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+    .forEach((v) => {
+      visitaPorCliente.set(v.clienteId, v);
+    });
+
+const textoBusqueda = busca.trim().toLowerCase();
+
+const clientesFiltrados = clientes.filter((c) => {
+  if (!textoBusqueda) return true;
+
+  const nombre = (c.nombre || "").toLowerCase();
+  const direccion = (c.direccion || "").toLowerCase();
+
+  return (
+    nombre.includes(textoBusqueda) ||
+    direccion.includes(textoBusqueda)
+  );
+});
+
+const pendientes = clientesFiltrados.filter(
+  (c) => !visitaPorCliente.has(c.id)
+);
+
+const noVendidos = clientesFiltrados.filter((c) => {
+  const visita = visitaPorCliente.get(c.id);
+  return visita && !visita.vendio;
+});
+
+const vendidos = clientesFiltrados.filter((c) => {
+  const visita = visitaPorCliente.get(c.id);
+  return visita?.vendio;
+});
+
+  function abrirNuevaVisita(cliente) {
+    setActivo(cliente);
+    setVisitaEditando(null);
+  }
+
+  function abrirVisitaExistente(cliente) {
+    const visita = visitaPorCliente.get(cliente.id);
+
+    if (!visita) return;
+
+    setActivo(cliente);
+    setVisitaEditando(visita);
+  }
+
+  // Devuelve al cliente al estado que tenía JUSTO ANTES
+  // de la visita que estamos editando.
+  function clienteAntesDeVisita(cliente, visita) {
+    if (!visita) return cliente;
+
+    const copia = clone(cliente);
+
+    copia.deudaAcumulada = Math.max(
+      0,
+      (copia.deudaAcumulada || 0) -
+        (visita.deudaGenerada || 0) +
+        (visita.deudaCobrada || 0)
+    );
+
+    copia.envasesExtra = aplicarDeltaEnvases(
+      envasesExtraDe(copia),
+      calcularDeltaEnvases(visita),
+      -1
+    );
+
+    return copia;
+  }
+
+  // Lo mismo con la camioneta:
+  // reconstruimos cuánto stock tenía antes de la visita original.
+  function stockAntesDeVisita(visita) {
+    const actual = {
+      ...stockVacio(),
+      ...stockDeRepartidor(db, repartidor.id),
+    };
+
+    if (!visita) return actual;
+
+    const deltaAnterior = calcularDeltaEnvases(visita);
+
+    PRODUCTOS_RETORNABLES.forEach((p) => {
+      actual[p.key] =
+        (actual[p.key] || 0) +
+        (deltaAnterior[p.key] || 0);
+    });
+
+    return actual;
+  }
+
+  function guardarVisita(cliente, nuevaVisita) {
     const next = clone(db);
-    next.visitas.push(visita);
 
-    const delta = calcularDeltaEnvases(visita);
-    const ci = next.clientes.findIndex((c) => c.id === cliente.id);
-    if (ci >= 0) {
-      let deuda = next.clientes[ci].deudaAcumulada || 0;
-      deuda -= visita.deudaCobrada || 0;
-      deuda += visita.deudaGenerada || 0;
-      next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
-      next.clientes[ci].envasesExtra = aplicarDeltaEnvases(envasesExtraDe(next.clientes[ci]), delta, 1);
-      delete next.clientes[ci].envasesPrestados;
+    const anterior = visitaEditando;
+
+    const ci = next.clientes.findIndex(
+      (c) => c.id === cliente.id
+    );
+
+    if (ci < 0) return;
+
+    // ==========================================
+    // SI ESTAMOS EDITANDO: REVERTIR LA ANTERIOR
+    // ==========================================
+    if (anterior) {
+      next.clientes[ci].deudaAcumulada = Math.max(
+        0,
+        (next.clientes[ci].deudaAcumulada || 0) -
+          (anterior.deudaGenerada || 0) +
+          (anterior.deudaCobrada || 0)
+      );
+
+      next.clientes[ci].envasesExtra =
+        aplicarDeltaEnvases(
+          envasesExtraDe(next.clientes[ci]),
+          calcularDeltaEnvases(anterior),
+          -1
+        );
     }
 
-    // Visita y cliente se guardan normalmente; el stock de la camioneta
-    // se mueve por separado con increment() para evitar escrituras pisadas.
+    // ==========================================
+    // APLICAR LA NUEVA VISITA
+    // ==========================================
+    let deuda =
+      next.clientes[ci].deudaAcumulada || 0;
+
+    deuda -= nuevaVisita.deudaCobrada || 0;
+    deuda += nuevaVisita.deudaGenerada || 0;
+
+    next.clientes[ci].deudaAcumulada =
+      Math.max(0, deuda);
+
+    const deltaNuevo =
+      calcularDeltaEnvases(nuevaVisita);
+
+    next.clientes[ci].envasesExtra =
+      aplicarDeltaEnvases(
+        envasesExtraDe(next.clientes[ci]),
+        deltaNuevo,
+        1
+      );
+
+    delete next.clientes[ci].envasesPrestados;
+
+    // ==========================================
+    // GUARDAR O REEMPLAZAR VISITA
+    // ==========================================
+    if (anterior) {
+      const vi = next.visitas.findIndex(
+        (v) => v.id === anterior.id
+      );
+
+      if (vi >= 0) {
+        next.visitas[vi] = nuevaVisita;
+      }
+    } else {
+      next.visitas.push(nuevaVisita);
+    }
+
     mutate(next, { history: false });
-    if (db.config.stockActivo) moverStockRepartidor(repartidor.id, delta);
+
+    // ==========================================
+    // ACTUALIZAR STOCK DE CAMIONETA
+    // Solo aplicamos la DIFERENCIA entre
+    // la visita anterior y la nueva.
+    // ==========================================
+    if (db.config.stockActivo) {
+      const deltaAnterior = anterior
+        ? calcularDeltaEnvases(anterior)
+        : {};
+
+      const deltaNeto = {};
+
+      PRODUCTOS_RETORNABLES.forEach((p) => {
+        deltaNeto[p.key] =
+          (deltaNuevo[p.key] || 0) -
+          (deltaAnterior[p.key] || 0);
+      });
+
+      moverStockRepartidor(
+        repartidor.id,
+        deltaNeto
+      );
+    }
+
     setActivo(null);
+    setVisitaEditando(null);
   }
+
+  const clienteParaSheet =
+    activo && visitaEditando
+      ? clienteAntesDeVisita(activo, visitaEditando)
+      : activo;
 
   return (
     <div>
       <div className="flex items-center justify-between mb-3">
-        <button onClick={onSalir} className="text-xs font-bold flex items-center gap-1" style={{ color: C.primary }}><ArrowLeft size={14} /> Volver a inicio</button>
-        <Badge tone="accent">{hechos.length}/{clientes.length}</Badge>
+        <button
+          onClick={onSalir}
+          className="text-xs font-bold flex items-center gap-1"
+          style={{ color: C.primary }}
+        >
+          <ArrowLeft size={14} />
+          Volver a inicio
+        </button>
+
+        <Badge tone="accent">
+          {vendidos.length}/{clientes.length} vendidos
+        </Badge>
       </div>
 
+      <div className="relative mb-4">
+  <Search
+    size={16}
+    color={C.mutedLight}
+    style={{
+      position: "absolute",
+      left: 11,
+      top: 12,
+    }}
+  />
+
+  <input
+    value={busca}
+    onChange={(e) => setBusca(e.target.value)}
+    placeholder="Buscar por nombre o dirección..."
+    className="w-full rounded-xl pl-9 pr-9 py-2.5 text-sm outline-none"
+    style={{
+      background: C.surface,
+      border: `1px solid ${C.border}`,
+      color: C.ink,
+    }}
+  />
+
+  {busca && (
+    <button
+      type="button"
+      onClick={() => setBusca("")}
+      style={{
+        position: "absolute",
+        right: 10,
+        top: 10,
+      }}
+    >
+      <X size={18} color={C.muted} />
+    </button>
+  )}
+</div>
+
+
+{busca.trim() &&
+  pendientes.length === 0 &&
+  noVendidos.length === 0 &&
+  vendidos.length === 0 && (
+    <Card className="mb-4">
+      <div
+        className="text-xs text-center"
+        style={{ color: C.muted }}
+      >
+        No se encontraron clientes con "{busca}".
+      </div>
+    </Card>
+)}
+
+      {/* =========================
+          PENDIENTES
+          ========================= */}
       {pendientes.length > 0 && (
         <>
-          <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Pendientes</div>
+          <div
+            className="text-xs font-bold uppercase tracking-wide mb-2"
+            style={{ color: C.muted }}
+          >
+            Pendientes ({pendientes.length})
+          </div>
+
           <div className="flex flex-col gap-2 mb-4">
-            {pendientes.map((c) => <ClienteVisitaCard key={c.id} cliente={c} onClick={() => setActivo(c)} />)}
+            {pendientes.map((c) => (
+              <ClienteVisitaCard
+                key={c.id}
+                cliente={c}
+                onClick={() =>
+                  abrirNuevaVisita(c)
+                }
+              />
+            ))}
           </div>
         </>
       )}
 
-      {hechos.length > 0 && (
+      {/* =========================
+          NO SE VENDIÓ
+          ========================= */}
+      {noVendidos.length > 0 && (
         <>
-          <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Visitados</div>
-          <div className="flex flex-col gap-2">
-            {hechos.map((c) => <ClienteVisitaCard key={c.id} cliente={c} hecho />)}
+          <div
+            className="text-xs font-bold uppercase tracking-wide mb-2"
+            style={{ color: C.warning }}
+          >
+            No se vendió · volver a intentar ({noVendidos.length})
+          </div>
+
+          <div className="flex flex-col gap-2 mb-4">
+            {noVendidos.map((c) => {
+              const visita =
+                visitaPorCliente.get(c.id);
+
+              return (
+                <ClienteVisitaCard
+                  key={c.id}
+                  cliente={c}
+                  noVendido
+                  visita={visita}
+                  onClick={() =>
+                    abrirVisitaExistente(c)
+                  }
+                />
+              );
+            })}
           </div>
         </>
       )}
 
-      {pendientes.length === 0 && (
-        <Card style={{ background: C.successBg, border: "none" }} className="mt-3 flex items-center gap-2">
-          <CheckCircle2 size={20} color={C.success} />
-          <div className="text-sm font-bold" style={{ color: C.success }}>¡Recorrido completo!</div>
-        </Card>
+      {/* =========================
+          VISITADOS / VENDIDOS
+          ========================= */}
+      {vendidos.length > 0 && (
+        <div className="mb-4">
+          <button
+            type="button"
+            onClick={() =>
+              setMostrarVisitados(
+                !mostrarVisitados
+              )
+            }
+            className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
+            style={{
+              background: C.surface,
+              border: `1px solid ${C.border}`,
+            }}
+          >
+            <div className="flex items-center gap-2">
+              <CheckCircle2
+                size={16}
+                color={C.success}
+              />
+
+              <span className="text-sm font-bold">
+                Clientes visitados ({vendidos.length})
+              </span>
+            </div>
+
+            <ChevronRight
+              size={17}
+              color={C.muted}
+              style={{
+                transform: mostrarVisitados
+                  ? "rotate(90deg)"
+                  : "rotate(0deg)",
+                transition: "transform 0.2s",
+              }}
+            />
+          </button>
+
+          {(mostrarVisitados || busca.trim()) && (
+            <div className="flex flex-col gap-2 mt-2">
+              {vendidos.map((c) => (
+                <ClienteVisitaCard
+                  key={c.id}
+                  cliente={c}
+                  hecho
+                  visita={visitaPorCliente.get(
+                    c.id
+                  )}
+                  onClick={() =>
+                    abrirVisitaExistente(c)
+                  }
+                />
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
-      {activo && (
+      {pendientes.length === 0 &&
+        noVendidos.length === 0 &&
+        clientes.length > 0 && (
+          <Card
+            style={{
+              background: C.successBg,
+              border: "none",
+            }}
+            className="mt-3 flex items-center gap-2"
+          >
+            <CheckCircle2
+              size={20}
+              color={C.success}
+            />
+
+            <div
+              className="text-sm font-bold"
+              style={{ color: C.success }}
+            >
+              ¡Recorrido completo!
+            </div>
+          </Card>
+        )}
+
+      {clienteParaSheet && (
         <VisitaSheet
-          cliente={activo}
+          cliente={clienteParaSheet}
+          visitaInicial={visitaEditando}
           precios={db.config.precios}
           stockActivo={db.config.stockActivo}
-          stockRepartidor={stockDeRepartidor(db, repartidor.id)}
-          onClose={() => setActivo(null)}
-          onGuardar={(visita) => registrarVisita(activo, visita)}
+          stockRepartidor={stockAntesDeVisita(
+            visitaEditando
+          )}
+          onClose={() => {
+            setActivo(null);
+            setVisitaEditando(null);
+          }}
+          onGuardar={(visita) =>
+            guardarVisita(
+              activo,
+              visita
+            )
+          }
         />
       )}
     </div>
   );
 }
 
-function ClienteVisitaCard({ cliente, hecho, onClick }) {
-  const permanentes = envasesPermanentesDe(cliente);
-  const extras = envasesExtraDe(cliente);
+
+function ClienteVisitaCard({
+  cliente,
+  hecho,
+  noVendido,
+  visita,
+  onClick,
+}) {
+  const permanentes =
+    envasesPermanentesDe(cliente);
+
+  const extras =
+    envasesExtraDe(cliente);
+
+  const tieneOrden =
+    cliente.orden !== "" &&
+    cliente.orden !== null &&
+    cliente.orden !== undefined;
 
   return (
-    <Card onClick={onClick} style={{ opacity: hecho ? 0.65 : 1 }}>
+    <Card
+      onClick={onClick}
+      style={{
+        opacity: hecho ? 0.8 : 1,
+        cursor: "pointer",
+      }}
+    >
       <div className="flex items-start gap-2">
-        <div className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5" style={{ background: hecho ? C.successBg : C.accentSoft }}>
-          {hecho ? <CheckCircle2 size={15} color={C.success} /> : <Circle size={15} color={C.primary} />}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="font-bold text-sm">{cliente.nombre}</div>
-          <div className="text-xs" style={{ color: C.muted }}>{cliente.direccion}</div>
-          <div className="flex flex-wrap gap-1 mt-1">
-            {totalEnvasesPrestados(permanentes) > 0 && <Badge tone="accent">Permanentes: {textoEnvasesPrestados(permanentes)}</Badge>}
-            {totalEnvasesPrestados(extras) > 0 && <Badge tone="warning">Extra: {textoEnvasesPrestados(extras)}</Badge>}
-            {cliente.deudaAcumulada > 0 && <Badge tone="danger">Debe {formatMoney(cliente.deudaAcumulada)}</Badge>}
-            {cliente.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
-            {cliente.notas && <Badge tone="muted">Nota</Badge>}
-          </div>
-        </div>
-        <div className="flex gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
-          {cliente.telefono && (
-            <a href={`tel:${cliente.telefono}`} className="p-1.5 rounded-lg" style={{ background: C.bg }}><Phone size={13} color={C.primary} /></a>
+        {/* Número de recorrido */}
+        <div
+          className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 font-extrabold text-xs"
+          style={{
+            background: hecho
+              ? C.successBg
+              : noVendido
+              ? C.warningBg
+              : C.accentSoft,
+
+            color: hecho
+              ? C.success
+              : noVendido
+              ? C.warning
+              : C.primary,
+          }}
+        >
+          {tieneOrden ? (
+            cliente.orden
+          ) : hecho ? (
+            <Check size={15} />
+          ) : (
+            <Circle size={15} />
           )}
-          <a href={`https://maps.google.com/?q=${encodeURIComponent(cliente.direccion)}`} target="_blank" rel="noreferrer" className="p-1.5 rounded-lg" style={{ background: C.bg }}><MapPin size={13} color={C.primary} /></a>
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <div className="font-bold text-sm">
+              {cliente.nombre}
+            </div>
+
+            {hecho && (
+              <Badge tone="success">
+                Vendido
+              </Badge>
+            )}
+
+            {noVendido && (
+              <Badge tone="warning">
+                No se vendió
+              </Badge>
+            )}
+          </div>
+
+          <div
+            className="text-xs"
+            style={{ color: C.muted }}
+          >
+            {cliente.direccion}
+          </div>
+
+          {noVendido && visita?.notas && (
+            <div
+              className="text-xs font-semibold mt-1"
+              style={{ color: C.warning }}
+            >
+              {visita.notas}
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-1 mt-1">
+            {totalEnvasesPrestados(
+              permanentes
+            ) > 0 && (
+              <Badge tone="accent">
+                Permanentes:{" "}
+                {textoEnvasesPrestados(
+                  permanentes
+                )}
+              </Badge>
+            )}
+
+            {totalEnvasesPrestados(extras) >
+              0 && (
+              <Badge tone="warning">
+                Extra:{" "}
+                {textoEnvasesPrestados(
+                  extras
+                )}
+              </Badge>
+            )}
+
+            {cliente.deudaAcumulada > 0 && (
+              <Badge tone="danger">
+                Debe{" "}
+                {formatMoney(
+                  cliente.deudaAcumulada
+                )}
+              </Badge>
+            )}
+
+            {cliente.maquinaFrioCalor && (
+              <Badge tone="accent">
+                Máquina F/C
+              </Badge>
+            )}
+
+            {cliente.notas && (
+              <Badge tone="muted">
+                Nota
+              </Badge>
+            )}
+          </div>
+
+          {(hecho || noVendido) && (
+            <div
+              className="text-[10px] mt-1.5"
+              style={{ color: C.mutedLight }}
+            >
+              Tocar para editar la visita de hoy
+            </div>
+          )}
+        </div>
+
+        <div
+          className="flex gap-1 flex-shrink-0"
+          onClick={(e) =>
+            e.stopPropagation()
+          }
+        >
+          {cliente.telefono && (
+            <a
+              href={`tel:${cliente.telefono}`}
+              className="p-1.5 rounded-lg"
+              style={{ background: C.bg }}
+            >
+              <Phone
+                size={13}
+                color={C.primary}
+              />
+            </a>
+          )}
+
+          <a
+            href={`https://maps.google.com/?q=${encodeURIComponent(
+              cliente.direccion
+            )}`}
+            target="_blank"
+            rel="noreferrer"
+            className="p-1.5 rounded-lg"
+            style={{ background: C.bg }}
+          >
+            <MapPin
+              size={13}
+              color={C.primary}
+            />
+          </a>
         </div>
       </div>
     </Card>
@@ -2214,26 +2829,139 @@ function ClienteVisitaCard({ cliente, hecho, onClick }) {
 
 const NOTAS_RAPIDAS = ["No estaba", "No quiso hoy", "Volver más tarde"];
 
-function VisitaSheet({ cliente, precios, stockActivo, stockRepartidor, onClose, onGuardar }) {
-  const permanentes = envasesPermanentesDe(cliente);
-  const saldoActual = envasesExtraDe(cliente);
-  const [vendio, setVendio] = useState(true);
-  const [items, setItems] = useState(
-    PRODUCTOS.map((p) => ({ tipo: p.key, cantidad: 0, precioUnitario: precios[p.key] || 0 }))
+function VisitaSheet({
+  cliente,
+  visitaInicial = null,
+  precios,
+  stockActivo,
+  stockRepartidor,
+  onClose,
+  onGuardar,
+}) {
+  const permanentes =
+    envasesPermanentesDe(cliente);
+
+  const saldoActual =
+    envasesExtraDe(cliente);
+
+  const [vendio, setVendio] = useState(
+    visitaInicial
+      ? visitaInicial.vendio
+      : true
   );
-  const [retornos, setRetornos] = useState(() => {
-    const r = {};
-    PRODUCTOS_RETORNABLES.forEach((p) => { r[p.key] = 0; });
-    return r;
-  });
-  const [retornosTocados, setRetornosTocados] = useState(() => new Set());
-  const [metodoPago, setMetodoPago] = useState("efectivo");
-  const [montoPagado, setMontoPagado] = useState(null);
-  const [cobrarDeuda, setCobrarDeuda] = useState(false);
-  const [montoDeuda, setMontoDeuda] = useState(cliente.deudaAcumulada || 0);
-  const [metodoDeuda, setMetodoDeuda] = useState("efectivo");
-  const [notas, setNotas] = useState("");
-  const [errorStock, setErrorStock] = useState("");
+
+  const [items, setItems] = useState(() =>
+    PRODUCTOS.map((p) => {
+      const anterior =
+        visitaInicial?.items?.find(
+          (it) => it.tipo === p.key
+        );
+
+      return {
+        tipo: p.key,
+        cantidad:
+          anterior?.cantidad || 0,
+
+        // Al editar conservamos el precio
+        // que tenía la visita original.
+        precioUnitario:
+          anterior?.precioUnitario ??
+          precios[p.key] ??
+          0,
+      };
+    })
+  );
+
+  const [retornos, setRetornos] =
+    useState(() => {
+      const r = {};
+
+      PRODUCTOS_RETORNABLES.forEach(
+        (p) => {
+          r[p.key] =
+            visitaInicial?.retornos?.[
+              p.key
+            ] || 0;
+        }
+      );
+
+      return r;
+    });
+
+  const [
+    retornosTocados,
+    setRetornosTocados,
+  ] = useState(
+    () =>
+      new Set(
+        visitaInicial
+          ? PRODUCTOS_RETORNABLES.map(
+              (p) => p.key
+            )
+          : []
+      )
+  );
+
+  const [metodoPago, setMetodoPago] =
+    useState(
+      visitaInicial?.metodoPago ||
+        "efectivo"
+    );
+
+  const [montoPagado, setMontoPagado] =
+    useState(() => {
+      if (
+        !visitaInicial ||
+        !visitaInicial.vendio ||
+        visitaInicial.metodoPago ===
+          "deuda"
+      ) {
+        return null;
+      }
+
+      // Si estaba totalmente pago usamos null
+      // para que siga automáticamente el nuevo total
+      // si cambia la cantidad.
+      if (
+        (visitaInicial.deudaGenerada ||
+          0) === 0
+      ) {
+        return null;
+      }
+
+      return Math.max(
+        0,
+        (visitaInicial.total || 0) -
+          (visitaInicial.deudaGenerada ||
+            0)
+      );
+    });
+
+  const [cobrarDeuda, setCobrarDeuda] =
+    useState(
+      (visitaInicial?.deudaCobrada ||
+        0) > 0
+    );
+
+  const [montoDeuda, setMontoDeuda] =
+    useState(
+      visitaInicial?.deudaCobrada > 0
+        ? visitaInicial.deudaCobrada
+        : cliente.deudaAcumulada || 0
+    );
+
+  const [metodoDeuda, setMetodoDeuda] =
+    useState(
+      visitaInicial?.metodoDeuda ||
+        "efectivo"
+    );
+
+  const [notas, setNotas] = useState(
+    visitaInicial?.notas || ""
+  );
+
+  const [errorStock, setErrorStock] =
+    useState("");
 
   const total = totalPedido(items);
   const pagadoFinal = montoPagado === null ? total : Number(montoPagado) || 0;
@@ -2291,7 +3019,7 @@ function VisitaSheet({ cliente, precios, stockActivo, stockRepartidor, onClose, 
     });
 
     const visita = {
-      id: uid(),
+      id: visitaInicial?.id || uid(),
       clienteId: cliente.id,
       clienteNombre: cliente.nombre,
       repartidorId: cliente.repartidorId,
@@ -2307,7 +3035,13 @@ function VisitaSheet({ cliente, precios, stockActivo, stockRepartidor, onClose, 
       deudaCobrada: cobrarDeuda ? Number(montoDeuda) || 0 : 0,
       metodoDeuda: cobrarDeuda ? metodoDeuda : null,
       notas,
-      timestamp: Date.now(),
+      timestamp:
+        visitaInicial?.timestamp ||
+        Date.now(),
+
+      editadoEl: visitaInicial
+        ? Date.now()
+        : null,
     };
 
     if (visita.deudaCobrada) {
@@ -2318,10 +3052,25 @@ function VisitaSheet({ cliente, precios, stockActivo, stockRepartidor, onClose, 
 
   return (
     <Sheet
-      title={cliente.nombre}
+  title={
+        visitaInicial
+          ? `${cliente.nombre} · Editar visita`
+          : cliente.nombre
+      }
       onClose={onClose}
       closeOnBackdrop={false}
-      footer={<Btn full size="lg" onClick={guardar} icon={Check}>Guardar visita</Btn>}
+      footer={
+  <Btn
+    full
+    size="lg"
+    onClick={guardar}
+    icon={Check}
+  >
+    {visitaInicial
+      ? "Guardar cambios"
+      : "Guardar visita"}
+  </Btn>
+}
     >
       <div className="text-xs mb-3" style={{ color: C.muted }}>{cliente.direccion}</div>
 
