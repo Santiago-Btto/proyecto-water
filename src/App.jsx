@@ -73,6 +73,14 @@ function fechaLegible(iso) {
     return iso;
   }
 }
+function diaSemanaDeFecha(iso) {
+  try {
+    const [y, m, d] = iso.split("-").map(Number);
+    return DIAS_JS[new Date(y, m - 1, d).getDay()];
+  } catch {
+    return "";
+  }
+}
 function formatMoney(n) {
   const val = Number(n) || 0;
   try {
@@ -1257,39 +1265,55 @@ function AdminClientes({ db, mutate }) {
   const [confirmDel, setConfirmDel] = useState(null);
   const [detalleId, setDetalleId] = useState(null);
   const [ordenLista, setOrdenLista] = useState("nombre");
+  const [diasAbiertos, setDiasAbiertos] = useState(
+    () => new Set([diaSemanaHoy()])
+  );
+
+  function toggleDia(dia) {
+    setDiasAbiertos((prev) => {
+      const siguiente = new Set(prev);
+      if (siguiente.has(dia)) siguiente.delete(dia);
+      else siguiente.add(dia);
+      return siguiente;
+    });
+  }
 
   const lista = db.clientes
-  .filter(
-    (c) =>
-      c.nombre.toLowerCase().includes(busca.toLowerCase()) ||
-      c.direccion.toLowerCase().includes(busca.toLowerCase())
-  )
-  .sort((a, b) => {
-    // Orden alfabético
-    if (ordenLista === "nombre") {
+    .filter(
+      (c) =>
+        (c.nombre || "").toLowerCase().includes(busca.toLowerCase()) ||
+        (c.direccion || "").toLowerCase().includes(busca.toLowerCase())
+    )
+    .sort((a, b) => {
+      if (ordenLista === "nombre") {
+        return a.nombre.localeCompare(b.nombre);
+      }
+
+      const ordenA =
+        a.orden === "" || a.orden === null || a.orden === undefined
+          ? Infinity
+          : Number(a.orden);
+      const ordenB =
+        b.orden === "" || b.orden === null || b.orden === undefined
+          ? Infinity
+          : Number(b.orden);
+
+      if (ordenA !== ordenB) return ordenA - ordenB;
       return a.nombre.localeCompare(b.nombre);
-    }
+    });
 
-    // Orden del recorrido
-    const ordenA =
-      a.orden === "" || a.orden === null || a.orden === undefined
-        ? Infinity
-        : Number(a.orden);
+  const clientesPorDia = DIAS.map((dia) => ({
+    dia,
+    clientes: lista.filter((c) => (c.diasVisita || []).includes(dia)),
+  }));
 
-    const ordenB =
-      b.orden === "" || b.orden === null || b.orden === undefined
-        ? Infinity
-        : Number(b.orden);
+  const clientesSinDia = lista.filter(
+    (c) => !c.diasVisita || c.diasVisita.length === 0
+  );
 
-    if (ordenA !== ordenB) {
-      return ordenA - ordenB;
-    }
-
-    // Si tienen el mismo número, desempata por nombre
-    return a.nombre.localeCompare(b.nombre);
-  });
-
-  const clienteDetalle = detalleId ? db.clientes.find((c) => c.id === detalleId) : null;
+  const clienteDetalle = detalleId
+    ? db.clientes.find((c) => c.id === detalleId)
+    : null;
 
   function guardarCliente(f) {
     const next = clone(db);
@@ -1299,7 +1323,10 @@ function AdminClientes({ db, mutate }) {
       const actual = next.clientes[i];
       const permanentesAntes = envasesPermanentesDe(actual);
       const extrasAntes = envasesExtraDe(actual);
-      const permanentesNuevos = { ...envasesVacio(), ...(f.envasesPermanentes || {}) };
+      const permanentesNuevos = {
+        ...envasesVacio(),
+        ...(f.envasesPermanentes || {}),
+      };
       const extrasNuevos = { ...extrasAntes };
 
       PRODUCTOS_RETORNABLES.forEach((p) => {
@@ -1308,13 +1335,17 @@ function AdminClientes({ db, mutate }) {
         const diferencia = despues - antes;
 
         if (diferencia > 0) {
-          // Si ya había extras, primero los convertimos en permanentes.
-          const convertir = Math.min(diferencia, Number(extrasNuevos[p.key]) || 0);
-          extrasNuevos[p.key] = Math.max(0, (Number(extrasNuevos[p.key]) || 0) - convertir);
+          const convertir = Math.min(
+            diferencia,
+            Number(extrasNuevos[p.key]) || 0
+          );
+          extrasNuevos[p.key] = Math.max(
+            0,
+            (Number(extrasNuevos[p.key]) || 0) - convertir
+          );
         } else if (diferencia < 0) {
-          // Al reducir permanentes, no "teletransportamos" el envase al galpón:
-          // pasa a extra hasta que el repartidor lo retire en un recorrido.
-          extrasNuevos[p.key] = (Number(extrasNuevos[p.key]) || 0) + Math.abs(diferencia);
+          extrasNuevos[p.key] =
+            (Number(extrasNuevos[p.key]) || 0) + Math.abs(diferencia);
         }
       });
 
@@ -1331,7 +1362,10 @@ function AdminClientes({ db, mutate }) {
         ...f,
         id: uid(),
         deudaAcumulada: 0,
-        envasesPermanentes: { ...envasesVacio(), ...(f.envasesPermanentes || {}) },
+        envasesPermanentes: {
+          ...envasesVacio(),
+          ...(f.envasesPermanentes || {}),
+        },
         envasesExtra: envasesVacio(),
         creadoEl: hoyISO(),
       };
@@ -1362,7 +1396,11 @@ function AdminClientes({ db, mutate }) {
           onEditar={() => setSheet(clienteDetalle)}
         />
         {sheet && (
-          <Sheet title="Editar cliente" onClose={() => setSheet(null)} closeOnBackdrop={false}>
+          <Sheet
+            title="Editar cliente"
+            onClose={() => setSheet(null)}
+            closeOnBackdrop={false}
+          >
             <ClienteForm
               initial={sheet === "nuevo" ? null : sheet}
               repartidores={db.config.repartidores}
@@ -1380,7 +1418,11 @@ function AdminClientes({ db, mutate }) {
     <div>
       <div className="flex gap-2 mb-3">
         <div className="flex-1 relative">
-          <Search size={16} color={C.mutedLight} style={{ position: "absolute", left: 10, top: 11 }} />
+          <Search
+            size={16}
+            color={C.mutedLight}
+            style={{ position: "absolute", left: 10, top: 11 }}
+          />
           <input
             value={busca}
             onChange={(e) => setBusca(e.target.value)}
@@ -1389,100 +1431,243 @@ function AdminClientes({ db, mutate }) {
             style={{ background: C.surface, border: `1px solid ${C.border}` }}
           />
         </div>
-        <Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo</Btn>
+        <Btn icon={Plus} onClick={() => setSheet("nuevo")}>
+          Nuevo
+        </Btn>
       </div>
 
       <div className="flex items-center gap-2 mb-3">
-  <span
-    className="text-xs font-semibold mr-1"
-    style={{ color: C.muted }}
-  >
-    Ordenar por:
-  </span>
+        <span className="text-xs font-semibold mr-1" style={{ color: C.muted }}>
+          Ordenar por:
+        </span>
 
-  <button
-    type="button"
-    onClick={() => setOrdenLista("nombre")}
-    className="px-3 py-1.5 rounded-lg text-xs font-bold"
-    style={{
-      background: ordenLista === "nombre" ? C.primary : C.surface,
-      color: ordenLista === "nombre" ? "#fff" : C.muted,
-      border: `1px solid ${
-        ordenLista === "nombre" ? C.primary : C.border
-      }`,
-    }}
-  >
-    Nombre
-  </button>
+        <button
+          type="button"
+          onClick={() => setOrdenLista("nombre")}
+          className="px-3 py-1.5 rounded-lg text-xs font-bold"
+          style={{
+            background: ordenLista === "nombre" ? C.primary : C.surface,
+            color: ordenLista === "nombre" ? "#fff" : C.muted,
+            border: `1px solid ${
+              ordenLista === "nombre" ? C.primary : C.border
+            }`,
+          }}
+        >
+          Nombre
+        </button>
 
-  <button
-    type="button"
-    onClick={() => setOrdenLista("recorrido")}
-    className="px-3 py-1.5 rounded-lg text-xs font-bold"
-    style={{
-      background: ordenLista === "recorrido" ? C.primary : C.surface,
-      color: ordenLista === "recorrido" ? "#fff" : C.muted,
-      border: `1px solid ${
-        ordenLista === "recorrido" ? C.primary : C.border
-      }`,
-    }}
-  >
-    Recorrido
-  </button>
-</div>
+        <button
+          type="button"
+          onClick={() => setOrdenLista("recorrido")}
+          className="px-3 py-1.5 rounded-lg text-xs font-bold"
+          style={{
+            background: ordenLista === "recorrido" ? C.primary : C.surface,
+            color: ordenLista === "recorrido" ? "#fff" : C.muted,
+            border: `1px solid ${
+              ordenLista === "recorrido" ? C.primary : C.border
+            }`,
+          }}
+        >
+          Recorrido
+        </button>
+      </div>
 
       {lista.length === 0 ? (
-        <EmptyState icon={Users} title="Sin clientes todavía" text="Agregá el primer cliente para empezar a armar los recorridos." action={<Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo cliente</Btn>} />
+        <EmptyState
+          icon={Users}
+          title={busca ? "Sin resultados" : "Sin clientes todavía"}
+          text={
+            busca
+              ? "No encontramos clientes con esa búsqueda."
+              : "Agregá el primer cliente para empezar a armar los recorridos."
+          }
+          action={
+            !busca && (
+              <Btn icon={Plus} onClick={() => setSheet("nuevo")}>
+                Nuevo cliente
+              </Btn>
+            )
+          }
+        />
       ) : (
-        <div className="flex flex-col gap-2">
-          {lista.map((c) => {
-            const rep = db.config.repartidores.find((r) => r.id === c.repartidorId);
-            return (
-              <Card key={c.id}>
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1" onClick={() => setDetalleId(c.id)}>
-                    <div className="flex items-center gap-2">
-  <div className="font-bold text-sm truncate">
-    {c.nombre}
-  </div>
+        <div className="flex flex-col gap-3">
+          {clientesPorDia.map(({ dia, clientes }) => {
+            if (clientes.length === 0) return null;
 
-  {c.orden !== "" &&
-    c.orden !== null &&
-    c.orden !== undefined && (
-      <span
-        className="px-2 py-0.5 rounded-md text-[10px] font-bold flex-shrink-0"
-        style={{
-          background: C.primaryDark,
-          color: "#fff",
-        }}
-      >
-        Orden {c.orden}
-      </span>
-    )}
-</div>
-                    <div className="text-xs truncate" style={{ color: C.muted }}>{c.direccion}</div>
-                    <div className="flex flex-wrap gap-1 mt-1.5">
-                      {c.diasVisita.map((d) => <Badge key={d} tone="accent">{d.slice(0, 3)}</Badge>)}
-                      {rep && <Badge tone="muted">{rep.nombre}</Badge>}
-                      {c.deudaAcumulada > 0 && <Badge tone="danger">Debe {formatMoney(c.deudaAcumulada)}</Badge>}
-                      {totalEnvasesPrestados(envasesPermanentesDe(c)) > 0 && <Badge tone="accent">Permanentes: {textoEnvasesPrestados(envasesPermanentesDe(c))}</Badge>}
-                      {totalEnvasesPrestados(envasesExtraDe(c)) > 0 && <Badge tone="warning">Extra: {textoEnvasesPrestados(envasesExtraDe(c))}</Badge>}
-                      {c.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
+            const abierto = busca.trim() ? true : diasAbiertos.has(dia);
+            const esHoy = dia === diaSemanaHoy();
+
+            return (
+              <div key={dia}>
+                <button
+                  type="button"
+                  onClick={() => toggleDia(dia)}
+                  className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
+                  style={{
+                    background: esHoy ? C.accentSoft : C.surface,
+                    border: `1px solid ${esHoy ? C.accent : C.border}`,
+                  }}
+                >
+                  <div className="flex items-center gap-2">
+                    <div
+                      className="w-8 h-8 rounded-lg flex items-center justify-center font-extrabold text-xs"
+                      style={{
+                        background: esHoy ? C.primary : C.bg,
+                        color: esHoy ? "#fff" : C.primary,
+                      }}
+                    >
+                      {dia.slice(0, 3)}
+                    </div>
+
+                    <div className="text-left">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-sm">{dia}</span>
+                        {esHoy && <Badge tone="accent">Hoy</Badge>}
+                      </div>
+                      <div className="text-[10px]" style={{ color: C.muted }}>
+                        {clientes.length} cliente{clientes.length !== 1 ? "s" : ""}
+                      </div>
                     </div>
                   </div>
-                  <div className="flex flex-col gap-1">
-                    <button onClick={() => setSheet(c)} className="p-1.5 rounded-lg active:bg-black/5"><Edit2 size={15} color={C.muted} /></button>
-                    <button onClick={() => setConfirmDel(c)} className="p-1.5 rounded-lg active:bg-black/5"><Trash2 size={15} color={C.danger} /></button>
+
+                  <ChevronRight
+                    size={18}
+                    color={C.muted}
+                    style={{
+                      transform: abierto ? "rotate(90deg)" : "rotate(0deg)",
+                      transition: "transform 0.2s",
+                    }}
+                  />
+                </button>
+
+                {abierto && (
+                  <div className="flex flex-col gap-2 mt-2">
+                    {clientes.map((c) => {
+                      const rep = db.config.repartidores.find(
+                        (r) => r.id === c.repartidorId
+                      );
+
+                      return (
+                        <Card key={`${dia}-${c.id}`}>
+                          <div className="flex items-start justify-between gap-2">
+                            <div
+                              className="min-w-0 flex-1"
+                              onClick={() => setDetalleId(c.id)}
+                            >
+                              <div className="flex items-center gap-2">
+                                <div className="font-bold text-sm truncate">
+                                  {c.nombre}
+                                </div>
+
+                                {c.orden !== "" &&
+                                  c.orden !== null &&
+                                  c.orden !== undefined && (
+                                    <span
+                                      className="px-2 py-0.5 rounded-md text-[10px] font-bold flex-shrink-0"
+                                      style={{
+                                        background: C.primaryDark,
+                                        color: "#fff",
+                                      }}
+                                    >
+                                      Orden {c.orden}
+                                    </span>
+                                  )}
+                              </div>
+
+                              <div
+                                className="text-xs truncate"
+                                style={{ color: C.muted }}
+                              >
+                                {c.direccion}
+                              </div>
+
+                              <div className="flex flex-wrap gap-1 mt-1.5">
+                                {rep && <Badge tone="muted">{rep.nombre}</Badge>}
+                                {c.deudaAcumulada > 0 && (
+                                  <Badge tone="danger">
+                                    Debe {formatMoney(c.deudaAcumulada)}
+                                  </Badge>
+                                )}
+                                {totalEnvasesPrestados(
+                                  envasesPermanentesDe(c)
+                                ) > 0 && (
+                                  <Badge tone="accent">
+                                    Permanentes: {textoEnvasesPrestados(
+                                      envasesPermanentesDe(c)
+                                    )}
+                                  </Badge>
+                                )}
+                                {totalEnvasesPrestados(envasesExtraDe(c)) > 0 && (
+                                  <Badge tone="warning">
+                                    Extra: {textoEnvasesPrestados(envasesExtraDe(c))}
+                                  </Badge>
+                                )}
+                                {c.maquinaFrioCalor && (
+                                  <Badge tone="accent">Máquina F/C</Badge>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="flex flex-col gap-1">
+                              <button
+                                onClick={() => setSheet(c)}
+                                className="p-1.5 rounded-lg active:bg-black/5"
+                              >
+                                <Edit2 size={15} color={C.muted} />
+                              </button>
+                              <button
+                                onClick={() => setConfirmDel(c)}
+                                className="p-1.5 rounded-lg active:bg-black/5"
+                              >
+                                <Trash2 size={15} color={C.danger} />
+                              </button>
+                            </div>
+                          </div>
+                        </Card>
+                      );
+                    })}
                   </div>
-                </div>
-              </Card>
+                )}
+              </div>
             );
           })}
+
+          {clientesSinDia.length > 0 && (
+            <div>
+              <div
+                className="text-xs font-bold uppercase tracking-wide mb-2"
+                style={{ color: C.danger }}
+              >
+                Sin día asignado ({clientesSinDia.length})
+              </div>
+
+              <div className="flex flex-col gap-2">
+                {clientesSinDia.map((c) => (
+                  <Card
+                    key={`sin-dia-${c.id}`}
+                    onClick={() => setDetalleId(c.id)}
+                  >
+                    <div className="font-bold text-sm">{c.nombre}</div>
+                    <div className="text-xs" style={{ color: C.muted }}>
+                      {c.direccion}
+                    </div>
+                    <div className="mt-1">
+                      <Badge tone="danger">Falta asignar día</Badge>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
       {sheet && (
-        <Sheet title={sheet === "nuevo" ? "Nuevo cliente" : "Editar cliente"} onClose={() => setSheet(null)} closeOnBackdrop={false}>
+        <Sheet
+          title={sheet === "nuevo" ? "Nuevo cliente" : "Editar cliente"}
+          onClose={() => setSheet(null)}
+          closeOnBackdrop={false}
+        >
           <ClienteForm
             initial={sheet === "nuevo" ? null : sheet}
             repartidores={db.config.repartidores}
@@ -1497,29 +1682,57 @@ function AdminClientes({ db, mutate }) {
         <Sheet title="Eliminar cliente" onClose={() => setConfirmDel(null)}>
           {totalEnvasesCliente(confirmDel) > 0 ? (
             <>
-              <Card style={{ background: C.warningBg, border: "none" }} className="mb-3">
-                <div className="text-sm font-bold" style={{ color: C.warning }}>No se puede eliminar este cliente.</div>
+              <Card
+                style={{ background: C.warningBg, border: "none" }}
+                className="mb-3"
+              >
+                <div className="text-sm font-bold" style={{ color: C.warning }}>
+                  No se puede eliminar este cliente.
+                </div>
                 <div className="text-xs mt-1" style={{ color: C.muted }}>
                   La empresa todavía tiene envases en poder de este cliente.
                 </div>
-                <div className="font-bold text-sm mt-2" style={{ color: C.danger }}>
-                  {totalEnvasesPrestados(envasesPermanentesDe(confirmDel)) > 0 && <div>Permanentes: {textoEnvasesPrestados(envasesPermanentesDe(confirmDel))}</div>}
-                  {totalEnvasesPrestados(envasesExtraDe(confirmDel)) > 0 && <div>Extras: {textoEnvasesPrestados(envasesExtraDe(confirmDel))}</div>}
+                <div
+                  className="font-bold text-sm mt-2"
+                  style={{ color: C.danger }}
+                >
+                  {totalEnvasesPrestados(
+                    envasesPermanentesDe(confirmDel)
+                  ) > 0 && (
+                    <div>
+                      Permanentes: {textoEnvasesPrestados(
+                        envasesPermanentesDe(confirmDel)
+                      )}
+                    </div>
+                  )}
+                  {totalEnvasesPrestados(envasesExtraDe(confirmDel)) > 0 && (
+                    <div>
+                      Extras: {textoEnvasesPrestados(envasesExtraDe(confirmDel))}
+                    </div>
+                  )}
                 </div>
                 <div className="text-xs mt-2" style={{ color: C.muted }}>
-                  Primero registrá la devolución de los envases y después vas a poder eliminarlo.
+                  Primero registrá la devolución de los envases y después vas a
+                  poder eliminarlo.
                 </div>
               </Card>
-              <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>Volver</Btn>
+              <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>
+                Volver
+              </Btn>
             </>
           ) : (
             <>
               <div className="text-sm mb-4">
-                ¿Seguro que querés eliminar a <b>{confirmDel.nombre}</b>? Podés deshacerlo después con el botón deshacer.
+                ¿Seguro que querés eliminar a <b>{confirmDel.nombre}</b>? Podés
+                deshacerlo después con el botón deshacer.
               </div>
               <div className="flex gap-2">
-                <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>Cancelar</Btn>
-                <Btn variant="danger" full onClick={() => eliminarCliente(confirmDel)}>Eliminar</Btn>
+                <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>
+                  Cancelar
+                </Btn>
+                <Btn variant="danger" full onClick={() => eliminarCliente(confirmDel)}>
+                  Eliminar
+                </Btn>
               </div>
             </>
           )}
@@ -2182,149 +2395,207 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
   const [vista, setVista] = useState("inicio"); // inicio | clientes | recorrido
 
   const misClientes = db.clientes.filter(
-  (c) => c.repartidorId === repartidor.id
-);
+    (c) => c.repartidorId === repartidor.id
+  );
 
-const hoy = diaSemanaHoy();
+  const hoy = diaSemanaHoy();
+  const fechaHoy = hoyISO();
 
-const deHoy = misClientes
-  .filter((c) => c.diasVisita.includes(hoy))
-  .sort((a, b) => {
-    const ordenA =
-      a.orden === "" ||
-      a.orden === null ||
-      a.orden === undefined
-        ? Infinity
-        : Number(a.orden);
+  const deHoy = misClientes
+    .filter((c) => c.diasVisita.includes(hoy))
+    .sort((a, b) => {
+      const ordenA =
+        a.orden === "" || a.orden === null || a.orden === undefined
+          ? Infinity
+          : Number(a.orden);
+      const ordenB =
+        b.orden === "" || b.orden === null || b.orden === undefined
+          ? Infinity
+          : Number(b.orden);
 
-    const ordenB =
-      b.orden === "" ||
-      b.orden === null ||
-      b.orden === undefined
-        ? Infinity
-        : Number(b.orden);
+      if (ordenA !== ordenB) return ordenA - ordenB;
+      return a.nombre.localeCompare(b.nombre);
+    });
 
-    if (ordenA !== ordenB) {
-      return ordenA - ordenB;
-    }
+  const visitasHoy = db.visitas.filter(
+    (v) => v.repartidorId === repartidor.id && v.fecha === fechaHoy
+  );
 
-    return a.nombre.localeCompare(b.nombre);
+  // Tomamos la visita más reciente de hoy para cada cliente.
+  const visitaHoyPorCliente = new Map();
+  visitasHoy
+    .slice()
+    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+    .forEach((v) => {
+      visitaHoyPorCliente.set(v.clienteId, v);
+    });
+
+  // Última visita ANTERIOR a hoy de cada cliente.
+  // Si esa última visita quedó en "Volver más tarde", el pendiente se
+  // arrastra al recorrido de hoy aunque el cliente no tenga hoy asignado.
+  const ultimaVisitaAnteriorPorCliente = new Map();
+  db.visitas
+    .filter((v) => v.fecha < fechaHoy)
+    .slice()
+    .sort((a, b) => {
+      const porFecha = (a.fecha || "").localeCompare(b.fecha || "");
+      if (porFecha !== 0) return porFecha;
+      return (a.timestamp || 0) - (b.timestamp || 0);
+    })
+    .forEach((v) => {
+      ultimaVisitaAnteriorPorCliente.set(v.clienteId, v);
+    });
+
+  const pendientesAnteriores = misClientes
+    .map((c) => {
+      const visitaAnterior = ultimaVisitaAnteriorPorCliente.get(c.id);
+      if (!esVolverMasTarde(visitaAnterior)) return null;
+
+      return {
+        ...c,
+        // Dato solo visual: no se persiste en Firebase.
+        pendienteDesde: visitaAnterior.fecha,
+      };
+    })
+    .filter(Boolean);
+
+  const pendienteAnteriorPorId = new Map(
+    pendientesAnteriores.map((c) => [c.id, c.pendienteDesde])
+  );
+
+  // Los clientes programados para hoy conservan la marca de pendiente
+  // anterior si también vienen arrastrados.
+  const clientesHoyConPendientes = deHoy.map((c) => {
+    const pendienteDesde = pendienteAnteriorPorId.get(c.id);
+    return pendienteDesde ? { ...c, pendienteDesde } : c;
   });
 
-const visitasHoy = db.visitas.filter(
-  (v) =>
-    v.repartidorId === repartidor.id &&
-    v.fecha === hoyISO()
-);
+  // Sumamos los pendientes viejos que no estaban programados para hoy.
+  const idsDeHoy = new Set(deHoy.map((c) => c.id));
+  const pendientesAnterioresExtra = pendientesAnteriores.filter(
+    (c) => !idsDeHoy.has(c.id)
+  );
 
-// Tomamos la visita más reciente de cada cliente.
-const visitaHoyPorCliente = new Map();
+  const clientesRecorrido = [
+    ...clientesHoyConPendientes,
+    ...pendientesAnterioresExtra,
+  ];
 
-visitasHoy
-  .slice()
-  .sort(
-    (a, b) =>
-      (a.timestamp || 0) -
-      (b.timestamp || 0)
-  )
-  .forEach((v) => {
-    visitaHoyPorCliente.set(
-      v.clienteId,
-      v
-    );
+  // Todavía no tuvo visita hoy y no viene de un día anterior.
+  const pendientes = clientesRecorrido.filter(
+    (c) => !visitaHoyPorCliente.has(c.id) && !c.pendienteDesde
+  );
+
+  // Pendientes de días anteriores que aún no fueron atendidos hoy.
+  const pendientesAnterioresActivos = clientesRecorrido.filter(
+    (c) => !visitaHoyPorCliente.has(c.id) && !!c.pendienteDesde
+  );
+
+  // Hoy ya se visitó, pero nuevamente quedó para volver más tarde.
+  const volverMasTarde = clientesRecorrido.filter((c) =>
+    esVolverMasTarde(visitaHoyPorCliente.get(c.id))
+  );
+
+  // Visitas de hoy ya finalizadas, con o sin venta.
+  const visitadosFinalizados = clientesRecorrido.filter((c) => {
+    const visita = visitaHoyPorCliente.get(c.id);
+    return visita && !esVolverMasTarde(visita);
   });
 
-// Todavía no se visitó.
-const pendientes = deHoy.filter(
-  (c) =>
-    !visitaHoyPorCliente.has(c.id)
-);
+  const completadosCount = visitadosFinalizados.length;
 
-// Se visitó, pero hay que volver.
-const volverMasTarde = deHoy.filter(
-  (c) =>
-    esVolverMasTarde(
-      visitaHoyPorCliente.get(c.id)
-    )
-);
-
-// Se vendió.
-const vendidos = deHoy.filter(
-  (c) =>
-    visitaHoyPorCliente.get(c.id)?.vendio
-);
-
-// No se vendió y NO hay que volver.
-const noVendidosFinalizados = deHoy.filter(
-  (c) => {
-    const visita =
-      visitaHoyPorCliente.get(c.id);
-
-    return (
-      visita &&
-      !visita.vendio &&
-      !esVolverMasTarde(visita)
-    );
-  }
-);
-
-const completadosCount =
-  vendidos.length +
-  noVendidosFinalizados.length;
-
-const enProgreso =
-  completadosCount > 0 ||
-  volverMasTarde.length > 0;
+  const enProgreso =
+    completadosCount > 0 ||
+    volverMasTarde.length > 0 ||
+    pendientesAnterioresActivos.length > 0;
 
   return (
     <Screen>
       <TopBar
         title={repartidor.nombre}
-        subtitle={fechaLegible(hoyISO()) + " · " + hoy}
+        subtitle={fechaLegible(fechaHoy) + " · " + hoy}
         tone="dark"
         right={
           <div className="flex items-center gap-1">
             <span className="flex items-center gap-1 px-1.5 mr-1">
-              <span className="w-1.5 h-1.5 rounded-full" style={{ background: offline ? C.warning : C.accent }} />
-              <span className="text-[10px] font-bold" style={{ color: C.accentSoft }}>{offline ? "sin conexión" : "en vivo"}</span>
+              <span
+                className="w-1.5 h-1.5 rounded-full"
+                style={{ background: offline ? C.warning : C.accent }}
+              />
+              <span
+                className="text-[10px] font-bold"
+                style={{ color: C.accentSoft }}
+              >
+                {offline ? "sin conexión" : "en vivo"}
+              </span>
             </span>
-            <button onClick={onLogout} className="p-2 rounded-full active:bg-white/10"><LogOut size={16} color="#fff" /></button>
+            <button
+              onClick={onLogout}
+              className="p-2 rounded-full active:bg-white/10"
+            >
+              <LogOut size={16} color="#fff" />
+            </button>
           </div>
         }
       />
+
       <div className="flex-1 overflow-y-auto px-4 py-4">
         {vista === "inicio" && (
           <RepartidorInicio
             deHoy={deHoy}
+            totalRecorridoCount={clientesRecorrido.length}
             pendientes={pendientes}
+            pendientesAnterioresCount={pendientesAnterioresActivos.length}
             visitadosCount={completadosCount}
             porReintentarCount={volverMasTarde.length}
             enProgreso={enProgreso}
-            onEmpezar={() =>
-              setVista("recorrido")
-            }
+            onEmpezar={() => setVista("recorrido")}
           />
         )}
-        {vista === "clientes" && <RepartidorClientes db={db} mutate={mutate} repartidor={repartidor} />}
+
+        {vista === "clientes" && (
+          <RepartidorClientes db={db} mutate={mutate} repartidor={repartidor} />
+        )}
+
         {vista === "recorrido" && (
           <RepartidorRecorrido
             db={db}
             mutate={mutate}
             repartidor={repartidor}
-            clientes={deHoy}
+            clientes={clientesRecorrido}
             visitasHoy={visitasHoy}
             onSalir={() => setVista("inicio")}
           />
         )}
       </div>
+
       {vista !== "recorrido" && (
-        <div className="flex-shrink-0 flex" style={{ background: C.surface, borderTop: `1px solid ${C.border}` }}>
-          {[["inicio", "Inicio", HomeIcon], ["clientes", "Mis clientes", Users]].map(([key, label, Icon]) => {
+        <div
+          className="flex-shrink-0 flex"
+          style={{ background: C.surface, borderTop: `1px solid ${C.border}` }}
+        >
+          {[
+            ["inicio", "Inicio", HomeIcon],
+            ["clientes", "Mis clientes", Users],
+          ].map(([key, label, Icon]) => {
             const active = vista === key;
             return (
-              <button key={key} onClick={() => setVista(key)} className="flex-1 flex flex-col items-center gap-0.5 py-2.5">
-                <Icon size={18} color={active ? C.primary : C.mutedLight} strokeWidth={active ? 2.4 : 2} />
-                <span className="text-xs font-semibold" style={{ color: active ? C.primary : C.mutedLight }}>{label}</span>
+              <button
+                key={key}
+                onClick={() => setVista(key)}
+                className="flex-1 flex flex-col items-center gap-0.5 py-2.5"
+              >
+                <Icon
+                  size={18}
+                  color={active ? C.primary : C.mutedLight}
+                  strokeWidth={active ? 2.4 : 2}
+                />
+                <span
+                  className="text-xs font-semibold"
+                  style={{ color: active ? C.primary : C.mutedLight }}
+                >
+                  {label}
+                </span>
               </button>
             );
           })}
@@ -2336,54 +2607,77 @@ const enProgreso =
 
 function RepartidorInicio({
   deHoy,
+  totalRecorridoCount,
   pendientes,
+  pendientesAnterioresCount = 0,
   visitadosCount,
   porReintentarCount = 0,
   enProgreso,
   onEmpezar,
 }) {
   const quedanPorAtender =
-  pendientes.length > 0 ||
-  porReintentarCount > 0;
+    pendientes.length > 0 ||
+    pendientesAnterioresCount > 0 ||
+    porReintentarCount > 0;
+
   return (
     <div className="flex flex-col items-center justify-center text-center pt-10">
-      <div className="w-20 h-20 rounded-3xl flex items-center justify-center mb-4" style={{ background: C.primaryDark }}>
+      <div
+        className="w-20 h-20 rounded-3xl flex items-center justify-center mb-4"
+        style={{ background: C.primaryDark }}
+      >
         <Truck size={34} color="#fff" />
       </div>
-      {deHoy.length === 0 ? (
+
+      {totalRecorridoCount === 0 ? (
         <>
-          <div className="font-bold text-base mb-1">No tenés clientes para hoy</div>
-          <div className="text-xs mb-6" style={{ color: C.muted }}>Revisá "Mis clientes" para ver tus días de visita.</div>
+          <div className="font-bold text-base mb-1">
+            No tenés clientes para hoy
+          </div>
+          <div className="text-xs mb-6" style={{ color: C.muted }}>
+            Revisá "Mis clientes" para ver tus días de visita.
+          </div>
         </>
       ) : (
         <>
-          <div className="font-extrabold text-xl mb-1">{deHoy.length} cliente{deHoy.length !== 1 ? "s" : ""} hoy</div>
-          <div
-  className="text-xs mb-6"
-  style={{ color: C.muted }}
->
-  {visitadosCount > 0 ||
-  porReintentarCount > 0
-    ? (
-      <>
-        {visitadosCount} de{" "}
-        {deHoy.length} completados
-        {porReintentarCount > 0 &&
-          ` · ${porReintentarCount} para volver`}
-      </>
-    )
-    : "Todavía no arrancaste el recorrido"}
-</div>
-          <Btn size="lg" onClick={onEmpezar} icon={
-  !quedanPorAtender
-    ? CheckCircle2
-    : Truck
-}>
+          <div className="font-extrabold text-xl mb-1">
+            {deHoy.length > 0
+              ? `${deHoy.length} cliente${deHoy.length !== 1 ? "s" : ""} hoy`
+              : `${totalRecorridoCount} cliente${
+                  totalRecorridoCount !== 1 ? "s" : ""
+                } en el recorrido`}
+          </div>
+
+          <div className="text-xs mb-6" style={{ color: C.muted }}>
+            {visitadosCount > 0 ||
+            pendientesAnterioresCount > 0 ||
+            porReintentarCount > 0 ? (
+              <>
+                {visitadosCount} de {totalRecorridoCount} completados
+                {pendientesAnterioresCount > 0 &&
+                  ` · ${pendientesAnterioresCount} pendiente${
+                    pendientesAnterioresCount !== 1 ? "s" : ""
+                  } anterior${
+                    pendientesAnterioresCount !== 1 ? "es" : ""
+                  }`}
+                {porReintentarCount > 0 &&
+                  ` · ${porReintentarCount} para volver hoy`}
+              </>
+            ) : (
+              "Todavía no arrancaste el recorrido"
+            )}
+          </div>
+
+          <Btn
+            size="lg"
+            onClick={onEmpezar}
+            icon={!quedanPorAtender ? CheckCircle2 : Truck}
+          >
             {!quedanPorAtender
-  ? "Ver recorrido completo"
-  : enProgreso
-  ? "Continuar recorrido"
-  : "Empezar recorrido"}
+              ? "Ver recorrido completo"
+              : enProgreso
+              ? "Continuar recorrido"
+              : "Empezar recorrido"}
           </Btn>
         </>
       )}
@@ -2485,10 +2779,8 @@ function RepartidorRecorrido({
   const [mostrarVisitados, setMostrarVisitados] = useState(false);
   const [busca, setBusca] = useState("");
 
-  // Si por algún motivo hubiese más de una visita del mismo cliente hoy,
-  // tomamos la más reciente.
+  // Si hubiese más de una visita del mismo cliente hoy, tomamos la más reciente.
   const visitaPorCliente = new Map();
-
   visitasHoy
     .slice()
     .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
@@ -2496,74 +2788,54 @@ function RepartidorRecorrido({
       visitaPorCliente.set(v.clienteId, v);
     });
 
-const textoBusqueda = busca.trim().toLowerCase();
+  const textoBusqueda = busca.trim().toLowerCase();
 
-const clientesFiltrados = clientes.filter((c) => {
-  if (!textoBusqueda) return true;
-
-  const nombre = (c.nombre || "").toLowerCase();
-  const direccion = (c.direccion || "").toLowerCase();
-
-  return (
-    nombre.includes(textoBusqueda) ||
-    direccion.includes(textoBusqueda)
-  );
-});
-
-// ==========================================
-// TOTALES REALES DEL RECORRIDO
-// No dependen del buscador.
-// ==========================================
-
-const pendientesTotales = clientes.filter(
-  (c) => !visitaPorCliente.has(c.id)
-);
-
-const volverMasTardeTotales =
-  clientes.filter((c) =>
-    esVolverMasTarde(
-      visitaPorCliente.get(c.id)
-    )
-  );
-
-const visitadosFinalizadosTotales =
-  clientes.filter((c) => {
-    const visita =
-      visitaPorCliente.get(c.id);
-
-    return (
-      visita &&
-      !esVolverMasTarde(visita)
-    );
+  const clientesFiltrados = clientes.filter((c) => {
+    if (!textoBusqueda) return true;
+    const nombre = (c.nombre || "").toLowerCase();
+    const direccion = (c.direccion || "").toLowerCase();
+    return nombre.includes(textoBusqueda) || direccion.includes(textoBusqueda);
   });
 
-// ==========================================
-// LISTAS VISIBLES
-// Estas sí respetan el buscador.
-// ==========================================
-
-const pendientes =
-  clientesFiltrados.filter(
-    (c) =>
-      !visitaPorCliente.has(c.id)
+  // ==========================================
+  // TOTALES REALES DEL RECORRIDO
+  // No dependen del buscador.
+  // ==========================================
+  const pendientesTotales = clientes.filter(
+    (c) => !visitaPorCliente.has(c.id) && !c.pendienteDesde
   );
 
-const volverMasTarde =
-  clientesFiltrados.filter((c) =>
-    esVolverMasTarde(
-      visitaPorCliente.get(c.id)
-    )
+  const pendientesAnterioresTotales = clientes.filter(
+    (c) => !visitaPorCliente.has(c.id) && !!c.pendienteDesde
   );
 
-const visitadosFinalizados =
-  clientesFiltrados.filter((c) => {
-    const visita =
-      visitaPorCliente.get(c.id);
+  const volverMasTardeTotales = clientes.filter((c) =>
+    esVolverMasTarde(visitaPorCliente.get(c.id))
+  );
 
-    return (
-      visita &&
-      !esVolverMasTarde(visita)
-    );
+  const visitadosFinalizadosTotales = clientes.filter((c) => {
+    const visita = visitaPorCliente.get(c.id);
+    return visita && !esVolverMasTarde(visita);
+  });
+
+  // ==========================================
+  // LISTAS VISIBLES - respetan el buscador.
+  // ==========================================
+  const pendientes = clientesFiltrados.filter(
+    (c) => !visitaPorCliente.has(c.id) && !c.pendienteDesde
+  );
+
+  const pendientesAnteriores = clientesFiltrados.filter(
+    (c) => !visitaPorCliente.has(c.id) && !!c.pendienteDesde
+  );
+
+  const volverMasTarde = clientesFiltrados.filter((c) =>
+    esVolverMasTarde(visitaPorCliente.get(c.id))
+  );
+
+  const visitadosFinalizados = clientesFiltrados.filter((c) => {
+    const visita = visitaPorCliente.get(c.id);
+    return visita && !esVolverMasTarde(visita);
   });
 
   function abrirNuevaVisita(cliente) {
@@ -2573,20 +2845,16 @@ const visitadosFinalizados =
 
   function abrirVisitaExistente(cliente) {
     const visita = visitaPorCliente.get(cliente.id);
-
     if (!visita) return;
-
     setActivo(cliente);
     setVisitaEditando(visita);
   }
 
-  // Devuelve al cliente al estado que tenía JUSTO ANTES
-  // de la visita que estamos editando.
+  // Devuelve al cliente al estado que tenía justo antes de la visita editada.
   function clienteAntesDeVisita(cliente, visita) {
     if (!visita) return cliente;
 
     const copia = clone(cliente);
-
     copia.deudaAcumulada = Math.max(
       0,
       (copia.deudaAcumulada || 0) -
@@ -2595,16 +2863,15 @@ const visitadosFinalizados =
     );
 
     copia.envasesExtra = aplicarDeltaEnvases(
-  envasesExtraDe(copia),
-  calcularDeltaExtras(visita),
-  -1
-);
+      envasesExtraDe(copia),
+      calcularDeltaExtras(visita),
+      -1
+    );
 
     return copia;
   }
 
-  // Lo mismo con la camioneta:
-  // reconstruimos cuánto stock tenía antes de la visita original.
+  // Reconstruimos cuánto stock tenía la camioneta antes de la visita original.
   function stockAntesDeVisita(visita) {
     const actual = {
       ...stockVacio(),
@@ -2614,11 +2881,9 @@ const visitadosFinalizados =
     if (!visita) return actual;
 
     const deltaAnterior = calcularDeltaExtras(visita);
-
     PRODUCTOS_RETORNABLES.forEach((p) => {
       actual[p.key] =
-        (actual[p.key] || 0) +
-        (deltaAnterior[p.key] || 0);
+        (actual[p.key] || 0) + (deltaAnterior[p.key] || 0);
     });
 
     return actual;
@@ -2626,18 +2891,12 @@ const visitadosFinalizados =
 
   function guardarVisita(cliente, nuevaVisita) {
     const next = clone(db);
-
     const anterior = visitaEditando;
-
-    const ci = next.clientes.findIndex(
-      (c) => c.id === cliente.id
-    );
+    const ci = next.clientes.findIndex((c) => c.id === cliente.id);
 
     if (ci < 0) return;
 
-    // ==========================================
-    // SI ESTAMOS EDITANDO: REVERTIR LA ANTERIOR
-    // ==========================================
+    // Si editamos, primero revertimos el efecto de la visita anterior.
     if (anterior) {
       next.clientes[ci].deudaAcumulada = Math.max(
         0,
@@ -2646,77 +2905,48 @@ const visitadosFinalizados =
           (anterior.deudaCobrada || 0)
       );
 
-      next.clientes[ci].envasesExtra =
-        aplicarDeltaEnvases(
-          envasesExtraDe(next.clientes[ci]),
-          calcularDeltaExtras(anterior),
-          -1
-        );
+      next.clientes[ci].envasesExtra = aplicarDeltaEnvases(
+        envasesExtraDe(next.clientes[ci]),
+        calcularDeltaExtras(anterior),
+        -1
+      );
     }
 
-    // ==========================================
-    // APLICAR LA NUEVA VISITA
-    // ==========================================
-    let deuda =
-      next.clientes[ci].deudaAcumulada || 0;
-
+    // Aplicamos la nueva visita.
+    let deuda = next.clientes[ci].deudaAcumulada || 0;
     deuda -= nuevaVisita.deudaCobrada || 0;
     deuda += nuevaVisita.deudaGenerada || 0;
+    next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
 
-    next.clientes[ci].deudaAcumulada =
-      Math.max(0, deuda);
-
-    const deltaNuevo =
-      calcularDeltaExtras(nuevaVisita);
-
-    next.clientes[ci].envasesExtra =
-      aplicarDeltaEnvases(
-        envasesExtraDe(next.clientes[ci]),
-        deltaNuevo,
-        1
-      );
-
+    const deltaNuevo = calcularDeltaExtras(nuevaVisita);
+    next.clientes[ci].envasesExtra = aplicarDeltaEnvases(
+      envasesExtraDe(next.clientes[ci]),
+      deltaNuevo,
+      1
+    );
     delete next.clientes[ci].envasesPrestados;
 
-    // ==========================================
-    // GUARDAR O REEMPLAZAR VISITA
-    // ==========================================
+    // Guardamos o reemplazamos la visita del día.
     if (anterior) {
-      const vi = next.visitas.findIndex(
-        (v) => v.id === anterior.id
-      );
-
-      if (vi >= 0) {
-        next.visitas[vi] = nuevaVisita;
-      }
+      const vi = next.visitas.findIndex((v) => v.id === anterior.id);
+      if (vi >= 0) next.visitas[vi] = nuevaVisita;
     } else {
       next.visitas.push(nuevaVisita);
     }
 
     mutate(next, { history: false });
 
-    // ==========================================
-    // ACTUALIZAR STOCK DE CAMIONETA
-    // Solo aplicamos la DIFERENCIA entre
-    // la visita anterior y la nueva.
-    // ==========================================
+    // En stock aplicamos solamente la diferencia entre versión anterior y nueva.
     if (db.config.stockActivo) {
-      const deltaAnterior = anterior
-        ? calcularDeltaExtras(anterior)
-        : {};
-
+      const deltaAnterior = anterior ? calcularDeltaExtras(anterior) : {};
       const deltaNeto = {};
 
       PRODUCTOS_RETORNABLES.forEach((p) => {
         deltaNeto[p.key] =
-          (deltaNuevo[p.key] || 0) -
-          (deltaAnterior[p.key] || 0);
+          (deltaNuevo[p.key] || 0) - (deltaAnterior[p.key] || 0);
       });
 
-      moverStockRepartidor(
-        repartidor.id,
-        deltaNeto
-      );
+      moverStockRepartidor(repartidor.id, deltaNeto);
     }
 
     setActivo(null);
@@ -2741,67 +2971,51 @@ const visitadosFinalizados =
         </button>
 
         <Badge tone="accent">
-          {visitadosFinalizadosTotales.length}/
-          {clientes.length} completados
+          {visitadosFinalizadosTotales.length}/{clientes.length} completados
         </Badge>
       </div>
 
       <div className="relative mb-4">
-  <Search
-    size={16}
-    color={C.mutedLight}
-    style={{
-      position: "absolute",
-      left: 11,
-      top: 12,
-    }}
-  />
-
-  <input
-    value={busca}
-    onChange={(e) => setBusca(e.target.value)}
-    placeholder="Buscar por nombre o dirección..."
-    className="w-full rounded-xl pl-9 pr-9 py-2.5 text-sm outline-none"
-    style={{
-      background: C.surface,
-      border: `1px solid ${C.border}`,
-      color: C.ink,
-    }}
-  />
-
-  {busca && (
-    <button
-      type="button"
-      onClick={() => setBusca("")}
-      style={{
-        position: "absolute",
-        right: 10,
-        top: 10,
-      }}
-    >
-      <X size={18} color={C.muted} />
-    </button>
-  )}
-</div>
-
-
-{busca.trim() &&
-  pendientes.length === 0 &&
-  volverMasTarde.length === 0 &&
-  visitadosFinalizados.length === 0 && (
-    <Card className="mb-4">
-      <div
-        className="text-xs text-center"
-        style={{ color: C.muted }}
-      >
-        No se encontraron clientes con "{busca}".
+        <Search
+          size={16}
+          color={C.mutedLight}
+          style={{ position: "absolute", left: 11, top: 12 }}
+        />
+        <input
+          value={busca}
+          onChange={(e) => setBusca(e.target.value)}
+          placeholder="Buscar por nombre o dirección..."
+          className="w-full rounded-xl pl-9 pr-9 py-2.5 text-sm outline-none"
+          style={{
+            background: C.surface,
+            border: `1px solid ${C.border}`,
+            color: C.ink,
+          }}
+        />
+        {busca && (
+          <button
+            type="button"
+            onClick={() => setBusca("")}
+            style={{ position: "absolute", right: 10, top: 10 }}
+          >
+            <X size={18} color={C.muted} />
+          </button>
+        )}
       </div>
-    </Card>
-)}
 
-      {/* =========================
-          PENDIENTES
-          ========================= */}
+      {busca.trim() &&
+        pendientes.length === 0 &&
+        pendientesAnteriores.length === 0 &&
+        volverMasTarde.length === 0 &&
+        visitadosFinalizados.length === 0 && (
+          <Card className="mb-4">
+            <div className="text-xs text-center" style={{ color: C.muted }}>
+              No se encontraron clientes con "{busca}".
+            </div>
+          </Card>
+        )}
+
+      {/* PENDIENTES NORMALES DE HOY */}
       {pendientes.length > 0 && (
         <>
           <div
@@ -2810,68 +3024,74 @@ const visitadosFinalizados =
           >
             Pendientes ({pendientes.length})
           </div>
-
           <div className="flex flex-col gap-2 mb-4">
             {pendientes.map((c) => (
               <ClienteVisitaCard
                 key={c.id}
                 cliente={c}
-                onClick={() =>
-                  abrirNuevaVisita(c)
-                }
+                onClick={() => abrirNuevaVisita(c)}
               />
             ))}
           </div>
         </>
       )}
 
-{/* =========================
-    VOLVER MÁS TARDE
-    ========================= */}
-{volverMasTarde.length > 0 && (
-  <>
-    <div
-      className="text-xs font-bold uppercase tracking-wide mb-2"
-      style={{ color: C.warning }}
-    >
-      Volver más tarde (
-      {volverMasTarde.length})
-    </div>
+      {/* PENDIENTES ARRASTRADOS DE DÍAS ANTERIORES */}
+      {pendientesAnteriores.length > 0 && (
+        <>
+          <div
+            className="text-xs font-bold uppercase tracking-wide mb-2"
+            style={{ color: C.warning }}
+          >
+            Pendientes de días anteriores ({pendientesAnteriores.length})
+          </div>
+          <div className="flex flex-col gap-2 mb-4">
+            {pendientesAnteriores.map((c) => (
+              <ClienteVisitaCard
+                key={c.id}
+                cliente={c}
+                pendienteAnterior
+                pendienteDesde={c.pendienteDesde}
+                onClick={() => abrirNuevaVisita(c)}
+              />
+            ))}
+          </div>
+        </>
+      )}
 
-    <div className="flex flex-col gap-2 mb-4">
-      {volverMasTarde.map((c) => {
-        const visita =
-          visitaPorCliente.get(c.id);
+      {/* CLIENTES PARA VOLVER MÁS TARDE EN EL MISMO DÍA */}
+      {volverMasTarde.length > 0 && (
+        <>
+          <div
+            className="text-xs font-bold uppercase tracking-wide mb-2"
+            style={{ color: C.warning }}
+          >
+            Volver más tarde hoy ({volverMasTarde.length})
+          </div>
+          <div className="flex flex-col gap-2 mb-4">
+            {volverMasTarde.map((c) => {
+              const visita = visitaPorCliente.get(c.id);
+              return (
+                <ClienteVisitaCard
+                  key={c.id}
+                  cliente={c}
+                  noVendido
+                  volverMasTarde
+                  visita={visita}
+                  onClick={() => abrirVisitaExistente(c)}
+                />
+              );
+            })}
+          </div>
+        </>
+      )}
 
-        return (
-          <ClienteVisitaCard
-            key={c.id}
-            cliente={c}
-            noVendido
-            volverMasTarde
-            visita={visita}
-            onClick={() =>
-              abrirVisitaExistente(c)
-            }
-          />
-        );
-      })}
-    </div>
-  </>
-)}
-
-      {/* =========================
-          VISITADOS / VENDIDOS
-          ========================= */}
+      {/* CLIENTES VISITADOS Y FINALIZADOS */}
       {visitadosFinalizados.length > 0 && (
         <div className="mb-4">
           <button
             type="button"
-            onClick={() =>
-              setMostrarVisitados(
-                !mostrarVisitados
-              )
-            }
+            onClick={() => setMostrarVisitados(!mostrarVisitados)}
             className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
             style={{
               background: C.surface,
@@ -2879,11 +3099,7 @@ const visitadosFinalizados =
             }}
           >
             <div className="flex items-center gap-2">
-              <CheckCircle2
-                size={16}
-                color={C.success}
-              />
-
+              <CheckCircle2 size={16} color={C.success} />
               <span className="text-sm font-bold">
                 Clientes visitados ({visitadosFinalizados.length})
               </span>
@@ -2893,9 +3109,10 @@ const visitadosFinalizados =
               size={17}
               color={C.muted}
               style={{
-                transform: mostrarVisitados
-                  ? "rotate(90deg)"
-                  : "rotate(0deg)",
+                transform:
+                  mostrarVisitados || busca.trim()
+                    ? "rotate(90deg)"
+                    : "rotate(0deg)",
                 transition: "transform 0.2s",
               }}
             />
@@ -2904,49 +3121,35 @@ const visitadosFinalizados =
           {(mostrarVisitados || busca.trim()) && (
             <div className="flex flex-col gap-2 mt-2">
               {visitadosFinalizados.map((c) => {
-  const visita =
-    visitaPorCliente.get(c.id);
+                const visita = visitaPorCliente.get(c.id);
+                const fueVenta = visita?.vendio === true;
 
-  const fueVenta =
-    visita?.vendio === true;
-
-  return (
-    <ClienteVisitaCard
-      key={c.id}
-      cliente={c}
-      hecho={fueVenta}
-      noVendido={!fueVenta}
-      visita={visita}
-      onClick={() =>
-        abrirVisitaExistente(c)
-      }
-    />
-  );
-})}
+                return (
+                  <ClienteVisitaCard
+                    key={c.id}
+                    cliente={c}
+                    hecho={fueVenta}
+                    noVendido={!fueVenta}
+                    visita={visita}
+                    onClick={() => abrirVisitaExistente(c)}
+                  />
+                );
+              })}
             </div>
           )}
         </div>
       )}
 
       {pendientesTotales.length === 0 &&
+        pendientesAnterioresTotales.length === 0 &&
         volverMasTardeTotales.length === 0 &&
         clientes.length > 0 && (
           <Card
-            style={{
-              background: C.successBg,
-              border: "none",
-            }}
+            style={{ background: C.successBg, border: "none" }}
             className="mt-3 flex items-center gap-2"
           >
-            <CheckCircle2
-              size={20}
-              color={C.success}
-            />
-
-            <div
-              className="text-sm font-bold"
-              style={{ color: C.success }}
-            >
+            <CheckCircle2 size={20} color={C.success} />
+            <div className="text-sm font-bold" style={{ color: C.success }}>
               ¡Recorrido completo!
             </div>
           </Card>
@@ -2958,39 +3161,30 @@ const visitadosFinalizados =
           visitaInicial={visitaEditando}
           precios={db.config.precios}
           stockActivo={db.config.stockActivo}
-          stockRepartidor={stockAntesDeVisita(
-            visitaEditando
-          )}
+          stockRepartidor={stockAntesDeVisita(visitaEditando)}
           onClose={() => {
             setActivo(null);
             setVisitaEditando(null);
           }}
-          onGuardar={(visita) =>
-            guardarVisita(
-              activo,
-              visita
-            )
-          }
+          onGuardar={(visita) => guardarVisita(activo, visita)}
         />
       )}
     </div>
   );
 }
 
-
 function ClienteVisitaCard({
   cliente,
   hecho,
   noVendido,
   volverMasTarde = false,
+  pendienteAnterior = false,
+  pendienteDesde = null,
   visita,
   onClick,
 }) {
-  const permanentes =
-    envasesPermanentesDe(cliente);
-
-  const extras =
-    envasesExtraDe(cliente);
+  const permanentes = envasesPermanentesDe(cliente);
+  const extras = envasesExtraDe(cliente);
 
   const tieneOrden =
     cliente.orden !== "" &&
@@ -3006,19 +3200,17 @@ function ClienteVisitaCard({
       }}
     >
       <div className="flex items-start gap-2">
-        {/* Número de recorrido */}
         <div
           className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 font-extrabold text-xs"
           style={{
             background: hecho
               ? C.successBg
-              : noVendido
+              : noVendido || pendienteAnterior
               ? C.warningBg
               : C.accentSoft,
-
             color: hecho
               ? C.success
-              : noVendido
+              : noVendido || pendienteAnterior
               ? C.warning
               : C.primary,
           }}
@@ -3034,104 +3226,86 @@ function ClienteVisitaCard({
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5 flex-wrap">
-            <div className="font-bold text-sm">
-              {cliente.nombre}
-            </div>
+            <div className="font-bold text-sm">{cliente.nombre}</div>
 
-            {hecho && (
-              <Badge tone="success">
-                Vendido
-              </Badge>
+            {pendienteAnterior && (
+              <Badge tone="warning">Pendiente anterior</Badge>
             )}
 
+            {hecho && <Badge tone="success">Vendido</Badge>}
+
             {noVendido && (
-  <Badge tone="warning">
-    {volverMasTarde
-      ? "Volver más tarde"
-      : "No se vendió"}
-  </Badge>
-)}
+              <Badge tone="warning">
+                {volverMasTarde ? "Volver más tarde" : "No se vendió"}
+              </Badge>
+            )}
           </div>
 
-          <div
-            className="text-xs"
-            style={{ color: C.muted }}
-          >
+          <div className="text-xs" style={{ color: C.muted }}>
             {cliente.direccion}
           </div>
 
-          {noVendido &&
-  visita?.notas &&
-  !volverMasTarde && (
-    <div
-      className="text-xs font-semibold mt-1"
-      style={{ color: C.warning }}
-    >
-      {visita.notas}
-    </div>
-  )}
+          {pendienteAnterior && pendienteDesde && (
+            <div
+              className="text-xs font-semibold mt-1"
+              style={{ color: C.warning }}
+            >
+              Pendiente desde: {diaSemanaDeFecha(pendienteDesde)}{" "}
+              {fechaLegible(pendienteDesde)}
+            </div>
+          )}
+
+          {noVendido && visita?.notas && !volverMasTarde && (
+            <div
+              className="text-xs font-semibold mt-1"
+              style={{ color: C.warning }}
+            >
+              {visita.notas}
+            </div>
+          )}
 
           <div className="flex flex-wrap gap-1 mt-1">
-            {totalEnvasesPrestados(
-              permanentes
-            ) > 0 && (
+            {totalEnvasesPrestados(permanentes) > 0 && (
               <Badge tone="accent">
-                Permanentes:{" "}
-                {textoEnvasesPrestados(
-                  permanentes
-                )}
+                Permanentes: {textoEnvasesPrestados(permanentes)}
               </Badge>
             )}
 
-            {totalEnvasesPrestados(extras) >
-              0 && (
-              <Badge tone="warning">
-                Extra:{" "}
-                {textoEnvasesPrestados(
-                  extras
-                )}
-              </Badge>
+            {totalEnvasesPrestados(extras) > 0 && (
+              <Badge tone="warning">Extra: {textoEnvasesPrestados(extras)}</Badge>
             )}
 
             {cliente.deudaAcumulada > 0 && (
               <Badge tone="danger">
-                Debe{" "}
-                {formatMoney(
-                  cliente.deudaAcumulada
-                )}
+                Debe {formatMoney(cliente.deudaAcumulada)}
               </Badge>
             )}
 
             {cliente.maquinaFrioCalor && (
-              <Badge tone="accent">
-                Máquina F/C
-              </Badge>
+              <Badge tone="accent">Máquina F/C</Badge>
             )}
 
-            {cliente.notas && (
-              <Badge tone="muted">
-                Nota
-              </Badge>
-            )}
+            {cliente.notas && <Badge tone="muted">Nota</Badge>}
           </div>
 
+          {pendienteAnterior && (
+            <div className="text-[10px] mt-1.5" style={{ color: C.mutedLight }}>
+              Tocar para atender este pendiente
+            </div>
+          )}
+
           {(hecho || noVendido) && (
-  <div
-    className="text-[10px] mt-1.5"
-    style={{ color: C.mutedLight }}
-  >
-    {volverMasTarde
-      ? "Tocar para registrar el segundo intento"
-      : "Tocar para editar la visita de hoy"}
-  </div>
-)}
+            <div className="text-[10px] mt-1.5" style={{ color: C.mutedLight }}>
+              {volverMasTarde
+                ? "Tocar para registrar el segundo intento"
+                : "Tocar para editar la visita de hoy"}
+            </div>
+          )}
         </div>
 
         <div
           className="flex gap-1 flex-shrink-0"
-          onClick={(e) =>
-            e.stopPropagation()
-          }
+          onClick={(e) => e.stopPropagation()}
         >
           {cliente.telefono && (
             <a
@@ -3139,10 +3313,7 @@ function ClienteVisitaCard({
               className="p-1.5 rounded-lg"
               style={{ background: C.bg }}
             >
-              <Phone
-                size={13}
-                color={C.primary}
-              />
+              <Phone size={13} color={C.primary} />
             </a>
           )}
 
@@ -3155,10 +3326,7 @@ function ClienteVisitaCard({
             className="p-1.5 rounded-lg"
             style={{ background: C.bg }}
           >
-            <MapPin
-              size={13}
-              color={C.primary}
-            />
+            <MapPin size={13} color={C.primary} />
           </a>
         </div>
       </div>
