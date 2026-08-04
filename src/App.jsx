@@ -1102,10 +1102,38 @@ function AdminClientes({ db, mutate }) {
   const [sheet, setSheet] = useState(null); // null | 'nuevo' | cliente
   const [confirmDel, setConfirmDel] = useState(null);
   const [detalleId, setDetalleId] = useState(null);
+  const [ordenLista, setOrdenLista] = useState("nombre");
 
   const lista = db.clientes
-    .filter((c) => c.nombre.toLowerCase().includes(busca.toLowerCase()) || c.direccion.toLowerCase().includes(busca.toLowerCase()))
-    .sort((a, b) => a.nombre.localeCompare(b.nombre));
+  .filter(
+    (c) =>
+      c.nombre.toLowerCase().includes(busca.toLowerCase()) ||
+      c.direccion.toLowerCase().includes(busca.toLowerCase())
+  )
+  .sort((a, b) => {
+    // Orden alfabético
+    if (ordenLista === "nombre") {
+      return a.nombre.localeCompare(b.nombre);
+    }
+
+    // Orden del recorrido
+    const ordenA =
+      a.orden === "" || a.orden === null || a.orden === undefined
+        ? Infinity
+        : Number(a.orden);
+
+    const ordenB =
+      b.orden === "" || b.orden === null || b.orden === undefined
+        ? Infinity
+        : Number(b.orden);
+
+    if (ordenA !== ordenB) {
+      return ordenA - ordenB;
+    }
+
+    // Si tienen el mismo número, desempata por nombre
+    return a.nombre.localeCompare(b.nombre);
+  });
 
   const clienteDetalle = detalleId ? db.clientes.find((c) => c.id === detalleId) : null;
 
@@ -1210,6 +1238,45 @@ function AdminClientes({ db, mutate }) {
         <Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo</Btn>
       </div>
 
+      <div className="flex items-center gap-2 mb-3">
+  <span
+    className="text-xs font-semibold mr-1"
+    style={{ color: C.muted }}
+  >
+    Ordenar por:
+  </span>
+
+  <button
+    type="button"
+    onClick={() => setOrdenLista("nombre")}
+    className="px-3 py-1.5 rounded-lg text-xs font-bold"
+    style={{
+      background: ordenLista === "nombre" ? C.primary : C.surface,
+      color: ordenLista === "nombre" ? "#fff" : C.muted,
+      border: `1px solid ${
+        ordenLista === "nombre" ? C.primary : C.border
+      }`,
+    }}
+  >
+    Nombre
+  </button>
+
+  <button
+    type="button"
+    onClick={() => setOrdenLista("recorrido")}
+    className="px-3 py-1.5 rounded-lg text-xs font-bold"
+    style={{
+      background: ordenLista === "recorrido" ? C.primary : C.surface,
+      color: ordenLista === "recorrido" ? "#fff" : C.muted,
+      border: `1px solid ${
+        ordenLista === "recorrido" ? C.primary : C.border
+      }`,
+    }}
+  >
+    Recorrido
+  </button>
+</div>
+
       {lista.length === 0 ? (
         <EmptyState icon={Users} title="Sin clientes todavía" text="Agregá el primer cliente para empezar a armar los recorridos." action={<Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo cliente</Btn>} />
       ) : (
@@ -1220,7 +1287,25 @@ function AdminClientes({ db, mutate }) {
               <Card key={c.id}>
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1" onClick={() => setDetalleId(c.id)}>
-                    <div className="font-bold text-sm truncate">{c.nombre}</div>
+                    <div className="flex items-center gap-2">
+  <div className="font-bold text-sm truncate">
+    {c.nombre}
+  </div>
+
+  {c.orden !== "" &&
+    c.orden !== null &&
+    c.orden !== undefined && (
+      <span
+        className="px-2 py-0.5 rounded-md text-[10px] font-bold flex-shrink-0"
+        style={{
+          background: C.primaryDark,
+          color: "#fff",
+        }}
+      >
+        Orden {c.orden}
+      </span>
+    )}
+</div>
                     <div className="text-xs truncate" style={{ color: C.muted }}>{c.direccion}</div>
                     <div className="flex flex-wrap gap-1 mt-1.5">
                       {c.diasVisita.map((d) => <Badge key={d} tone="accent">{d.slice(0, 3)}</Badge>)}
