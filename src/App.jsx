@@ -178,6 +178,31 @@ function calcularDeltaEnvases(visita) {
   });
   return delta;
 }
+function calcularDeltaExtras(visita) {
+  // Visitas nuevas: usamos el sistema explícito de extras.
+  if (visita.extrasPrestados || visita.extrasRetirados) {
+    const delta = {};
+
+    PRODUCTOS_RETORNABLES.forEach((p) => {
+      const prestados =
+        Number(visita.extrasPrestados?.[p.key]) || 0;
+
+      const retirados =
+        Number(visita.extrasRetirados?.[p.key]) || 0;
+
+      const d = prestados - retirados;
+
+      if (d !== 0) {
+        delta[p.key] = d;
+      }
+    });
+
+    return delta;
+  }
+
+  // Compatibilidad con visitas viejas.
+  return calcularDeltaEnvases(visita);
+}
 function aplicarDeltaEnvases(envasesPrestados, delta, signo = 1) {
   const ep = { ...(envasesPrestados || envasesVacio()) };
   Object.keys(delta).forEach((tipo) => {
@@ -187,7 +212,45 @@ function aplicarDeltaEnvases(envasesPrestados, delta, signo = 1) {
 }
 function textoDevoluciones(v) {
   if (!v.retornos) return "";
-  return PRODUCTOS_RETORNABLES.filter((p) => (v.retornos[p.key] || 0) > 0).map((p) => `${v.retornos[p.key]}×${p.corto}`).join(", ");
+  return PRODUCTOS_RETORNABLES
+    .filter((p) => (v.retornos[p.key] || 0) > 0)
+    .map((p) => `${v.retornos[p.key]}×${p.corto}`)
+    .join(", ");
+}
+
+function textoExtrasPrestados(v) {
+  if (!v?.extrasPrestados) return "";
+  return PRODUCTOS_RETORNABLES
+    .filter((p) => (Number(v.extrasPrestados[p.key]) || 0) > 0)
+    .map((p) => `${Number(v.extrasPrestados[p.key]) || 0}×${p.corto}`)
+    .join(", ");
+}
+
+function textoExtrasRetirados(v) {
+  if (!v?.extrasRetirados) return "";
+  return PRODUCTOS_RETORNABLES
+    .filter((p) => (Number(v.extrasRetirados[p.key]) || 0) > 0)
+    .map((p) => `${Number(v.extrasRetirados[p.key]) || 0}×${p.corto}`)
+    .join(", ");
+}
+
+function resumenExtrasVisitas(visitas) {
+  const prestados = stockVacio();
+  const retirados = stockVacio();
+  const balance = stockVacio();
+
+  (visitas || []).forEach((v) => {
+    PRODUCTOS_RETORNABLES.forEach((p) => {
+      const prestado = Number(v.extrasPrestados?.[p.key]) || 0;
+      const retirado = Number(v.extrasRetirados?.[p.key]) || 0;
+
+      prestados[p.key] += prestado;
+      retirados[p.key] += retirado;
+      balance[p.key] += prestado - retirado;
+    });
+  });
+
+  return { prestados, retirados, balance };
 }
 
 /* ============================================================
@@ -225,20 +288,59 @@ function exportarClientesCSV(db) {
   descargarCSV(`clientes_${hoyISO()}.csv`, headers, rows);
 }
 function exportarVisitasCSV(db) {
-  const headers = ["Fecha", "Cliente", "Repartidor", "Vendió", "Productos", "Total", "Método de pago", "Deuda generada", "Deuda cobrada", "Devolvió", "Notas"];
-  const metodos = { efectivo: "Efectivo", mercadopago: "Mercado Pago", deuda: "Fiado" };
-  const rows = db.visitas.slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)).map((v) => {
-    const cliente = db.clientes.find((c) => c.id === v.clienteId);
-    const rep = db.config.repartidores.find((r) => r.id === v.repartidorId);
-    const productos = (v.items || []).filter((it) => it.cantidad > 0).map((it) => `${it.cantidad}x${PRODUCTOS.find((p) => p.key === it.tipo)?.corto}`).join(" + ");
-    return [
-      fechaLegible(v.fecha), cliente?.nombre || v.clienteNombre || "Cliente eliminado", rep?.nombre || "",
-      v.vendio ? "Sí" : "No", productos, v.total || 0, v.vendio ? (metodos[v.metodoPago] || "") : "",
-      v.deudaGenerada || 0, v.deudaCobrada || 0, textoDevoluciones(v) || "", v.notas || "",
-    ];
-  });
+  const headers = [
+    "Fecha",
+    "Cliente",
+    "Repartidor",
+    "Vendió",
+    "Productos",
+    "Total",
+    "Método de pago",
+    "Deuda generada",
+    "Deuda cobrada",
+    "Extras prestados",
+    "Extras retirados",
+    "Devoluciones (registro antiguo)",
+    "Notas",
+  ];
+
+  const metodos = {
+    efectivo: "Efectivo",
+    mercadopago: "Mercado Pago",
+    deuda: "Fiado",
+  };
+
+  const rows = db.visitas
+    .slice()
+    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+    .map((v) => {
+      const cliente = db.clientes.find((c) => c.id === v.clienteId);
+      const rep = db.config.repartidores.find((r) => r.id === v.repartidorId);
+      const productos = (v.items || [])
+        .filter((it) => it.cantidad > 0)
+        .map((it) => `${it.cantidad}x${PRODUCTOS.find((p) => p.key === it.tipo)?.corto}`)
+        .join(" + ");
+
+      return [
+        fechaLegible(v.fecha),
+        cliente?.nombre || v.clienteNombre || "Cliente eliminado",
+        rep?.nombre || "",
+        v.vendio ? "Sí" : "No",
+        productos,
+        v.total || 0,
+        v.vendio ? (metodos[v.metodoPago] || "") : "",
+        v.deudaGenerada || 0,
+        v.deudaCobrada || 0,
+        textoExtrasPrestados(v) || "",
+        textoExtrasRetirados(v) || "",
+        !v.extrasPrestados && !v.extrasRetirados ? (textoDevoluciones(v) || "") : "",
+        v.notas || "",
+      ];
+    });
+
   descargarCSV(`ventas_${hoyISO()}.csv`, headers, rows);
 }
+
 function exportarGastosCSV(db) {
   const headers = ["Fecha", "Concepto", "Monto"];
   const rows = db.gastos.slice().sort((a, b) => a.fecha.localeCompare(b.fecha) || (a.timestamp || 0) - (b.timestamp || 0)).map((g) => [fechaLegible(g.fecha), g.concepto, g.monto]);
@@ -877,6 +979,7 @@ function AdminDashboard({ db }) {
   const mp = visitasFiltradas.reduce((s, v) => s + (v.pagos?.mercadopago || 0), 0);
   const deudaGenerada = visitasFiltradas.reduce((s, v) => s + (v.deudaGenerada || 0), 0);
   const facturado = visitasFiltradas.reduce((s, v) => s + (v.total || 0), 0);
+  const movimientosExtras = resumenExtrasVisitas(visitasFiltradas);
 
   const gastosFiltrados = db.gastos.filter((g) => {
     if (rango === "hoy") return g.fecha === hoy;
@@ -920,6 +1023,57 @@ function AdminDashboard({ db }) {
         <Meter label="Mercado Pago" value={formatMoney(mp)} />
         <Meter label="Fiado (nuevo)" value={formatMoney(deudaGenerada)} />
       </div>
+
+      <Card className="mb-4">
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-xs font-bold uppercase tracking-wide" style={{ color: C.muted }}>
+            Movimiento de envases extra ({rango})
+          </div>
+          <Boxes size={16} color={C.primary} />
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr style={{ color: C.muted }}>
+                <th className="text-left py-1.5">Producto</th>
+                <th className="text-center py-1.5">Prestados</th>
+                <th className="text-center py-1.5">Retirados</th>
+                <th className="text-center py-1.5">Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              {PRODUCTOS_RETORNABLES.map((p) => {
+                const balance = movimientosExtras.balance[p.key] || 0;
+                return (
+                  <tr key={p.key} style={{ borderTop: `1px solid ${C.border}` }}>
+                    <td className="py-2 font-semibold">{p.corto}</td>
+                    <td className="text-center font-bold" style={{ color: C.warning }}>
+                      {movimientosExtras.prestados[p.key] || 0}
+                    </td>
+                    <td className="text-center font-bold" style={{ color: C.success }}>
+                      {movimientosExtras.retirados[p.key] || 0}
+                    </td>
+                    <td
+                      className="text-center font-bold"
+                      style={{
+                        color:
+                          balance > 0
+                            ? C.warning
+                            : balance < 0
+                            ? C.success
+                            : C.muted,
+                      }}
+                    >
+                      {balance > 0 ? `+${balance}` : balance}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Card>
 
       <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Por repartidor ({rango})</div>
       {db.config.repartidores.length === 0 ? (
@@ -1451,7 +1605,21 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
                       </div>
                     )}
                     {v.deudaCobrada > 0 && <div className="text-xs mt-0.5" style={{ color: C.success }}>Cobró deuda vieja: {formatMoney(v.deudaCobrada)}</div>}
-                    {textoDevoluciones(v) && <div className="text-xs mt-0.5" style={{ color: C.success }}>Devolvió: {textoDevoluciones(v)}</div>}
+                    {textoExtrasPrestados(v) && (
+                      <div className="text-xs mt-0.5" style={{ color: C.warning }}>
+                        Prestó extra: {textoExtrasPrestados(v)}
+                      </div>
+                    )}
+                    {textoExtrasRetirados(v) && (
+                      <div className="text-xs mt-0.5" style={{ color: C.success }}>
+                        Retiró extra: {textoExtrasRetirados(v)}
+                      </div>
+                    )}
+                    {!v.extrasPrestados && !v.extrasRetirados && textoDevoluciones(v) && (
+                      <div className="text-xs mt-0.5" style={{ color: C.success }}>
+                        Devolvió (registro anterior): {textoDevoluciones(v)}
+                      </div>
+                    )}
                     {v.notas && <div className="text-xs mt-0.5 italic" style={{ color: C.mutedLight }}>{v.notas}</div>}
                   </Card>
                 ))}
@@ -1490,9 +1658,17 @@ function AdminHistorial({ db, mutate }) {
     .slice()
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
+  const visitasHoyResumen = db.visitas.filter(
+    (v) =>
+      v.fecha === fechaHoy &&
+      (filtroRep === "todos" || v.repartidorId === filtroRep)
+  );
+
+  const movimientosExtrasHoy = resumenExtrasVisitas(visitasHoyResumen);
+
   function borrarVisita(v) {
     const next = clone(db);
-    const delta = calcularDeltaEnvases(v);
+    const delta = calcularDeltaExtras(v);
 
     next.visitas = next.visitas.filter((x) => x.id !== v.id);
     const ci = next.clientes.findIndex((c) => c.id === v.clienteId);
@@ -1517,6 +1693,57 @@ function AdminHistorial({ db, mutate }) {
           <button key={r.id} onClick={() => setFiltroRep(r.id)} className="px-3 py-1.5 rounded-lg text-xs font-bold flex-shrink-0" style={{ background: filtroRep === r.id ? C.primary : C.surface, color: filtroRep === r.id ? "#fff" : C.muted, border: `1px solid ${filtroRep === r.id ? C.primary : C.border}` }}>{r.nombre}</button>
         ))}
       </div>
+
+      <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
+        Movimiento de envases extra hoy
+      </div>
+      <Card className="mb-5">
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr style={{ color: C.muted }}>
+                <th className="text-left py-1.5">Producto</th>
+                <th className="text-center py-1.5">Prestados</th>
+                <th className="text-center py-1.5">Retirados</th>
+                <th className="text-center py-1.5">Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              {PRODUCTOS_RETORNABLES.map((p) => {
+                const balance = movimientosExtrasHoy.balance[p.key] || 0;
+                return (
+                  <tr key={p.key} style={{ borderTop: `1px solid ${C.border}` }}>
+                    <td className="py-2 font-semibold">{p.label}</td>
+                    <td className="text-center font-bold" style={{ color: C.warning }}>
+                      {movimientosExtrasHoy.prestados[p.key] || 0}
+                    </td>
+                    <td className="text-center font-bold" style={{ color: C.success }}>
+                      {movimientosExtrasHoy.retirados[p.key] || 0}
+                    </td>
+                    <td
+                      className="text-center font-bold"
+                      style={{
+                        color:
+                          balance > 0
+                            ? C.warning
+                            : balance < 0
+                            ? C.success
+                            : C.muted,
+                      }}
+                    >
+                      {balance > 0 ? `+${balance}` : balance}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="text-[10px] mt-2" style={{ color: C.mutedLight }}>
+          Balance positivo = quedaron más envases extra en clientes. Balance negativo = se recuperaron más extras de los que se prestaron.
+        </div>
+      </Card>
 
       <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Recorrido de hoy</div>
       {clientesHoy.length === 0 ? (
@@ -1570,7 +1797,21 @@ function AdminHistorial({ db, mutate }) {
                       <div className="text-xs mt-1" style={{ color: C.mutedLight }}>No vendió{v.notas ? " · " + v.notas : ""}</div>
                     )}
                     {v.deudaCobrada > 0 && <div className="text-xs mt-0.5" style={{ color: C.success }}>Cobró deuda: {formatMoney(v.deudaCobrada)}</div>}
-                    {textoDevoluciones(v) && <div className="text-xs mt-0.5" style={{ color: C.success }}>Devolvió: {textoDevoluciones(v)}</div>}
+                    {textoExtrasPrestados(v) && (
+                      <div className="text-xs mt-0.5" style={{ color: C.warning }}>
+                        Prestó extra: {textoExtrasPrestados(v)}
+                      </div>
+                    )}
+                    {textoExtrasRetirados(v) && (
+                      <div className="text-xs mt-0.5" style={{ color: C.success }}>
+                        Retiró extra: {textoExtrasRetirados(v)}
+                      </div>
+                    )}
+                    {!v.extrasPrestados && !v.extrasRetirados && textoDevoluciones(v) && (
+                      <div className="text-xs mt-0.5" style={{ color: C.success }}>
+                        Devolvió (registro anterior): {textoDevoluciones(v)}
+                      </div>
+                    )}
                   </div>
                   <button onClick={() => setConfirmDel(v)} className="p-1.5 rounded-lg active:bg-black/5 flex-shrink-0"><Trash2 size={15} color={C.danger} /></button>
                 </div>
@@ -2273,10 +2514,10 @@ const vendidos = clientesFiltrados.filter((c) => {
     );
 
     copia.envasesExtra = aplicarDeltaEnvases(
-      envasesExtraDe(copia),
-      calcularDeltaEnvases(visita),
-      -1
-    );
+  envasesExtraDe(copia),
+  calcularDeltaExtras(visita),
+  -1
+);
 
     return copia;
   }
@@ -2291,7 +2532,7 @@ const vendidos = clientesFiltrados.filter((c) => {
 
     if (!visita) return actual;
 
-    const deltaAnterior = calcularDeltaEnvases(visita);
+    const deltaAnterior = calcularDeltaExtras(visita);
 
     PRODUCTOS_RETORNABLES.forEach((p) => {
       actual[p.key] =
@@ -2327,7 +2568,7 @@ const vendidos = clientesFiltrados.filter((c) => {
       next.clientes[ci].envasesExtra =
         aplicarDeltaEnvases(
           envasesExtraDe(next.clientes[ci]),
-          calcularDeltaEnvases(anterior),
+          calcularDeltaExtras(anterior),
           -1
         );
     }
@@ -2345,7 +2586,7 @@ const vendidos = clientesFiltrados.filter((c) => {
       Math.max(0, deuda);
 
     const deltaNuevo =
-      calcularDeltaEnvases(nuevaVisita);
+      calcularDeltaExtras(nuevaVisita);
 
     next.clientes[ci].envasesExtra =
       aplicarDeltaEnvases(
@@ -2380,7 +2621,7 @@ const vendidos = clientesFiltrados.filter((c) => {
     // ==========================================
     if (db.config.stockActivo) {
       const deltaAnterior = anterior
-        ? calcularDeltaEnvases(anterior)
+        ? calcularDeltaExtras(anterior)
         : {};
 
       const deltaNeto = {};
@@ -2838,32 +3079,32 @@ function VisitaSheet({
   onClose,
   onGuardar,
 }) {
-  const permanentes =
-    envasesPermanentesDe(cliente);
+  const permanentes = envasesPermanentesDe(cliente);
+  const saldoActual = envasesExtraDe(cliente);
 
-  const saldoActual =
-    envasesExtraDe(cliente);
+  const esVisitaVieja =
+    visitaInicial &&
+    !visitaInicial.extrasPrestados &&
+    !visitaInicial.extrasRetirados;
+
+  const deltaViejo = esVisitaVieja
+    ? calcularDeltaEnvases(visitaInicial)
+    : {};
 
   const [vendio, setVendio] = useState(
-    visitaInicial
-      ? visitaInicial.vendio
-      : true
+    visitaInicial ? visitaInicial.vendio : true
   );
 
   const [items, setItems] = useState(() =>
     PRODUCTOS.map((p) => {
-      const anterior =
-        visitaInicial?.items?.find(
-          (it) => it.tipo === p.key
-        );
+      const anterior = visitaInicial?.items?.find(
+        (it) => it.tipo === p.key
+      );
 
       return {
         tipo: p.key,
-        cantidad:
-          anterior?.cantidad || 0,
-
-        // Al editar conservamos el precio
-        // que tenía la visita original.
+        cantidad: anterior?.cantidad || 0,
+        // Al editar conservamos el precio que tenía la visita original.
         precioUnitario:
           anterior?.precioUnitario ??
           precios[p.key] ??
@@ -2872,151 +3113,254 @@ function VisitaSheet({
     })
   );
 
-  const [retornos, setRetornos] =
-    useState(() => {
-      const r = {};
+  const [extrasPrestados, setExtrasPrestados] = useState(() => {
+    const inicial = stockVacio();
 
-      PRODUCTOS_RETORNABLES.forEach(
-        (p) => {
-          r[p.key] =
-            visitaInicial?.retornos?.[
-              p.key
-            ] || 0;
-        }
-      );
-
-      return r;
+    PRODUCTOS_RETORNABLES.forEach((p) => {
+      if (visitaInicial?.extrasPrestados) {
+        inicial[p.key] =
+          Number(visitaInicial.extrasPrestados[p.key]) || 0;
+      } else {
+        inicial[p.key] = Math.max(
+          0,
+          Number(deltaViejo[p.key]) || 0
+        );
+      }
     });
 
-  const [
-    retornosTocados,
-    setRetornosTocados,
-  ] = useState(
-    () =>
-      new Set(
-        visitaInicial
-          ? PRODUCTOS_RETORNABLES.map(
-              (p) => p.key
-            )
-          : []
-      )
+    return inicial;
+  });
+
+  const [extrasRetirados, setExtrasRetirados] = useState(() => {
+    const inicial = stockVacio();
+
+    PRODUCTOS_RETORNABLES.forEach((p) => {
+      if (visitaInicial?.extrasRetirados) {
+        inicial[p.key] =
+          Number(visitaInicial.extrasRetirados[p.key]) || 0;
+      } else {
+        inicial[p.key] = Math.max(
+          0,
+          -(Number(deltaViejo[p.key]) || 0)
+        );
+      }
+    });
+
+    return inicial;
+  });
+
+  const [extrasTocados, setExtrasTocados] = useState(() => {
+    const tocados = new Set();
+
+    PRODUCTOS_RETORNABLES.forEach((p) => {
+      const prestados = visitaInicial?.extrasPrestados
+        ? Number(visitaInicial.extrasPrestados[p.key]) || 0
+        : Math.max(0, Number(deltaViejo[p.key]) || 0);
+
+      const retirados = visitaInicial?.extrasRetirados
+        ? Number(visitaInicial.extrasRetirados[p.key]) || 0
+        : Math.max(0, -(Number(deltaViejo[p.key]) || 0));
+
+      if (prestados > 0 || retirados > 0) {
+        tocados.add(p.key);
+      }
+    });
+
+    return tocados;
+  });
+
+  const [metodoPago, setMetodoPago] = useState(
+    visitaInicial?.metodoPago || "efectivo"
   );
 
-  const [metodoPago, setMetodoPago] =
-    useState(
-      visitaInicial?.metodoPago ||
-        "efectivo"
+  const [montoPagado, setMontoPagado] = useState(() => {
+    if (
+      !visitaInicial ||
+      !visitaInicial.vendio ||
+      visitaInicial.metodoPago === "deuda"
+    ) {
+      return null;
+    }
+
+    // Si estaba totalmente pago usamos null para que siga
+    // automáticamente el nuevo total si cambia la cantidad.
+    if ((visitaInicial.deudaGenerada || 0) === 0) {
+      return null;
+    }
+
+    return Math.max(
+      0,
+      (visitaInicial.total || 0) -
+        (visitaInicial.deudaGenerada || 0)
     );
+  });
 
-  const [montoPagado, setMontoPagado] =
-    useState(() => {
-      if (
-        !visitaInicial ||
-        !visitaInicial.vendio ||
-        visitaInicial.metodoPago ===
-          "deuda"
-      ) {
-        return null;
-      }
+  const [cobrarDeuda, setCobrarDeuda] = useState(
+    (visitaInicial?.deudaCobrada || 0) > 0
+  );
 
-      // Si estaba totalmente pago usamos null
-      // para que siga automáticamente el nuevo total
-      // si cambia la cantidad.
-      if (
-        (visitaInicial.deudaGenerada ||
-          0) === 0
-      ) {
-        return null;
-      }
+  const [montoDeuda, setMontoDeuda] = useState(
+    visitaInicial?.deudaCobrada > 0
+      ? visitaInicial.deudaCobrada
+      : cliente.deudaAcumulada || 0
+  );
 
-      return Math.max(
-        0,
-        (visitaInicial.total || 0) -
-          (visitaInicial.deudaGenerada ||
-            0)
-      );
-    });
-
-  const [cobrarDeuda, setCobrarDeuda] =
-    useState(
-      (visitaInicial?.deudaCobrada ||
-        0) > 0
-    );
-
-  const [montoDeuda, setMontoDeuda] =
-    useState(
-      visitaInicial?.deudaCobrada > 0
-        ? visitaInicial.deudaCobrada
-        : cliente.deudaAcumulada || 0
-    );
-
-  const [metodoDeuda, setMetodoDeuda] =
-    useState(
-      visitaInicial?.metodoDeuda ||
-        "efectivo"
-    );
+  const [metodoDeuda, setMetodoDeuda] = useState(
+    visitaInicial?.metodoDeuda || "efectivo"
+  );
 
   const [notas, setNotas] = useState(
     visitaInicial?.notas || ""
   );
 
-  const [errorStock, setErrorStock] =
-    useState("");
+  const [errorStock, setErrorStock] = useState("");
+
+  const [mostrarExtras, setMostrarExtras] = useState(() => {
+  // Si estamos editando una visita que ya tuvo
+  // préstamos o retiros, abrir automáticamente.
+  if (!visitaInicial) return false;
+
+  return PRODUCTOS_RETORNABLES.some((p) => {
+    const prestados =
+      Number(visitaInicial.extrasPrestados?.[p.key]) || 0;
+
+    const retirados =
+      Number(visitaInicial.extrasRetirados?.[p.key]) || 0;
+
+    return prestados > 0 || retirados > 0;
+  });
+});
+
+useEffect(() => {
+  const hayMovimientoExtra =
+    PRODUCTOS_RETORNABLES.some((p) => {
+      const prestados =
+        Number(extrasPrestados[p.key]) || 0;
+
+      const retirados =
+        Number(extrasRetirados[p.key]) || 0;
+
+      return prestados > 0 || retirados > 0;
+    });
+
+  if (hayMovimientoExtra) {
+    setMostrarExtras(true);
+  }
+}, [extrasPrestados, extrasRetirados]);
 
   const total = totalPedido(items);
-  const pagadoFinal = montoPagado === null ? total : Number(montoPagado) || 0;
+  const pagadoFinal =
+    montoPagado === null
+      ? total
+      : Number(montoPagado) || 0;
   const restante = Math.max(0, total - pagadoFinal);
 
   function actualizarCantidad(idx, valor) {
     const p = PRODUCTOS[idx];
+
     setErrorStock("");
-    setItems(items.map((it, i) => (i === idx ? { ...it, cantidad: valor } : it)));
-    if (p.retornable && !retornosTocados.has(p.key)) {
-      setRetornos((r) => ({ ...r, [p.key]: valor }));
+
+    setItems((prev) =>
+      prev.map((it, i) =>
+        i === idx ? { ...it, cantidad: valor } : it
+      )
+    );
+
+    // Sugerimos el préstamo extra necesario según los envases
+    // que el cliente ya tiene (permanentes + extras actuales).
+    if (p.retornable && !extrasTocados.has(p.key)) {
+      const permanentesActuales =
+        Number(permanentes[p.key]) || 0;
+      const extrasActuales =
+        Number(saldoActual[p.key]) || 0;
+      const envasesQueYaTiene =
+        permanentesActuales + extrasActuales;
+
+      const sugerido = Math.max(
+        0,
+        Number(valor) - envasesQueYaTiene
+      );
+
+      setExtrasPrestados((prev) => ({
+        ...prev,
+        [p.key]: sugerido,
+      }));
     }
   }
 
-  function actualizarRetorno(tipo, valor) {
+  function cambiarExtraPrestado(tipo, valor) {
     setErrorStock("");
-    setRetornosTocados((prev) => new Set(prev).add(tipo));
-    setRetornos((r) => ({ ...r, [tipo]: Math.max(0, valor) }));
+
+    setExtrasTocados((prev) => {
+      const siguiente = new Set(prev);
+      siguiente.add(tipo);
+      return siguiente;
+    });
+
+    setExtrasPrestados((prev) => ({
+      ...prev,
+      [tipo]: Math.max(0, Number(valor) || 0),
+    }));
+  }
+
+  function cambiarExtraRetirado(tipo, valor) {
+    setErrorStock("");
+
+    setExtrasTocados((prev) => {
+      const siguiente = new Set(prev);
+      siguiente.add(tipo);
+      return siguiente;
+    });
+
+    setExtrasRetirados((prev) => ({
+      ...prev,
+      [tipo]: Math.max(0, Number(valor) || 0),
+    }));
   }
 
   function guardar() {
     setErrorStock("");
 
-    // No se puede entregar más producto retornable del que lleva la camioneta.
-    if (vendio && stockActivo) {
+    // Los únicos movimientos que cambian el stock físico de envases
+    // de la camioneta son los extras prestados o retirados.
+    if (stockActivo) {
       for (const p of PRODUCTOS_RETORNABLES) {
-        const cantidad = Number(items.find((it) => it.tipo === p.key)?.cantidad) || 0;
-        const disponible = Number(stockRepartidor?.[p.key]) || 0;
-        if (cantidad > disponible) {
-          setErrorStock(`No hay suficientes ${p.label}. La camioneta tiene ${disponible} y estás intentando entregar ${cantidad}.`);
+        const prestados =
+          Number(extrasPrestados[p.key]) || 0;
+        const retirados =
+          Number(extrasRetirados[p.key]) || 0;
+        const disponible =
+          Number(stockRepartidor?.[p.key]) || 0;
+
+        // Lo retirado vuelve a la camioneta y puede compensar
+        // un préstamo realizado en la misma visita.
+        const disponibleFinal =
+          disponible + retirados;
+
+        if (prestados > disponibleFinal) {
+          setErrorStock(
+            `No hay suficientes ${p.label} para prestar. La camioneta tiene ${disponible}, retira ${retirados} y estás intentando prestar ${prestados}.`
+          );
           return;
         }
       }
     }
 
-    // Los permanentes no se modifican desde el recorrido. Solo puede devolver extras pendientes + envases recibidos hoy.
+    // Solo pueden retirarse envases EXTRA que ya estén registrados
+    // a nombre del cliente.
     for (const p of PRODUCTOS_RETORNABLES) {
-      const entregados = vendio ? (Number(items.find((it) => it.tipo === p.key)?.cantidad) || 0) : 0;
-      const extraAntes = Number(saldoActual[p.key]) || 0;
-      const devolvio = Number(retornos[p.key]) || 0;
-      const maximo = extraAntes + entregados;
-      if (devolvio > maximo) {
-        setErrorStock(`${cliente.nombre} no puede devolver ${devolvio} ${p.label} desde el recorrido. Como máximo puede devolver ${maximo} entre extras pendientes y envases recibidos hoy.`);
+      const extraActual =
+        Number(saldoActual[p.key]) || 0;
+      const retirados =
+        Number(extrasRetirados[p.key]) || 0;
+
+      if (retirados > extraActual) {
+        setErrorStock(
+          `${cliente.nombre} tiene ${extraActual} ${p.label} extra. No podés retirar ${retirados}.`
+        );
         return;
       }
     }
-
-    const retornosFinal = {};
-    PRODUCTOS_RETORNABLES.forEach((p) => {
-      const idx = PRODUCTOS.findIndex((x) => x.key === p.key);
-      const cant = items[idx]?.cantidad || 0;
-      const saldo = saldoActual[p.key] || 0;
-      const relevante = vendio ? (cant > 0 || saldo > 0) : (saldo > 0);
-      retornosFinal[p.key] = relevante ? (retornos[p.key] || 0) : 0;
-    });
 
     const visita = {
       id: visitaInicial?.id || uid(),
@@ -3027,32 +3371,58 @@ function VisitaSheet({
       diaSemana: diaSemanaHoy(),
       vendio,
       items: vendio ? items : [],
-      retornos: retornosFinal,
+      extrasPrestados: {
+        b20: Number(extrasPrestados.b20) || 0,
+        b12: Number(extrasPrestados.b12) || 0,
+        sifon: Number(extrasPrestados.sifon) || 0,
+      },
+      extrasRetirados: {
+        b20: Number(extrasRetirados.b20) || 0,
+        b12: Number(extrasRetirados.b12) || 0,
+        sifon: Number(extrasRetirados.sifon) || 0,
+      },
       total: vendio ? total : 0,
       metodoPago: vendio ? metodoPago : null,
-      pagos: vendio && metodoPago !== "deuda" ? { [metodoPago]: pagadoFinal } : {},
-      deudaGenerada: vendio && metodoPago === "deuda" ? total : (vendio ? restante : 0),
-      deudaCobrada: cobrarDeuda ? Number(montoDeuda) || 0 : 0,
-      metodoDeuda: cobrarDeuda ? metodoDeuda : null,
+      pagos:
+        vendio && metodoPago !== "deuda"
+          ? { [metodoPago]: pagadoFinal }
+          : {},
+      deudaGenerada:
+        vendio && metodoPago === "deuda"
+          ? total
+          : vendio
+          ? restante
+          : 0,
+      deudaCobrada: cobrarDeuda
+        ? Number(montoDeuda) || 0
+        : 0,
+      metodoDeuda: cobrarDeuda
+        ? metodoDeuda
+        : null,
       notas,
       timestamp:
-        visitaInicial?.timestamp ||
-        Date.now(),
-
-      editadoEl: visitaInicial
-        ? Date.now()
-        : null,
+        visitaInicial?.timestamp || Date.now(),
+      editadoEl: visitaInicial ? Date.now() : null,
     };
 
+    // Las visitas nuevas ya no usan "retornos".
+    // Si estamos editando una visita antigua, al guardarla queda
+    // migrada automáticamente al nuevo modelo de extras.
     if (visita.deudaCobrada) {
-      visita.pagos = { ...visita.pagos, [metodoDeuda]: (visita.pagos[metodoDeuda] || 0) + visita.deudaCobrada };
+      visita.pagos = {
+        ...visita.pagos,
+        [metodoDeuda]:
+          (visita.pagos[metodoDeuda] || 0) +
+          visita.deudaCobrada,
+      };
     }
+
     onGuardar(visita);
   }
 
   return (
     <Sheet
-  title={
+      title={
         visitaInicial
           ? `${cliente.nombre} · Editar visita`
           : cliente.nombre
@@ -3060,53 +3430,146 @@ function VisitaSheet({
       onClose={onClose}
       closeOnBackdrop={false}
       footer={
-  <Btn
-    full
-    size="lg"
-    onClick={guardar}
-    icon={Check}
-  >
-    {visitaInicial
-      ? "Guardar cambios"
-      : "Guardar visita"}
-  </Btn>
-}
+        <Btn
+          full
+          size="lg"
+          onClick={guardar}
+          icon={Check}
+        >
+          {visitaInicial
+            ? "Guardar cambios"
+            : "Guardar visita"}
+        </Btn>
+      }
     >
-      <div className="text-xs mb-3" style={{ color: C.muted }}>{cliente.direccion}</div>
+      <div
+        className="text-xs mb-3"
+        style={{ color: C.muted }}
+      >
+        {cliente.direccion}
+      </div>
 
-      {(totalEnvasesPrestados(permanentes) > 0 || totalEnvasesPrestados(saldoActual) > 0) && (
+      {(totalEnvasesPrestados(permanentes) > 0 ||
+        totalEnvasesPrestados(saldoActual) > 0) && (
         <Card className="mb-3">
-          <div className="text-[11px] font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Envases del cliente</div>
+          <div
+            className="text-[11px] font-bold uppercase tracking-wide mb-1"
+            style={{ color: C.muted }}
+          >
+            Envases del cliente
+          </div>
+
           <div className="flex gap-1.5 flex-wrap">
-            {totalEnvasesPrestados(permanentes) > 0 && <Badge tone="accent">Permanentes: {textoEnvasesPrestados(permanentes)}</Badge>}
-            {totalEnvasesPrestados(saldoActual) > 0 && <Badge tone="warning">Extra: {textoEnvasesPrestados(saldoActual)}</Badge>}
+            {totalEnvasesPrestados(permanentes) > 0 && (
+              <Badge tone="accent">
+                Permanentes:{" "}
+                {textoEnvasesPrestados(permanentes)}
+              </Badge>
+            )}
+
+            {totalEnvasesPrestados(saldoActual) > 0 && (
+              <Badge tone="warning">
+                Extra:{" "}
+                {textoEnvasesPrestados(saldoActual)}
+              </Badge>
+            )}
           </div>
         </Card>
       )}
 
       {stockActivo && (
-        <Card style={{ background: C.accentSoft, border: "none" }} className="mb-3">
-          <div className="text-[11px] font-bold uppercase tracking-wide mb-1" style={{ color: C.primary }}>Stock en camioneta</div>
+        <Card
+          style={{
+            background: C.accentSoft,
+            border: "none",
+          }}
+          className="mb-3"
+        >
+          <div
+            className="text-[11px] font-bold uppercase tracking-wide mb-1"
+            style={{ color: C.primary }}
+          >
+            Stock de envases en camioneta
+          </div>
+
           <div className="flex gap-2 flex-wrap">
-            {PRODUCTOS_RETORNABLES.map((p) => <Badge key={p.key} tone="accent">{p.corto}: {Number(stockRepartidor?.[p.key]) || 0}</Badge>)}
+            {PRODUCTOS_RETORNABLES.map((p) => (
+              <Badge key={p.key} tone="accent">
+                {p.corto}:{" "}
+                {Number(stockRepartidor?.[p.key]) || 0}
+              </Badge>
+            ))}
           </div>
         </Card>
       )}
 
       {cliente.deudaAcumulada > 0 && (
-        <Card style={{ background: C.dangerBg, border: "none" }} className="mb-3">
+        <Card
+          style={{
+            background: C.dangerBg,
+            border: "none",
+          }}
+          className="mb-3"
+        >
           <div className="flex items-center justify-between mb-2">
-            <div className="text-xs font-bold" style={{ color: C.danger }}>Debe {formatMoney(cliente.deudaAcumulada)} de antes</div>
-            <button onClick={() => setCobrarDeuda(!cobrarDeuda)} className="px-2.5 py-1 rounded-lg text-xs font-bold" style={{ background: cobrarDeuda ? C.danger : "#fff", color: cobrarDeuda ? "#fff" : C.danger, border: `1px solid ${C.danger}` }}>
-              {cobrarDeuda ? "Cobrando" : "Cobrar deuda"}
+            <div
+              className="text-xs font-bold"
+              style={{ color: C.danger }}
+            >
+              Debe{" "}
+              {formatMoney(cliente.deudaAcumulada)} de antes
+            </div>
+
+            <button
+              onClick={() =>
+                setCobrarDeuda(!cobrarDeuda)
+              }
+              className="px-2.5 py-1 rounded-lg text-xs font-bold"
+              style={{
+                background: cobrarDeuda
+                  ? C.danger
+                  : "#fff",
+                color: cobrarDeuda
+                  ? "#fff"
+                  : C.danger,
+                border: `1px solid ${C.danger}`,
+              }}
+            >
+              {cobrarDeuda
+                ? "Cobrando"
+                : "Cobrar deuda"}
             </button>
           </div>
+
           {cobrarDeuda && (
             <div className="flex gap-2 items-center">
-              <Input type="number" inputMode="decimal" value={montoDeuda} onChange={(e) => setMontoDeuda(e.target.value)} style={{ flex: 1 }} />
-              <select value={metodoDeuda} onChange={(e) => setMetodoDeuda(e.target.value)} className="rounded-xl px-2 py-2.5 text-xs" style={{ background: "#fff", border: `1px solid ${C.border}` }}>
-                <option value="efectivo">Efectivo</option>
-                <option value="mercadopago">Mercado Pago</option>
+              <Input
+                type="number"
+                inputMode="decimal"
+                value={montoDeuda}
+                onChange={(e) =>
+                  setMontoDeuda(e.target.value)
+                }
+                style={{ flex: 1 }}
+              />
+
+              <select
+                value={metodoDeuda}
+                onChange={(e) =>
+                  setMetodoDeuda(e.target.value)
+                }
+                className="rounded-xl px-2 py-2.5 text-xs"
+                style={{
+                  background: "#fff",
+                  border: `1px solid ${C.border}`,
+                }}
+              >
+                <option value="efectivo">
+                  Efectivo
+                </option>
+                <option value="mercadopago">
+                  Mercado Pago
+                </option>
               </select>
             </div>
           )}
@@ -3114,91 +3577,391 @@ function VisitaSheet({
       )}
 
       <div className="flex gap-2 mb-4">
-        <button onClick={() => setVendio(true)} className="flex-1 py-3 rounded-xl font-bold text-sm" style={{ background: vendio ? C.success : C.bg, color: vendio ? "#fff" : C.muted }}>Sí vendió</button>
-        <button onClick={() => setVendio(false)} className="flex-1 py-3 rounded-xl font-bold text-sm" style={{ background: !vendio ? C.danger : C.bg, color: !vendio ? "#fff" : C.muted }}>No vendió</button>
+        <button
+          onClick={() => setVendio(true)}
+          className="flex-1 py-3 rounded-xl font-bold text-sm"
+          style={{
+            background: vendio
+              ? C.success
+              : C.bg,
+            color: vendio
+              ? "#fff"
+              : C.muted,
+          }}
+        >
+          Sí vendió
+        </button>
+
+        <button
+          onClick={() => setVendio(false)}
+          className="flex-1 py-3 rounded-xl font-bold text-sm"
+          style={{
+            background: !vendio
+              ? C.danger
+              : C.bg,
+            color: !vendio
+              ? "#fff"
+              : C.muted,
+          }}
+        >
+          No vendió
+        </button>
       </div>
 
       {vendio ? (
         <>
+          {/* La venta muestra solamente lo vendido. */}
           <div className="flex flex-col gap-2 mb-3">
             {PRODUCTOS.map((p, idx) => {
               const cant = items[idx].cantidad;
-              const saldo = saldoActual[p.key] || 0;
-              const mostrarRetorno = p.retornable && (cant > 0 || saldo > 0);
+
               return (
                 <div key={p.key}>
                   <div className="flex items-center justify-between">
                     <div>
-                      <div className="text-sm font-semibold">{p.label}</div>
-                      <div className="text-xs font-mono" style={{ color: C.mutedLight }}>{formatMoney(precios[p.key] || 0)} c/u</div>
+                      <div className="text-sm font-semibold">
+                        {p.label}
+                      </div>
+
+                      <div
+                        className="text-xs font-mono"
+                        style={{
+                          color: C.mutedLight,
+                        }}
+                      >
+                        {formatMoney(
+                          precios[p.key] || 0
+                        )}{" "}
+                        c/u
+                      </div>
                     </div>
-                    <Stepper value={cant} onChange={(v) => actualizarCantidad(idx, v)} />
+
+                    <Stepper
+                      value={cant}
+                      onChange={(v) =>
+                        actualizarCantidad(idx, v)
+                      }
+                    />
                   </div>
-                  {mostrarRetorno && (
-                    <div className="flex items-center justify-between mt-1 ml-1 pl-2 py-1" style={{ borderLeft: `2px solid ${C.border}` }}>
-                      <span className="text-xs" style={{ color: C.muted }}>
-                        Vacíos que devolvió{saldo > 0 && <span style={{ color: C.warning, fontWeight: 700 }}> · extra pendiente {saldo}</span>}
-                      </span>
-                      <Stepper value={retornos[p.key] || 0} onChange={(v) => actualizarRetorno(p.key, v)} />
-                    </div>
-                  )}
                 </div>
               );
             })}
           </div>
 
-          <div className="flex items-center justify-between mb-3 pt-2" style={{ borderTop: `1px dashed ${C.border}` }}>
-            <span className="text-sm font-bold">Total</span>
-            <span className="font-mono font-extrabold text-lg">{formatMoney(total)}</span>
+          <div
+            className="flex items-center justify-between mb-3 pt-2"
+            style={{
+              borderTop: `1px dashed ${C.border}`,
+            }}
+          >
+            <span className="text-sm font-bold">
+              Total
+            </span>
+            <span className="font-mono font-extrabold text-lg">
+              {formatMoney(total)}
+            </span>
           </div>
 
           <Field label="Forma de pago">
             <div className="flex gap-2">
-              {[["efectivo", "Efectivo", Banknote], ["mercadopago", "Mercado Pago", CreditCard], ["deuda", "Fía (deuda)", HandCoins]].map(([k, l, Icon]) => (
-                <button key={k} onClick={() => setMetodoPago(k)} className="flex-1 flex flex-col items-center gap-1 py-2 rounded-xl" style={{ background: metodoPago === k ? C.primary : C.bg, color: metodoPago === k ? "#fff" : C.muted }}>
-                  <Icon size={16} /><span className="text-xs font-bold text-center">{l}</span>
+              {[
+                [
+                  "efectivo",
+                  "Efectivo",
+                  Banknote,
+                ],
+                [
+                  "mercadopago",
+                  "Mercado Pago",
+                  CreditCard,
+                ],
+                [
+                  "deuda",
+                  "Fía (deuda)",
+                  HandCoins,
+                ],
+              ].map(([k, l, Icon]) => (
+                <button
+                  key={k}
+                  onClick={() =>
+                    setMetodoPago(k)
+                  }
+                  className="flex-1 flex flex-col items-center gap-1 py-2 rounded-xl"
+                  style={{
+                    background:
+                      metodoPago === k
+                        ? C.primary
+                        : C.bg,
+                    color:
+                      metodoPago === k
+                        ? "#fff"
+                        : C.muted,
+                  }}
+                >
+                  <Icon size={16} />
+                  <span className="text-xs font-bold text-center">
+                    {l}
+                  </span>
                 </button>
               ))}
             </div>
           </Field>
 
           {metodoPago !== "deuda" && (
-            <Field label="Monto pagado ahora" hint={restante > 0 ? `Queda pendiente ${formatMoney(restante)}, se suma a la deuda.` : null}>
-              <Input type="number" inputMode="decimal" value={montoPagado === null ? total : montoPagado} onChange={(e) => setMontoPagado(e.target.value)} />
+            <Field
+              label="Monto pagado ahora"
+              hint={
+                restante > 0
+                  ? `Queda pendiente ${formatMoney(
+                      restante
+                    )}, se suma a la deuda.`
+                  : null
+              }
+            >
+              <Input
+                type="number"
+                inputMode="decimal"
+                value={
+                  montoPagado === null
+                    ? total
+                    : montoPagado
+                }
+                onChange={(e) =>
+                  setMontoPagado(
+                    e.target.value
+                  )
+                }
+              />
             </Field>
           )}
 
-          <Field label="Notas de la visita"><Textarea rows={2} value={notas} onChange={(e) => setNotas(e.target.value)} /></Field>
+          <Field label="Notas de la visita">
+            <Textarea
+              rows={2}
+              value={notas}
+              onChange={(e) =>
+                setNotas(e.target.value)
+              }
+            />
+          </Field>
         </>
       ) : (
         <>
           <Field label="Motivo (opcional)">
             <div className="flex flex-wrap gap-1.5 mb-2">
               {NOTAS_RAPIDAS.map((n) => (
-                <button key={n} onClick={() => setNotas(n)} className="px-2.5 py-1 rounded-lg text-xs font-semibold" style={{ background: notas === n ? C.primary : C.bg, color: notas === n ? "#fff" : C.muted }}>{n}</button>
+                <button
+                  key={n}
+                  onClick={() => setNotas(n)}
+                  className="px-2.5 py-1 rounded-lg text-xs font-semibold"
+                  style={{
+                    background:
+                      notas === n
+                        ? C.primary
+                        : C.bg,
+                    color:
+                      notas === n
+                        ? "#fff"
+                        : C.muted,
+                  }}
+                >
+                  {n}
+                </button>
               ))}
             </div>
           </Field>
-
-          {PRODUCTOS_RETORNABLES.some((p) => (saldoActual[p.key] || 0) > 0) && (
-            <Field label="¿Te devolvió envases extra vacíos?" hint="Aunque no haya comprado, puede devolverte envases extra pendientes.">
-              <div className="flex flex-col gap-2">
-                {PRODUCTOS_RETORNABLES.filter((p) => (saldoActual[p.key] || 0) > 0).map((p) => (
-                  <div key={p.key} className="flex items-center justify-between">
-                    <span className="text-xs font-semibold">{p.label} <span style={{ color: C.warning }}>(extra {saldoActual[p.key]})</span></span>
-                    <Stepper value={retornos[p.key] || 0} onChange={(v) => actualizarRetorno(p.key, v)} />
-                  </div>
-                ))}
-              </div>
-            </Field>
-          )}
         </>
       )}
 
+      {/* Esta sección aparece SIEMPRE, venda o no venda. */}
+{/* ENVASES EXTRA PLEGABLE */}
+<div className="mb-3">
+  <button
+    type="button"
+    onClick={() => setMostrarExtras(!mostrarExtras)}
+    className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
+    style={{
+      background: C.warningBg,
+      border: `1px solid ${C.border}`,
+    }}
+  >
+    <div className="flex items-center gap-2">
+      <Boxes
+        size={16}
+        color={C.warning}
+      />
+
+      <div className="text-left">
+        <div
+          className="text-xs font-bold"
+          style={{ color: C.warning }}
+        >
+          Envases extra
+        </div>
+
+        <div
+          className="text-[10px]"
+          style={{ color: C.muted }}
+        >
+          Prestar o retirar envases
+        </div>
+      </div>
+    </div>
+
+    <ChevronRight
+      size={17}
+      color={C.warning}
+      style={{
+        transform: mostrarExtras
+          ? "rotate(90deg)"
+          : "rotate(0deg)",
+        transition: "transform 0.2s",
+      }}
+    />
+  </button>
+
+  {mostrarExtras && (
+    <Card
+      style={{
+        background: C.warningBg,
+        border: "none",
+        borderTopLeftRadius: 0,
+        borderTopRightRadius: 0,
+      }}
+      className="mt-1"
+    >
+      <div
+        className="text-[11px] mb-3"
+        style={{ color: C.muted }}
+      >
+        Indicá solamente si hoy dejás un envase extra
+        o retirás uno que el cliente ya tenía.
+      </div>
+
+      <div className="flex flex-col gap-3">
+        {PRODUCTOS_RETORNABLES.map((p) => {
+          const actuales =
+            Number(saldoActual[p.key]) || 0;
+
+          const prestados =
+            Number(extrasPrestados[p.key]) || 0;
+
+          const retirados =
+            Number(extrasRetirados[p.key]) || 0;
+
+          const balance =
+            prestados - retirados;
+
+          return (
+            <div
+              key={p.key}
+              className="pb-3 last:pb-0"
+              style={{
+                borderBottom:
+                  p.key !== "sifon"
+                    ? `1px solid ${C.border}`
+                    : "none",
+              }}
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <div className="text-xs font-bold">
+                    {p.label}
+                  </div>
+
+                  <div
+                    className="text-[10px]"
+                    style={{ color: C.muted }}
+                  >
+                    Extras actuales: {actuales}
+                  </div>
+                </div>
+
+                {(prestados > 0 ||
+                  retirados > 0) && (
+                  <Badge
+                    tone={
+                      balance > 0
+                        ? "warning"
+                        : balance < 0
+                        ? "success"
+                        : "muted"
+                    }
+                  >
+                    {balance > 0
+                      ? `+${balance}`
+                      : balance}
+                  </Badge>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div
+                    className="text-[10px] font-bold mb-1 text-center"
+                    style={{ color: C.warning }}
+                  >
+                    Prestó
+                  </div>
+
+                  <div className="flex justify-center">
+                    <Stepper
+                      value={prestados}
+                      onChange={(v) =>
+                        cambiarExtraPrestado(
+                          p.key,
+                          v
+                        )
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div
+                    className="text-[10px] font-bold mb-1 text-center"
+                    style={{ color: C.success }}
+                  >
+                    Retiró
+                  </div>
+
+                  <div className="flex justify-center">
+                    <Stepper
+                      value={retirados}
+                      onChange={(v) =>
+                        cambiarExtraRetirado(
+                          p.key,
+                          v
+                        )
+                      }
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  )}
+</div>
+
       {errorStock && (
-        <Card style={{ background: C.dangerBg, border: "none" }} className="mt-3">
-          <div className="text-xs font-bold flex items-start gap-1.5" style={{ color: C.danger }}>
-            <AlertCircle size={14} className="flex-shrink-0 mt-0.5" />
+        <Card
+          style={{
+            background: C.dangerBg,
+            border: "none",
+          }}
+          className="mt-3"
+        >
+          <div
+            className="text-xs font-bold flex items-start gap-1.5"
+            style={{ color: C.danger }}
+          >
+            <AlertCircle
+              size={14}
+              className="flex-shrink-0 mt-0.5"
+            />
             <span>{errorStock}</span>
           </div>
         </Card>
