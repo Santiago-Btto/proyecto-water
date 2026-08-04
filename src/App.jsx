@@ -850,8 +850,6 @@ function AdminGate({ config, onUnlock, onBack, onSetPin }) {
   const [pin, setPin] = useState("");
   const [pin2, setPin2] = useState("");
   const [error, setError] = useState("");
-  const [extrasEditadosManualmente, setExtrasEditadosManualmente] =
-  useState(false);
   const creating = !config.adminPin;
 
   function submit() {
@@ -1180,6 +1178,8 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
     };
   });
   const [error, setError] = useState("");
+    const [extrasEditadosManualmente, setExtrasEditadosManualmente] =
+    useState(false);
 
   function submit() {
     if (!f.nombre.trim()) return setError("Ingresá el nombre del cliente.");
@@ -1264,17 +1264,19 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
           </div>
 
           <Stepper
-            value={f.envasesExtra[p.key] || 0}
+            value={
+              Number(f.envasesExtra?.[p.key]) || 0
+            }
             onChange={(v) => {
               setExtrasEditadosManualmente(true);
 
-              setF({
-                ...f,
+              setF((prev) => ({
+                ...prev,
                 envasesExtra: {
-                  ...f.envasesExtra,
+                  ...envasesExtraDe(prev),
                   [p.key]: v,
                 },
-              });
+              }));
             }}
           />
         </div>
