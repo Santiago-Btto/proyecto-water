@@ -850,6 +850,8 @@ function AdminGate({ config, onUnlock, onBack, onSetPin }) {
   const [pin, setPin] = useState("");
   const [pin2, setPin2] = useState("");
   const [error, setError] = useState("");
+  const [extrasEditadosManualmente, setExtrasEditadosManualmente] =
+  useState(false);
   const creating = !config.adminPin;
 
   function submit() {
@@ -1184,8 +1186,16 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
     if (!f.direccion.trim()) return setError("Ingresá la dirección.");
     if (f.diasVisita.length === 0) return setError("Elegí al menos un día de visita.");
     if (isAdmin && !f.repartidorId) return setError("Asigná un repartidor.");
-    onSave(f);
-  }
+    onSave(
+  isAdmin
+    ? {
+        ...f,
+        _extrasEditadosManualmente:
+          extrasEditadosManualmente,
+      }
+    : f
+);
+}
 
   return (
     <div>
@@ -1224,14 +1234,54 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
               ))}
             </div>
           </Field>
-          {totalEnvasesPrestados(f.envasesExtra) > 0 && (
-            <Card style={{ background: C.warningBg, border: "none" }} className="mb-3">
-              <div className="text-xs font-bold" style={{ color: C.warning }}>Envases extra actuales</div>
-              <div className="text-xs mt-1" style={{ color: C.muted }}>
-                {textoEnvasesPrestados(f.envasesExtra)}. Los extras se generan o devuelven desde los recorridos; no se editan manualmente.
-              </div>
-            </Card>
-          )}
+          <Field
+  label="Envases extra"
+  hint="Envases adicionales que actualmente tiene el cliente. El administrador puede corregirlos manualmente."
+>
+  <Card
+    style={{
+      background: C.warningBg,
+      border: "none",
+    }}
+  >
+    <div className="flex flex-col gap-2">
+      {PRODUCTOS_RETORNABLES.map((p) => (
+        <div
+          key={p.key}
+          className="flex items-center justify-between"
+        >
+          <div>
+            <div className="text-xs font-semibold">
+              {p.label}
+            </div>
+
+            <div
+              className="text-[10px]"
+              style={{ color: C.muted }}
+            >
+              Extra actual
+            </div>
+          </div>
+
+          <Stepper
+            value={f.envasesExtra[p.key] || 0}
+            onChange={(v) => {
+              setExtrasEditadosManualmente(true);
+
+              setF({
+                ...f,
+                envasesExtra: {
+                  ...f.envasesExtra,
+                  [p.key]: v,
+                },
+              });
+            }}
+          />
+        </div>
+      ))}
+    </div>
+  </Card>
+</Field>
         </>
       )}
       {!isAdmin && totalEnvasesPrestados(f.envasesPermanentes) > 0 && (
@@ -1315,67 +1365,141 @@ function AdminClientes({ db, mutate }) {
     ? db.clientes.find((c) => c.id === detalleId)
     : null;
 
-  function guardarCliente(f) {
-    const next = clone(db);
+function guardarCliente(f) {
+  const next = clone(db);
 
-    if (f.id) {
-      const i = next.clientes.findIndex((c) => c.id === f.id);
-      const actual = next.clientes[i];
-      const permanentesAntes = envasesPermanentesDe(actual);
-      const extrasAntes = envasesExtraDe(actual);
-      const permanentesNuevos = {
+  const extrasEditadosManualmente =
+    !!f._extrasEditadosManualmente;
+
+  // Sacamos este dato auxiliar para que
+  // NO se guarde dentro de Firebase.
+  const {
+    _extrasEditadosManualmente,
+    ...datosCliente
+  } = f;
+
+  if (f.id) {
+    const i = next.clientes.findIndex(
+      (c) => c.id === f.id
+    );
+
+    if (i < 0) return;
+
+    const actual = next.clientes[i];
+
+    const permanentesAntes =
+      envasesPermanentesDe(actual);
+
+    const extrasAntes =
+      envasesExtraDe(actual);
+
+    const permanentesNuevos = {
+      ...envasesVacio(),
+      ...(f.envasesPermanentes || {}),
+    };
+
+    let extrasNuevos;
+
+    // ==========================================
+    // SI EL ADMINISTRADOR EDITÓ LOS EXTRAS
+    // MANUALMENTE, RESPETAMOS EXACTAMENTE
+    // LOS VALORES QUE INGRESÓ.
+    // ==========================================
+    if (extrasEditadosManualmente) {
+      extrasNuevos = {
         ...envasesVacio(),
-        ...(f.envasesPermanentes || {}),
+        ...(f.envasesExtra || {}),
       };
-      const extrasNuevos = { ...extrasAntes };
+    } else {
+      // ==========================================
+      // SI NO TOCÓ LOS EXTRAS, mantenemos
+      // la lógica automática que ya teníamos
+      // al modificar permanentes.
+      // ==========================================
+      extrasNuevos = {
+        ...extrasAntes,
+      };
 
       PRODUCTOS_RETORNABLES.forEach((p) => {
-        const antes = Number(permanentesAntes[p.key]) || 0;
-        const despues = Number(permanentesNuevos[p.key]) || 0;
-        const diferencia = despues - antes;
+        const antes =
+          Number(permanentesAntes[p.key]) || 0;
+
+        const despues =
+          Number(permanentesNuevos[p.key]) || 0;
+
+        const diferencia =
+          despues - antes;
 
         if (diferencia > 0) {
+          // Si aumentamos permanentes y había
+          // extras, primero convertimos extras
+          // existentes en permanentes.
           const convertir = Math.min(
             diferencia,
             Number(extrasNuevos[p.key]) || 0
           );
+
           extrasNuevos[p.key] = Math.max(
             0,
-            (Number(extrasNuevos[p.key]) || 0) - convertir
+            (Number(extrasNuevos[p.key]) || 0) -
+              convertir
           );
         } else if (diferencia < 0) {
+          // Si reducimos permanentes,
+          // esos envases pasan a ser extras.
           extrasNuevos[p.key] =
-            (Number(extrasNuevos[p.key]) || 0) + Math.abs(diferencia);
+            (Number(extrasNuevos[p.key]) || 0) +
+            Math.abs(diferencia);
         }
       });
-
-      const actualizado = {
-        ...actual,
-        ...f,
-        envasesPermanentes: permanentesNuevos,
-        envasesExtra: extrasNuevos,
-      };
-      delete actualizado.envasesPrestados;
-      next.clientes[i] = actualizado;
-    } else {
-      const nuevo = {
-        ...f,
-        id: uid(),
-        deudaAcumulada: 0,
-        envasesPermanentes: {
-          ...envasesVacio(),
-          ...(f.envasesPermanentes || {}),
-        },
-        envasesExtra: envasesVacio(),
-        creadoEl: hoyISO(),
-      };
-      delete nuevo.envasesPrestados;
-      next.clientes.push(nuevo);
     }
 
-    mutate(next);
-    setSheet(null);
+    const actualizado = {
+      ...actual,
+      ...datosCliente,
+
+      envasesPermanentes:
+        permanentesNuevos,
+
+      envasesExtra:
+        extrasNuevos,
+    };
+
+    delete actualizado.envasesPrestados;
+
+    next.clientes[i] = actualizado;
+  } else {
+    // ==========================================
+    // CLIENTE NUEVO
+    // ==========================================
+    const nuevo = {
+      ...datosCliente,
+
+      id: uid(),
+
+      deudaAcumulada: 0,
+
+      envasesPermanentes: {
+        ...envasesVacio(),
+        ...(f.envasesPermanentes || {}),
+      },
+
+      envasesExtra: {
+        ...envasesVacio(),
+        ...(f.envasesExtra || {}),
+      },
+
+      creadoEl: hoyISO(),
+    };
+
+    delete nuevo.envasesPrestados;
+
+    next.clientes.push(nuevo);
   }
+
+  mutate(next);
+  setSheet(null);
+}
 
   function eliminarCliente(c) {
     if (totalEnvasesCliente(c) > 0) return;
