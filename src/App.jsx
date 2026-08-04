@@ -2217,38 +2217,64 @@ const visitasHoy = db.visitas.filter(
     v.fecha === hoyISO()
 );
 
-// Clientes a los que SÍ se les vendió hoy
-const idsVendidosHoy = new Set(
-  visitasHoy
-    .filter((v) => v.vendio)
-    .map((v) => v.clienteId)
-);
+// Tomamos la visita más reciente de cada cliente.
+const visitaHoyPorCliente = new Map();
 
-// Clientes visitados pero a los que NO se les vendió
-const idsNoVendidosHoy = new Set(
-  visitasHoy
-    .filter((v) => !v.vendio)
-    .map((v) => v.clienteId)
-);
+visitasHoy
+  .slice()
+  .sort(
+    (a, b) =>
+      (a.timestamp || 0) -
+      (b.timestamp || 0)
+  )
+  .forEach((v) => {
+    visitaHoyPorCliente.set(
+      v.clienteId,
+      v
+    );
+  });
 
-// Todavía no se pasó por ellos
+// Todavía no se visitó.
 const pendientes = deHoy.filter(
   (c) =>
-    !idsVendidosHoy.has(c.id) &&
-    !idsNoVendidosHoy.has(c.id)
+    !visitaHoyPorCliente.has(c.id)
 );
 
-const noVendidos = deHoy.filter(
-  (c) => idsNoVendidosHoy.has(c.id)
+// Se visitó, pero hay que volver.
+const volverMasTarde = deHoy.filter(
+  (c) =>
+    esVolverMasTarde(
+      visitaHoyPorCliente.get(c.id)
+    )
 );
 
+// Se vendió.
 const vendidos = deHoy.filter(
-  (c) => idsVendidosHoy.has(c.id)
+  (c) =>
+    visitaHoyPorCliente.get(c.id)?.vendio
 );
+
+// No se vendió y NO hay que volver.
+const noVendidosFinalizados = deHoy.filter(
+  (c) => {
+    const visita =
+      visitaHoyPorCliente.get(c.id);
+
+    return (
+      visita &&
+      !visita.vendio &&
+      !esVolverMasTarde(visita)
+    );
+  }
+);
+
+const completadosCount =
+  vendidos.length +
+  noVendidosFinalizados.length;
 
 const enProgreso =
-  pendientes.length < deHoy.length &&
-  vendidos.length < deHoy.length;
+  completadosCount > 0 ||
+  volverMasTarde.length > 0;
 
   return (
     <Screen>
@@ -2271,8 +2297,8 @@ const enProgreso =
           <RepartidorInicio
             deHoy={deHoy}
             pendientes={pendientes}
-            visitadosCount={vendidos.length}
-            porReintentarCount={noVendidos.length}
+            visitadosCount={completadosCount}
+            porReintentarCount={volverMasTarde.length}
             enProgreso={enProgreso}
             onEmpezar={() =>
               setVista("recorrido")
@@ -2332,9 +2358,22 @@ function RepartidorInicio({
       ) : (
         <>
           <div className="font-extrabold text-xl mb-1">{deHoy.length} cliente{deHoy.length !== 1 ? "s" : ""} hoy</div>
-          <div className="text-xs mb-6" style={{ color: C.muted }}>
-            {visitadosCount > 0 ? `${visitadosCount} de ${deHoy.length} ya visitados` : "Todavía no arrancaste el recorrido"}
-          </div>
+          <div
+  className="text-xs mb-6"
+  style={{ color: C.muted }}
+>
+  {visitadosCount > 0 ||
+  porReintentarCount > 0
+    ? (
+      <>
+        {visitadosCount} de{" "}
+        {deHoy.length} completados
+        {porReintentarCount > 0 &&
+          ` · ${porReintentarCount} para volver`}
+      </>
+    )
+    : "Todavía no arrancaste el recorrido"}
+</div>
           <Btn size="lg" onClick={onEmpezar} icon={
   !quedanPorAtender
     ? CheckCircle2
@@ -2471,19 +2510,61 @@ const clientesFiltrados = clientes.filter((c) => {
   );
 });
 
-const pendientes = clientesFiltrados.filter(
+// ==========================================
+// TOTALES REALES DEL RECORRIDO
+// No dependen del buscador.
+// ==========================================
+
+const pendientesTotales = clientes.filter(
   (c) => !visitaPorCliente.has(c.id)
 );
 
-const noVendidos = clientesFiltrados.filter((c) => {
-  const visita = visitaPorCliente.get(c.id);
-  return visita && !visita.vendio;
-});
+const volverMasTardeTotales =
+  clientes.filter((c) =>
+    esVolverMasTarde(
+      visitaPorCliente.get(c.id)
+    )
+  );
 
-const vendidos = clientesFiltrados.filter((c) => {
-  const visita = visitaPorCliente.get(c.id);
-  return visita?.vendio;
-});
+const visitadosFinalizadosTotales =
+  clientes.filter((c) => {
+    const visita =
+      visitaPorCliente.get(c.id);
+
+    return (
+      visita &&
+      !esVolverMasTarde(visita)
+    );
+  });
+
+// ==========================================
+// LISTAS VISIBLES
+// Estas sí respetan el buscador.
+// ==========================================
+
+const pendientes =
+  clientesFiltrados.filter(
+    (c) =>
+      !visitaPorCliente.has(c.id)
+  );
+
+const volverMasTarde =
+  clientesFiltrados.filter((c) =>
+    esVolverMasTarde(
+      visitaPorCliente.get(c.id)
+    )
+  );
+
+const visitadosFinalizados =
+  clientesFiltrados.filter((c) => {
+    const visita =
+      visitaPorCliente.get(c.id);
+
+    return (
+      visita &&
+      !esVolverMasTarde(visita)
+    );
+  });
 
   function abrirNuevaVisita(cliente) {
     setActivo(cliente);
@@ -2660,7 +2741,8 @@ const vendidos = clientesFiltrados.filter((c) => {
         </button>
 
         <Badge tone="accent">
-          {vendidos.length}/{clientes.length} vendidos
+          {visitadosFinalizadosTotales.length}/
+          {clientes.length} completados
         </Badge>
       </div>
 
@@ -2705,8 +2787,8 @@ const vendidos = clientesFiltrados.filter((c) => {
 
 {busca.trim() &&
   pendientes.length === 0 &&
-  noVendidos.length === 0 &&
-  vendidos.length === 0 && (
+  volverMasTarde.length === 0 &&
+  visitadosFinalizados.length === 0 && (
     <Card className="mb-4">
       <div
         className="text-xs text-center"
@@ -2743,43 +2825,45 @@ const vendidos = clientesFiltrados.filter((c) => {
         </>
       )}
 
-      {/* =========================
-          NO SE VENDIÓ
-          ========================= */}
-      {noVendidos.length > 0 && (
-        <>
-          <div
-            className="text-xs font-bold uppercase tracking-wide mb-2"
-            style={{ color: C.warning }}
-          >
-            No se vendió · volver a intentar ({noVendidos.length})
-          </div>
+{/* =========================
+    VOLVER MÁS TARDE
+    ========================= */}
+{volverMasTarde.length > 0 && (
+  <>
+    <div
+      className="text-xs font-bold uppercase tracking-wide mb-2"
+      style={{ color: C.warning }}
+    >
+      Volver más tarde (
+      {volverMasTarde.length})
+    </div>
 
-          <div className="flex flex-col gap-2 mb-4">
-            {noVendidos.map((c) => {
-              const visita =
-                visitaPorCliente.get(c.id);
+    <div className="flex flex-col gap-2 mb-4">
+      {volverMasTarde.map((c) => {
+        const visita =
+          visitaPorCliente.get(c.id);
 
-              return (
-                <ClienteVisitaCard
-                  key={c.id}
-                  cliente={c}
-                  noVendido
-                  visita={visita}
-                  onClick={() =>
-                    abrirVisitaExistente(c)
-                  }
-                />
-              );
-            })}
-          </div>
-        </>
-      )}
+        return (
+          <ClienteVisitaCard
+            key={c.id}
+            cliente={c}
+            noVendido
+            volverMasTarde
+            visita={visita}
+            onClick={() =>
+              abrirVisitaExistente(c)
+            }
+          />
+        );
+      })}
+    </div>
+  </>
+)}
 
       {/* =========================
           VISITADOS / VENDIDOS
           ========================= */}
-      {vendidos.length > 0 && (
+      {visitadosFinalizados.length > 0 && (
         <div className="mb-4">
           <button
             type="button"
@@ -2801,7 +2885,7 @@ const vendidos = clientesFiltrados.filter((c) => {
               />
 
               <span className="text-sm font-bold">
-                Clientes visitados ({vendidos.length})
+                Clientes visitados ({visitadosFinalizados.length})
               </span>
             </div>
 
@@ -2819,26 +2903,33 @@ const vendidos = clientesFiltrados.filter((c) => {
 
           {(mostrarVisitados || busca.trim()) && (
             <div className="flex flex-col gap-2 mt-2">
-              {vendidos.map((c) => (
-                <ClienteVisitaCard
-                  key={c.id}
-                  cliente={c}
-                  hecho
-                  visita={visitaPorCliente.get(
-                    c.id
-                  )}
-                  onClick={() =>
-                    abrirVisitaExistente(c)
-                  }
-                />
-              ))}
+              {visitadosFinalizados.map((c) => {
+  const visita =
+    visitaPorCliente.get(c.id);
+
+  const fueVenta =
+    visita?.vendio === true;
+
+  return (
+    <ClienteVisitaCard
+      key={c.id}
+      cliente={c}
+      hecho={fueVenta}
+      noVendido={!fueVenta}
+      visita={visita}
+      onClick={() =>
+        abrirVisitaExistente(c)
+      }
+    />
+  );
+})}
             </div>
           )}
         </div>
       )}
 
-      {pendientes.length === 0 &&
-        noVendidos.length === 0 &&
+      {pendientesTotales.length === 0 &&
+        volverMasTardeTotales.length === 0 &&
         clientes.length > 0 && (
           <Card
             style={{
@@ -2891,6 +2982,7 @@ function ClienteVisitaCard({
   cliente,
   hecho,
   noVendido,
+  volverMasTarde = false,
   visita,
   onClick,
 }) {
@@ -2953,10 +3045,12 @@ function ClienteVisitaCard({
             )}
 
             {noVendido && (
-              <Badge tone="warning">
-                No se vendió
-              </Badge>
-            )}
+  <Badge tone="warning">
+    {volverMasTarde
+      ? "Volver más tarde"
+      : "No se vendió"}
+  </Badge>
+)}
           </div>
 
           <div
@@ -2966,14 +3060,16 @@ function ClienteVisitaCard({
             {cliente.direccion}
           </div>
 
-          {noVendido && visita?.notas && (
-            <div
-              className="text-xs font-semibold mt-1"
-              style={{ color: C.warning }}
-            >
-              {visita.notas}
-            </div>
-          )}
+          {noVendido &&
+  visita?.notas &&
+  !volverMasTarde && (
+    <div
+      className="text-xs font-semibold mt-1"
+      style={{ color: C.warning }}
+    >
+      {visita.notas}
+    </div>
+  )}
 
           <div className="flex flex-wrap gap-1 mt-1">
             {totalEnvasesPrestados(
@@ -3020,13 +3116,15 @@ function ClienteVisitaCard({
           </div>
 
           {(hecho || noVendido) && (
-            <div
-              className="text-[10px] mt-1.5"
-              style={{ color: C.mutedLight }}
-            >
-              Tocar para editar la visita de hoy
-            </div>
-          )}
+  <div
+    className="text-[10px] mt-1.5"
+    style={{ color: C.mutedLight }}
+  >
+    {volverMasTarde
+      ? "Tocar para registrar el segundo intento"
+      : "Tocar para editar la visita de hoy"}
+  </div>
+)}
         </div>
 
         <div
@@ -3065,6 +3163,14 @@ function ClienteVisitaCard({
         </div>
       </div>
     </Card>
+  );
+}
+
+function esVolverMasTarde(visita) {
+  return (
+    visita &&
+    !visita.vendio &&
+    (visita.notas || "").trim() === "Volver más tarde"
   );
 }
 
