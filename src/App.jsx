@@ -1220,10 +1220,12 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
       nombre: "", direccion: "", telefono: "", notas: "",
       diasVisita: [], repartidorId: repartidores[0]?.id || "",
       envasesPermanentes: envasesVacio(), envasesExtra: envasesVacio(),
-      maquinaFrioCalor: false, orden: "", activo: true,
+      maquinaFrioCalor: false, deudaAcumulada: 0, orden: "", activo: true,
     };
   });
   const [error, setError] = useState("");
+  const [mostrarSaldoPendiente, setMostrarSaldoPendiente] =
+  useState(() => Number(initial?.deudaAcumulada || 0) > 0);
     const [extrasEditadosManualmente, setExtrasEditadosManualmente] =
     useState(false);
 
@@ -1268,6 +1270,123 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
           <button type="button" onClick={() => setF({ ...f, maquinaFrioCalor: false })} className="flex-1 py-2 rounded-xl font-bold text-sm" style={{ background: !f.maquinaFrioCalor ? C.primary : C.bg, color: !f.maquinaFrioCalor ? "#fff" : C.muted }}>No</button>
         </div>
       </Field>
+
+{isAdmin && (
+  <div className="mb-3">
+    <button
+      type="button"
+      onClick={() =>
+        setMostrarSaldoPendiente(!mostrarSaldoPendiente)
+      }
+      className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
+      style={{
+        background:
+          Number(f.deudaAcumulada || 0) > 0
+            ? C.dangerBg
+            : C.surface,
+        border: `1px solid ${
+          Number(f.deudaAcumulada || 0) > 0
+            ? C.danger
+            : C.border
+        }`,
+      }}
+    >
+      <div className="text-left">
+        <div
+          className="text-xs font-bold"
+          style={{
+            color:
+              Number(f.deudaAcumulada || 0) > 0
+                ? C.danger
+                : C.ink,
+          }}
+        >
+          Saldo pendiente
+        </div>
+
+        <div
+          className="text-[10px]"
+          style={{ color: C.muted }}
+        >
+          {Number(f.deudaAcumulada || 0) > 0
+            ? formatMoney(f.deudaAcumulada)
+            : "Sin deuda registrada"}
+        </div>
+      </div>
+
+      <ChevronRight
+        size={17}
+        color={
+          Number(f.deudaAcumulada || 0) > 0
+            ? C.danger
+            : C.muted
+        }
+        style={{
+          transform: mostrarSaldoPendiente
+            ? "rotate(90deg)"
+            : "rotate(0deg)",
+          transition: "transform 0.2s",
+        }}
+      />
+    </button>
+
+    {mostrarSaldoPendiente && (
+      <Card
+        className="mt-1"
+        style={{
+          background: C.dangerBg,
+          border: "none",
+          borderTopLeftRadius: 0,
+          borderTopRightRadius: 0,
+        }}
+      >
+        <Field
+          label="Saldo pendiente actual"
+          hint="Usá este campo para cargar una deuda anterior o corregir manualmente el saldo del cliente."
+        >
+          <Input
+            type="number"
+            inputMode="decimal"
+            min="0"
+            value={f.deudaAcumulada || ""}
+            onChange={(e) =>
+              setF({
+                ...f,
+                deudaAcumulada: Math.max(
+                  0,
+                  Number(e.target.value) || 0
+                ),
+              })
+            }
+            placeholder="0"
+          />
+        </Field>
+
+        {Number(f.deudaAcumulada || 0) > 0 && (
+          <div
+            className="rounded-xl px-3 py-2"
+            style={{ background: "#fff" }}
+          >
+            <div
+              className="text-[10px] font-bold uppercase"
+              style={{ color: C.danger }}
+            >
+              Saldo que verá el repartidor
+            </div>
+
+            <div
+              className="font-mono font-extrabold text-lg"
+              style={{ color: C.danger }}
+            >
+              {formatMoney(f.deudaAcumulada)}
+            </div>
+          </div>
+        )}
+      </Card>
+    )}
+  </div>
+)}
+
       {isAdmin && (
         <>
           <Field label="Envases permanentes" hint="Stock fijo asignado al cliente. Solo el administrador puede modificarlo.">
@@ -1503,15 +1622,18 @@ function guardarCliente(f) {
     }
 
     const actualizado = {
-      ...actual,
-      ...datosCliente,
+  ...actual,
+  ...datosCliente,
 
-      envasesPermanentes:
-        permanentesNuevos,
+  deudaAcumulada:
+    Math.max(0, Number(f.deudaAcumulada) || 0),
 
-      envasesExtra:
-        extrasNuevos,
-    };
+  envasesPermanentes:
+    permanentesNuevos,
+
+  envasesExtra:
+    extrasNuevos,
+};
 
     delete actualizado.envasesPrestados;
 
@@ -1521,24 +1643,25 @@ function guardarCliente(f) {
     // CLIENTE NUEVO
     // ==========================================
     const nuevo = {
-      ...datosCliente,
+  ...datosCliente,
 
-      id: uid(),
+  id: uid(),
 
-      deudaAcumulada: 0,
+  deudaAcumulada:
+    Math.max(0, Number(f.deudaAcumulada) || 0),
 
-      envasesPermanentes: {
-        ...envasesVacio(),
-        ...(f.envasesPermanentes || {}),
-      },
+  envasesPermanentes: {
+    ...envasesVacio(),
+    ...(f.envasesPermanentes || {}),
+  },
 
-      envasesExtra: {
-        ...envasesVacio(),
-        ...(f.envasesExtra || {}),
-      },
+  envasesExtra: {
+    ...envasesVacio(),
+    ...(f.envasesExtra || {}),
+  },
 
-      creadoEl: hoyISO(),
-    };
+  creadoEl: hoyISO(),
+};
 
     delete nuevo.envasesPrestados;
 
@@ -1945,9 +2068,31 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
       <Card className="mb-4">
         <div className="font-extrabold text-base">{cliente.nombre}</div>
         <div className="text-xs" style={{ color: C.muted }}>{cliente.direccion}</div>
+        {cliente.deudaAcumulada > 0 && (
+          <div
+            className="rounded-xl px-3 py-2 mt-2"
+            style={{
+              background: C.dangerBg,
+              border: `1px solid ${C.danger}`,
+            }}
+          >
+            <div
+              className="text-[10px] font-extrabold uppercase tracking-wide"
+              style={{ color: C.danger }}
+            >
+              Saldo pendiente
+            </div>
+
+            <div
+              className="font-mono font-extrabold text-base"
+              style={{ color: C.danger }}
+            >
+              {formatMoney(cliente.deudaAcumulada)}
+            </div>
+          </div>
+        )}
         <div className="flex flex-wrap gap-1.5 mt-2">
           {cliente.diasVisita.map((d) => <Badge key={d} tone="accent">{d.slice(0, 3)}</Badge>)}
-          {cliente.deudaAcumulada > 0 && <Badge tone="danger">Debe {formatMoney(cliente.deudaAcumulada)}</Badge>}
           {totalEnvasesPrestados(envasesPermanentesDe(cliente)) > 0 && <Badge tone="accent">Permanentes: {textoEnvasesPrestados(envasesPermanentesDe(cliente))}</Badge>}
           {totalEnvasesPrestados(envasesExtraDe(cliente)) > 0 && <Badge tone="warning">Extra: {textoEnvasesPrestados(envasesExtraDe(cliente))}</Badge>}
           {cliente.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
@@ -2893,7 +3038,8 @@ function RepartidorClientes({ db, mutate, repartidor }) {
         ...f,
         id: uid(),
         repartidorId: repartidor.id,
-        deudaAcumulada: 0,
+        deudaAcumulada:
+  Math.max(0, Number(f.deudaAcumulada) || 0),
         envasesPermanentes: envasesVacio(),
         envasesExtra: envasesVacio(),
         creadoEl: hoyISO(),
@@ -2928,6 +3074,28 @@ function RepartidorClientes({ db, mutate, repartidor }) {
             <Card key={c.id} onClick={() => setSheet(c)}>
               <div className="font-bold text-sm">{c.nombre}</div>
               <div className="text-xs" style={{ color: C.muted }}>{c.direccion}</div>
+              {c.deudaAcumulada > 0 && (
+                <div
+                  className="rounded-xl px-3 py-2 mt-2"
+                  style={{
+                    background: C.dangerBg,
+                    border: `1px solid ${C.danger}`,
+                  }}
+                >
+                  <div
+                    className="text-[10px] font-extrabold uppercase tracking-wide"
+                    style={{ color: C.danger }}
+                  >
+                    Saldo pendiente
+                  </div>
+                  <div
+                    className="font-mono font-extrabold text-base"
+                    style={{ color: C.danger }}
+                  >
+                    {formatMoney(c.deudaAcumulada)}
+                  </div>
+                </div>
+              )}
               <div className="flex flex-wrap gap-1 mt-1.5">
                 {c.diasVisita.map((d) => <Badge key={d} tone="accent">{d.slice(0, 3)}</Badge>)}
                 {totalEnvasesPrestados(envasesPermanentesDe(c)) > 0 && <Badge tone="accent">Permanentes: {textoEnvasesPrestados(envasesPermanentesDe(c))}</Badge>}
@@ -3427,6 +3595,30 @@ function ClienteVisitaCard({
             {cliente.direccion}
           </div>
 
+          {cliente.deudaAcumulada > 0 && (
+            <div
+              className="rounded-xl px-3 py-2 mt-2"
+              style={{
+                background: C.dangerBg,
+                border: `1px solid ${C.danger}`,
+              }}
+            >
+              <div
+                className="text-[10px] font-extrabold uppercase tracking-wide"
+                style={{ color: C.danger }}
+              >
+                Saldo pendiente
+              </div>
+
+              <div
+                className="font-mono font-extrabold text-base"
+                style={{ color: C.danger }}
+              >
+                {formatMoney(cliente.deudaAcumulada)}
+              </div>
+            </div>
+          )}
+
           {pendienteAnterior && pendienteDesde && (
             <div
               className="text-xs font-semibold mt-1"
@@ -3454,12 +3646,8 @@ function ClienteVisitaCard({
             )}
 
             {totalEnvasesPrestados(extras) > 0 && (
-              <Badge tone="warning">Extra: {textoEnvasesPrestados(extras)}</Badge>
-            )}
-
-            {cliente.deudaAcumulada > 0 && (
-              <Badge tone="danger">
-                Debe {formatMoney(cliente.deudaAcumulada)}
+              <Badge tone="warning">
+                Extra: {textoEnvasesPrestados(extras)}
               </Badge>
             )}
 
@@ -3972,8 +4160,7 @@ useEffect(() => {
               className="text-xs font-bold"
               style={{ color: C.danger }}
             >
-              Debe{" "}
-              {formatMoney(cliente.deudaAcumulada)} de antes
+              Saldo pendiente: {formatMoney(cliente.deudaAcumulada)}
             </div>
 
             <button
