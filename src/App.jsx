@@ -37,18 +37,64 @@ const C = {
 const DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
 const DIAS_JS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
 const PRODUCTOS = [
-  { key: "b20", label: "Bidón 20L", corto: "20L", retornable: true },
-  { key: "b12", label: "Bidón 12L", corto: "12L", retornable: true },
-  { key: "sifon", label: "Sifón", corto: "Sifón", retornable: true },
-  { key: "jugo", label: "Jugo", corto: "Jugo", retornable: false },
+  {
+    key: "b20",
+    label: "Bidón 20L",
+    corto: "20L",
+    retornable: true,
+  },
+  {
+    key: "b12",
+    label: "Bidón 12L",
+    corto: "12L",
+    retornable: true,
+  },
+  {
+    key: "sifon",
+    label: "Sifón",
+    corto: "Sifón",
+    retornable: true,
+  },
+  {
+    key: "jugo",
+    label: "Jugo",
+    corto: "Jugo",
+    retornable: false,
+  },
+  {
+    key: "jugo5",
+    label: "Jugo 5L",
+    corto: "Jugo 5L",
+    retornable: false,
+  },
+  {
+    key: "dispenserNatural",
+    label: "Dispenser natural",
+    corto: "Dispenser",
+    retornable: false,
+  },
 ];
 const PRODUCTOS_RETORNABLES = PRODUCTOS.filter((p) => p.retornable);
 const DEFAULT_CONFIG = {
   adminPin: "",
   repartidores: [],
-  precios: { b20: 0, b12: 0, sifon: 0, jugo: 0 },
+
+  precios: {
+    b20: 0,
+    b12: 0,
+    sifon: 0,
+    jugo: 0,
+    jugo5: 0,
+    dispenserNatural: 0,
+  },
+
   stockActivo: false,
-  stockTotal: { b20: 0, b12: 0, sifon: 0 },
+
+  stockTotal: {
+    b20: 0,
+    b12: 0,
+    sifon: 0,
+  },
 };
 
 /* ============================================================
@@ -2409,10 +2455,20 @@ function AdminAjustes({ db, mutate }) {
   const [pinMsg, setPinMsg] = useState("");
 
   function guardarPrecios() {
-    const next = clone(db);
-    next.config.precios = { b20: Number(precios.b20) || 0, b12: Number(precios.b12) || 0, sifon: Number(precios.sifon) || 0, jugo: Number(precios.jugo) || 0 };
-    mutate(next);
-  }
+  const next = clone(db);
+
+  next.config.precios = {
+    b20: Number(precios.b20) || 0,
+    b12: Number(precios.b12) || 0,
+    sifon: Number(precios.sifon) || 0,
+    jugo: Number(precios.jugo) || 0,
+    jugo5: Number(precios.jugo5) || 0,
+    dispenserNatural:
+      Number(precios.dispenserNatural) || 0,
+  };
+
+  mutate(next);
+}
 
   function agregarRepartidor() {
     if (!nuevoRep.trim()) return;
