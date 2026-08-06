@@ -5,7 +5,7 @@ import {
   HandCoins, AlertCircle, Search, Edit2, Trash2,
   ArrowLeft, Lock, ClipboardList, CheckCircle2, Circle, BarChart3,
   UserCog, Phone, MapPin, Save, Minus, Settings2,
-  Home as HomeIcon, WifiOff, Download, Boxes
+  Home as HomeIcon, WifiOff, Download, Boxes, CalendarDays
 } from "lucide-react";
 import {
   collection, doc, onSnapshot, setDoc, deleteDoc, getDoc, getDocs, increment
@@ -1091,42 +1091,299 @@ function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo, offline 
 }
 
 /* ---------- Dashboard ---------- */
-function AdminDashboard({ db }) {
-  const [rango, setRango] = useState("hoy");
+function CalendarioAdmin({ fechaSeleccionada, onSeleccionar, visitas, gastos }) {
+  const [ySel, mSel, dSel] = fechaSeleccionada.split("-").map(Number);
+  const [mesVisible, setMesVisible] = useState(
+    () => new Date(ySel, mSel - 1, 1)
+  );
+
+  useEffect(() => {
+    setMesVisible(new Date(ySel, mSel - 1, 1));
+  }, [ySel, mSel]);
+
+  const actividadPorFecha = useMemo(() => {
+    const mapa = new Map();
+
+    (visitas || []).forEach((v) => {
+      if (!v.fecha) return;
+      const actual = mapa.get(v.fecha) || { visitas: 0, gastos: 0 };
+      actual.visitas += 1;
+      mapa.set(v.fecha, actual);
+    });
+
+    (gastos || []).forEach((g) => {
+      if (!g.fecha) return;
+      const actual = mapa.get(g.fecha) || { visitas: 0, gastos: 0 };
+      actual.gastos += 1;
+      mapa.set(g.fecha, actual);
+    });
+
+    return mapa;
+  }, [visitas, gastos]);
+
+  const anio = mesVisible.getFullYear();
+  const mes = mesVisible.getMonth();
+  const nombresMeses = [
+    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+  ];
+
+  const primerDia = new Date(anio, mes, 1);
+  // Convertimos domingo=0 a una grilla que empieza en lunes.
+  const espaciosIniciales = (primerDia.getDay() + 6) % 7;
+  const cantidadDias = new Date(anio, mes + 1, 0).getDate();
   const hoy = hoyISO();
 
-  const visitasFiltradas = useMemo(() => {
-    return db.visitas.filter((v) => {
-      if (rango === "hoy") return v.fecha === hoy;
-      if (rango === "semana") {
-        const d = new Date(v.fecha);
-        const now = new Date(hoy);
-        const diff = (now - d) / 86400000;
-        return diff >= 0 && diff < 7;
-      }
-      if (rango === "mes") return v.fecha.slice(0, 7) === hoy.slice(0, 7);
-      return true;
-    });
-  }, [db.visitas, rango, hoy]);
+  function isoDelDia(dia) {
+    return (
+      anio +
+      "-" +
+      String(mes + 1).padStart(2, "0") +
+      "-" +
+      String(dia).padStart(2, "0")
+    );
+  }
 
-  const efectivo = visitasFiltradas.reduce((s, v) => s + (v.pagos?.efectivo || 0), 0);
-  const mp = visitasFiltradas.reduce((s, v) => s + (v.pagos?.mercadopago || 0), 0);
-  const deudaGenerada = visitasFiltradas.reduce((s, v) => s + (v.deudaGenerada || 0), 0);
-  const facturado = visitasFiltradas.reduce((s, v) => s + (v.total || 0), 0);
+  function moverMes(delta) {
+    setMesVisible(new Date(anio, mes + delta, 1));
+  }
+
+  const celdas = [
+    ...Array(espaciosIniciales).fill(null),
+    ...Array.from({ length: cantidadDias }, (_, i) => i + 1),
+  ];
+
+  while (celdas.length % 7 !== 0) celdas.push(null);
+
+  return (
+    <Card className="mb-4">
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <div>
+          <div className="text-xs font-extrabold uppercase tracking-wide" style={{ color: C.muted }}>
+            Calendario
+          </div>
+          <div className="text-sm font-bold mt-0.5">
+            {diaSemanaDeFecha(fechaSeleccionada)} {fechaLegible(fechaSeleccionada)}
+          </div>
+        </div>
+
+        {fechaSeleccionada !== hoy && (
+          <Btn size="sm" variant="subtle" onClick={() => onSeleccionar(hoy)}>
+            Hoy
+          </Btn>
+        )}
+      </div>
+
+      <div className="flex items-center justify-between mb-3">
+        <button
+          type="button"
+          onClick={() => moverMes(-1)}
+          className="w-9 h-9 rounded-xl font-extrabold text-lg"
+          style={{ background: C.bg, color: C.primary, border: `1px solid ${C.border}` }}
+          aria-label="Mes anterior"
+        >
+          ‹
+        </button>
+
+        <div className="font-extrabold text-sm">
+          {nombresMeses[mes]} {anio}
+        </div>
+
+        <button
+          type="button"
+          onClick={() => moverMes(1)}
+          className="w-9 h-9 rounded-xl font-extrabold text-lg"
+          style={{ background: C.bg, color: C.primary, border: `1px solid ${C.border}` }}
+          aria-label="Mes siguiente"
+        >
+          ›
+        </button>
+      </div>
+
+      <div className="grid grid-cols-7 gap-1 mb-1">
+        {["Lu", "Ma", "Mi", "Ju", "Vi", "Sá", "Do"].map((d) => (
+          <div
+            key={d}
+            className="text-[10px] font-extrabold text-center py-1"
+            style={{ color: C.mutedLight }}
+          >
+            {d}
+          </div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-7 gap-1">
+        {celdas.map((dia, idx) => {
+          if (!dia) return <div key={`vacio-${idx}`} className="h-10" />;
+
+          const iso = isoDelDia(dia);
+          const seleccionado = iso === fechaSeleccionada;
+          const esHoy = iso === hoy;
+          const actividad = actividadPorFecha.get(iso);
+          const tieneActividad = !!actividad && (actividad.visitas > 0 || actividad.gastos > 0);
+
+          return (
+            <button
+              key={iso}
+              type="button"
+              onClick={() => onSeleccionar(iso)}
+              className="h-10 rounded-xl flex flex-col items-center justify-center relative font-bold text-xs"
+              style={{
+                background: seleccionado ? C.primary : C.bg,
+                color: seleccionado ? "#fff" : C.ink,
+                border: `1px solid ${
+                  seleccionado ? C.primary : esHoy ? C.accent : C.border
+                }`,
+              }}
+            >
+              <span>{dia}</span>
+
+              {tieneActividad && (
+                <span
+                  className="w-1.5 h-1.5 rounded-full absolute bottom-1"
+                  style={{ background: seleccionado ? "#fff" : C.accent }}
+                />
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="text-[10px] mt-2" style={{ color: C.mutedLight }}>
+        Los días con un punto tienen visitas o gastos registrados.
+      </div>
+    </Card>
+  );
+}
+
+function AdminDashboard({ db }) {
+  const hoy = hoyISO();
+  const [rango, setRango] = useState("hoy"); // hoy | semana | mes | todo | dia
+  const [fechaSeleccionada, setFechaSeleccionada] = useState(hoy);
+  const [mostrarCalendario, setMostrarCalendario] = useState(false);
+
+  function fechaLocal(iso) {
+    try {
+      const [y, m, d] = iso.split("-").map(Number);
+      return new Date(y, m - 1, d);
+    } catch {
+      return new Date(0);
+    }
+  }
+
+  function perteneceAlRango(fecha) {
+    if (!fecha) return false;
+
+    if (rango === "dia") return fecha === fechaSeleccionada;
+    if (rango === "hoy") return fecha === hoy;
+
+    if (rango === "semana") {
+      const fechaDato = fechaLocal(fecha);
+      const fechaHoy = fechaLocal(hoy);
+      const diferenciaDias = (fechaHoy - fechaDato) / 86400000;
+      return diferenciaDias >= 0 && diferenciaDias < 7;
+    }
+
+    if (rango === "mes") {
+      return fecha.slice(0, 7) === hoy.slice(0, 7);
+    }
+
+    return true;
+  }
+
+  const visitasFiltradas = useMemo(
+    () =>
+      db.visitas
+        .filter((v) => perteneceAlRango(v.fecha))
+        .slice()
+        .sort(
+          (a, b) =>
+            (b.fecha || "").localeCompare(a.fecha || "") ||
+            (b.timestamp || 0) - (a.timestamp || 0)
+        ),
+    [db.visitas, rango, fechaSeleccionada, hoy]
+  );
+
+  const gastosFiltrados = useMemo(
+    () =>
+      db.gastos
+        .filter((g) => perteneceAlRango(g.fecha))
+        .slice()
+        .sort(
+          (a, b) =>
+            (b.fecha || "").localeCompare(a.fecha || "") ||
+            (b.timestamp || 0) - (a.timestamp || 0)
+        ),
+    [db.gastos, rango, fechaSeleccionada, hoy]
+  );
+
+  const efectivo = visitasFiltradas.reduce(
+    (s, v) => s + (Number(v.pagos?.efectivo) || 0),
+    0
+  );
+  const mp = visitasFiltradas.reduce(
+    (s, v) => s + (Number(v.pagos?.mercadopago) || 0),
+    0
+  );
+  const fiado = visitasFiltradas.reduce(
+    (s, v) => s + (Number(v.deudaGenerada) || 0),
+    0
+  );
+  const facturado = visitasFiltradas.reduce(
+    (s, v) => s + (Number(v.total) || 0),
+    0
+  );
+  const deudaCobrada = visitasFiltradas.reduce(
+    (s, v) => s + (Number(v.deudaCobrada) || 0),
+    0
+  );
+  const ajustesDeuda = visitasFiltradas.reduce(
+    (s, v) => s + (Number(v.ajusteDeudaManual) || 0),
+    0
+  );
+  const totalGastos = gastosFiltrados.reduce(
+    (s, g) => s + (Number(g.monto) || 0),
+    0
+  );
+
+  // Fórmula pedida:
+  // Efectivo + Mercado Pago + Fiado generado - Gastos.
+  const balance = efectivo + mp + fiado - totalGastos;
   const movimientosExtras = resumenExtrasVisitas(visitasFiltradas);
 
-  const gastosFiltrados = db.gastos.filter((g) => {
-    if (rango === "hoy") return g.fecha === hoy;
-    if (rango === "semana") { const d = new Date(g.fecha); const now = new Date(hoy); const diff = (now - d) / 86400000; return diff >= 0 && diff < 7; }
-    if (rango === "mes") return g.fecha.slice(0, 7) === hoy.slice(0, 7);
-    return true;
-  });
-  const totalGastos = gastosFiltrados.reduce((s, g) => s + g.monto, 0);
-
-  const deudaTotalClientes = db.clientes.reduce((s, c) => s + (c.deudaAcumulada || 0), 0);
-  const envasesEnCalle = db.clientes.reduce((s, c) => s + totalEnvasesCliente(c), 0);
+  const deudaTotalClientes = db.clientes.reduce(
+    (s, c) => s + (Number(c.deudaAcumulada) || 0),
+    0
+  );
+  const envasesEnCalle = db.clientes.reduce(
+    (s, c) => s + totalEnvasesCliente(c),
+    0
+  );
 
   const preciosSinConfigurar = Object.values(db.config.precios).some((p) => !p);
+  const esHoy = rango === "hoy";
+
+  const etiquetaRango =
+    rango === "hoy"
+      ? "Hoy"
+      : rango === "semana"
+      ? "Últimos 7 días"
+      : rango === "mes"
+      ? "Este mes"
+      : rango === "todo"
+      ? "Todo el historial"
+      : `${diaSemanaDeFecha(fechaSeleccionada)} ${fechaLegible(fechaSeleccionada)}`;
+
+  function elegirRango(nuevoRango) {
+    setRango(nuevoRango);
+    if (nuevoRango === "hoy") setFechaSeleccionada(hoy);
+  }
+
+  function elegirDia(fecha) {
+    setFechaSeleccionada(fecha);
+    setRango(fecha === hoy ? "hoy" : "dia");
+    setMostrarCalendario(false);
+  }
 
   return (
     <div>
@@ -1138,30 +1395,182 @@ function AdminDashboard({ db }) {
         </Card>
       )}
 
-      <div className="flex gap-2 mb-4">
-        {[["hoy", "Hoy"], ["semana", "Semana"], ["mes", "Mes"], ["todo", "Todo"]].map(([k, l]) => (
-          <button
-            key={k}
-            onClick={() => setRango(k)}
-            className="px-3 py-1.5 rounded-lg text-xs font-bold"
-            style={{ background: rango === k ? C.primary : C.surface, color: rango === k ? "#fff" : C.muted, border: `1px solid ${rango === k ? C.primary : C.border}` }}
-          >
-            {l}
-          </button>
-        ))}
+      {/* FILTROS RÁPIDOS */}
+      <div className="flex gap-2 mb-3 overflow-x-auto">
+        {[
+          ["hoy", "Hoy"],
+          ["semana", "Semana"],
+          ["mes", "Mes"],
+          ["todo", "Todo"],
+        ].map(([k, label]) => {
+          const activo = rango === k;
+          return (
+            <button
+              key={k}
+              type="button"
+              onClick={() => elegirRango(k)}
+              className="px-3 py-1.5 rounded-lg text-xs font-bold flex-shrink-0"
+              style={{
+                background: activo ? C.primary : C.surface,
+                color: activo ? "#fff" : C.muted,
+                border: `1px solid ${activo ? C.primary : C.border}`,
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* CALENDARIO DESPLEGABLE */}
+      <div className="mb-4">
+        <button
+          type="button"
+          onClick={() => setMostrarCalendario(!mostrarCalendario)}
+          className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
+          style={{
+            background: rango === "dia" ? C.accentSoft : C.surface,
+            border: `1px solid ${rango === "dia" ? C.accent : C.border}`,
+          }}
+        >
+          <div className="flex items-center gap-2">
+            <div
+              className="w-9 h-9 rounded-xl flex items-center justify-center"
+              style={{ background: rango === "dia" ? C.primary : C.bg }}
+            >
+              <CalendarDays
+                size={17}
+                color={rango === "dia" ? "#fff" : C.primary}
+              />
+            </div>
+
+            <div className="text-left">
+              <div className="text-xs font-bold" style={{ color: C.ink }}>
+                {rango === "dia" ? "Día seleccionado" : "Elegir día específico"}
+              </div>
+              <div className="text-[10px]" style={{ color: C.muted }}>
+                {rango === "dia"
+                  ? `${diaSemanaDeFecha(fechaSeleccionada)} ${fechaLegible(fechaSeleccionada)}`
+                  : "Abrir calendario"}
+              </div>
+            </div>
+          </div>
+
+          <ChevronRight
+            size={18}
+            color={C.muted}
+            style={{
+              transform: mostrarCalendario ? "rotate(90deg)" : "rotate(0deg)",
+              transition: "transform 0.2s",
+            }}
+          />
+        </button>
+
+        {mostrarCalendario && (
+          <div className="mt-2">
+            <CalendarioAdmin
+              fechaSeleccionada={fechaSeleccionada}
+              onSeleccionar={elegirDia}
+              visitas={db.visitas}
+              gastos={db.gastos}
+            />
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <div className="text-xs font-extrabold uppercase tracking-wide" style={{ color: C.muted }}>
+            Resumen
+          </div>
+          <div className="text-sm font-bold">{etiquetaRango}</div>
+        </div>
+        {esHoy && <Badge tone="accent">Hoy</Badge>}
+        {rango === "dia" && <Badge tone="accent">Día específico</Badge>}
       </div>
 
       <div className="flex flex-wrap gap-2 mb-4">
         <Meter label="Facturado" value={formatMoney(facturado)} />
         <Meter label="Efectivo" value={formatMoney(efectivo)} />
         <Meter label="Mercado Pago" value={formatMoney(mp)} />
-        <Meter label="Fiado (nuevo)" value={formatMoney(deudaGenerada)} />
+        <Meter label="Fiado" value={formatMoney(fiado)} />
       </div>
+
+      <Card
+        className="mb-4"
+        style={{
+          background: balance >= 0 ? C.successBg : C.dangerBg,
+          border: "none",
+        }}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div
+              className="text-xs font-extrabold uppercase tracking-wide"
+              style={{ color: balance >= 0 ? C.success : C.danger }}
+            >
+              Balance
+            </div>
+            <div className="text-[11px] mt-1" style={{ color: C.muted }}>
+              Efectivo + Mercado Pago + Fiado - Gastos
+            </div>
+          </div>
+
+          <div
+            className="font-mono font-extrabold text-xl text-right"
+            style={{ color: balance >= 0 ? C.success : C.danger }}
+          >
+            {formatMoney(balance)}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 mt-3">
+          <div className="rounded-xl p-2" style={{ background: C.surface }}>
+            <div className="text-[10px] font-bold uppercase" style={{ color: C.muted }}>
+              Gastos
+            </div>
+            <div className="font-mono font-bold text-sm">{formatMoney(totalGastos)}</div>
+          </div>
+          <div className="rounded-xl p-2" style={{ background: C.surface }}>
+            <div className="text-[10px] font-bold uppercase" style={{ color: C.muted }}>
+              Cobro deuda anterior
+            </div>
+            <div className="font-mono font-bold text-sm">{formatMoney(deudaCobrada)}</div>
+          </div>
+        </div>
+      </Card>
+
+      {ajustesDeuda !== 0 && (
+        <Card
+          className="mb-4"
+          style={{
+            background: ajustesDeuda > 0 ? C.dangerBg : C.successBg,
+            border: "none",
+          }}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-bold" style={{ color: C.muted }}>
+                Ajustes manuales de deuda
+              </div>
+              <div className="text-[10px] mt-0.5" style={{ color: C.mutedLight }}>
+                No forman parte del fiado generado por ventas.
+              </div>
+            </div>
+            <div
+              className="font-mono font-extrabold"
+              style={{ color: ajustesDeuda > 0 ? C.danger : C.success }}
+            >
+              {ajustesDeuda > 0 ? "+" : ""}{formatMoney(ajustesDeuda)}
+            </div>
+          </div>
+        </Card>
+      )}
 
       <Card className="mb-4">
         <div className="flex items-center justify-between mb-2">
           <div className="text-xs font-bold uppercase tracking-wide" style={{ color: C.muted }}>
-            Movimiento de envases extra ({rango})
+            Movimiento de envases · {etiquetaRango}
           </div>
           <Boxes size={16} color={C.primary} />
         </div>
@@ -1178,7 +1587,7 @@ function AdminDashboard({ db }) {
             </thead>
             <tbody>
               {PRODUCTOS_RETORNABLES.map((p) => {
-                const balance = movimientosExtras.balance[p.key] || 0;
+                const balanceEnvases = movimientosExtras.balance[p.key] || 0;
                 return (
                   <tr key={p.key} style={{ borderTop: `1px solid ${C.border}` }}>
                     <td className="py-2 font-semibold">{p.corto}</td>
@@ -1192,14 +1601,14 @@ function AdminDashboard({ db }) {
                       className="text-center font-bold"
                       style={{
                         color:
-                          balance > 0
+                          balanceEnvases > 0
                             ? C.warning
-                            : balance < 0
+                            : balanceEnvases < 0
                             ? C.success
                             : C.muted,
                       }}
                     >
-                      {balance > 0 ? `+${balance}` : balance}
+                      {balanceEnvases > 0 ? `+${balanceEnvases}` : balanceEnvases}
                     </td>
                   </tr>
                 );
@@ -1209,27 +1618,44 @@ function AdminDashboard({ db }) {
         </div>
       </Card>
 
-      <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Por repartidor ({rango})</div>
+      <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
+        Por repartidor · {etiquetaRango}
+      </div>
+
       {db.config.repartidores.length === 0 ? (
-        <div className="text-xs mb-4" style={{ color: C.mutedLight }}>Agregá repartidores en Ajustes para ver el desglose.</div>
+        <div className="text-xs mb-4" style={{ color: C.mutedLight }}>
+          Agregá repartidores en Ajustes para ver el desglose.
+        </div>
       ) : (
         <div className="flex flex-col gap-2 mb-4">
           {db.config.repartidores.map((r) => {
             const vr = visitasFiltradas.filter((v) => v.repartidorId === r.id);
-            const fact = vr.reduce((s, v) => s + (v.total || 0), 0);
-            const ef = vr.reduce((s, v) => s + (v.pagos?.efectivo || 0), 0);
-            const mpr = vr.reduce((s, v) => s + (v.pagos?.mercadopago || 0), 0);
-            const fiado = vr.reduce((s, v) => s + (v.deudaGenerada || 0), 0);
+            const fact = vr.reduce((s, v) => s + (Number(v.total) || 0), 0);
+            const ef = vr.reduce((s, v) => s + (Number(v.pagos?.efectivo) || 0), 0);
+            const mpr = vr.reduce((s, v) => s + (Number(v.pagos?.mercadopago) || 0), 0);
+            const fiadoRep = vr.reduce((s, v) => s + (Number(v.deudaGenerada) || 0), 0);
+            const actividad = ef + mpr + fiadoRep;
+
             return (
               <Card key={r.id}>
                 <div className="flex items-center justify-between mb-1.5">
-                  <div className="font-bold text-sm flex items-center gap-1.5"><Truck size={14} color={C.primary} />{r.nombre}</div>
-                  <div className="font-mono font-extrabold text-sm">{formatMoney(fact)}</div>
+                  <div className="font-bold text-sm flex items-center gap-1.5">
+                    <Truck size={14} color={C.primary} />
+                    {r.nombre}
+                  </div>
+                  <div className="font-mono font-extrabold text-sm">
+                    {formatMoney(actividad)}
+                  </div>
+                </div>
+                <div className="text-[10px] mb-1.5" style={{ color: C.mutedLight }}>
+                  Facturado {formatMoney(fact)} · {vr.length} visita{vr.length !== 1 ? "s" : ""}
                 </div>
                 <div className="flex gap-1.5 flex-wrap">
                   <Badge tone="success">Efectivo {formatMoney(ef)}</Badge>
                   <Badge tone="accent">MP {formatMoney(mpr)}</Badge>
-                  <Badge tone={fiado > 0 ? "danger" : "muted"}>Fió {formatMoney(fiado)}</Badge>
+                  <Badge tone={fiadoRep > 0 ? "danger" : "muted"}>
+                    Fiado {formatMoney(fiadoRep)}
+                  </Badge>
                 </div>
               </Card>
             );
@@ -1237,50 +1663,173 @@ function AdminDashboard({ db }) {
         </div>
       )}
 
+      <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
+        Visitas · {etiquetaRango} ({visitasFiltradas.length})
+      </div>
+
+      {visitasFiltradas.length === 0 ? (
+        <Card className="mb-4">
+          <div className="text-xs text-center" style={{ color: C.mutedLight }}>
+            No hay visitas registradas para este período.
+          </div>
+        </Card>
+      ) : (
+        <div className="flex flex-col gap-2 mb-4">
+          {visitasFiltradas.map((v) => {
+            const cliente = db.clientes.find((c) => c.id === v.clienteId);
+            const rep = db.config.repartidores.find((r) => r.id === v.repartidorId);
+            const productos = (v.items || [])
+              .filter((it) => (Number(it.cantidad) || 0) > 0)
+              .map((it) => {
+                const prod = PRODUCTOS.find((p) => p.key === it.tipo);
+                return `${it.cantidad}× ${prod?.corto || it.tipo}`;
+              })
+              .join(", ");
+
+            return (
+              <Card key={v.id}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-bold text-sm">
+                      {cliente?.nombre || v.clienteNombre || "Cliente eliminado"}
+                    </div>
+                    <div className="text-xs" style={{ color: C.muted }}>
+                      {rango === "dia" || rango === "hoy" ? "" : `${fechaLegible(v.fecha)} · `}
+                      {rep?.nombre || "—"}
+                    </div>
+                  </div>
+                  {v.vendio ? (
+                    <Badge tone="success">{formatMoney(v.total)}</Badge>
+                  ) : (
+                    <Badge tone="muted">No vendió</Badge>
+                  )}
+                </div>
+
+                {v.vendio && productos && (
+                  <div className="text-xs mt-1">{productos}</div>
+                )}
+
+                <div className="flex flex-wrap gap-1 mt-2">
+                  {(Number(v.pagos?.efectivo) || 0) > 0 && (
+                    <Badge tone="success">
+                      Efectivo {formatMoney(v.pagos.efectivo)}
+                    </Badge>
+                  )}
+                  {(Number(v.pagos?.mercadopago) || 0) > 0 && (
+                    <Badge tone="accent">
+                      MP {formatMoney(v.pagos.mercadopago)}
+                    </Badge>
+                  )}
+                  {(Number(v.deudaGenerada) || 0) > 0 && (
+                    <Badge tone="danger">
+                      Fiado {formatMoney(v.deudaGenerada)}
+                    </Badge>
+                  )}
+                </div>
+
+                {(Number(v.deudaCobrada) || 0) > 0 && (
+                  <div className="text-xs mt-1" style={{ color: C.success }}>
+                    Cobró deuda anterior: {formatMoney(v.deudaCobrada)}
+                  </div>
+                )}
+
+                {v.ajusteDeudaManual !== undefined && Number(v.ajusteDeudaManual) !== 0 && (
+                  <div
+                    className="text-xs mt-1"
+                    style={{ color: Number(v.ajusteDeudaManual) > 0 ? C.danger : C.success }}
+                  >
+                    Ajuste manual de saldo: {Number(v.ajusteDeudaManual) > 0 ? "+" : ""}
+                    {formatMoney(v.ajusteDeudaManual)}
+                  </div>
+                )}
+
+                {textoExtrasPrestados(v) && (
+                  <div className="text-xs mt-1" style={{ color: C.warning }}>
+                    Prestó extra: {textoExtrasPrestados(v)}
+                  </div>
+                )}
+                {textoExtrasRetirados(v) && (
+                  <div className="text-xs mt-1" style={{ color: C.success }}>
+                    Retiró extra: {textoExtrasRetirados(v)}
+                  </div>
+                )}
+                {textoPermanentesRetirados(v) && (
+                  <div className="text-xs mt-1" style={{ color: C.success }}>
+                    Devolvió permanente: {textoPermanentesRetirados(v)}
+                  </div>
+                )}
+                {v.volverSabadoFecha && (
+                  <div className="text-xs mt-1" style={{ color: C.warning }}>
+                    Volver el sábado: {fechaLegible(v.volverSabadoFecha)}
+                  </div>
+                )}
+                {v.notas && (
+                  <div className="text-xs mt-1 italic" style={{ color: C.mutedLight }}>
+                    {v.notas}
+                  </div>
+                )}
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
+        Gastos · {etiquetaRango} ({gastosFiltrados.length})
+      </div>
+
+      {gastosFiltrados.length === 0 ? (
+        <Card className="mb-4">
+          <div className="text-xs text-center" style={{ color: C.mutedLight }}>
+            No hay gastos registrados para este período.
+          </div>
+        </Card>
+      ) : (
+        <div className="flex flex-col gap-2 mb-4">
+          {gastosFiltrados.map((g) => (
+            <Card key={g.id} className="flex items-center justify-between gap-3">
+              <div>
+                <div className="font-bold text-sm">{g.concepto}</div>
+                <div className="text-[10px]" style={{ color: C.mutedLight }}>
+                  {fechaLegible(g.fecha)}
+                </div>
+              </div>
+              <div className="font-mono font-extrabold" style={{ color: C.danger }}>
+                -{formatMoney(g.monto)}
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
+        Estado actual
+      </div>
       <div className="grid grid-cols-2 gap-3 mb-4">
         <Card>
-          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Deuda total clientes</div>
-          <div className="font-mono font-extrabold text-xl" style={{ color: deudaTotalClientes > 0 ? C.danger : C.ink }}>{formatMoney(deudaTotalClientes)}</div>
+          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>
+            Deuda total clientes
+          </div>
+          <div
+            className="font-mono font-extrabold text-xl"
+            style={{ color: deudaTotalClientes > 0 ? C.danger : C.ink }}
+          >
+            {formatMoney(deudaTotalClientes)}
+          </div>
+          <div className="text-[10px] mt-1" style={{ color: C.mutedLight }}>
+            Valor actual, no histórico.
+          </div>
         </Card>
         <Card>
-          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Envases en clientes</div>
+          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>
+            Envases en clientes
+          </div>
           <div className="font-mono font-extrabold text-xl">{envasesEnCalle}</div>
-        </Card>
-        <Card>
-          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Gastos ({rango})</div>
-          <div className="font-mono font-extrabold text-xl">{formatMoney(totalGastos)}</div>
-        </Card>
-        <Card>
-          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>Balance ({rango})</div>
-          <div className="font-mono font-extrabold text-xl" style={{ color: (efectivo + mp - totalGastos) >= 0 ? C.success : C.danger }}>
-            {formatMoney(efectivo + mp - totalGastos)}
+          <div className="text-[10px] mt-1" style={{ color: C.mutedLight }}>
+            Permanentes + extras actuales.
           </div>
         </Card>
       </div>
-
-      <div className="text-xs font-bold mb-2" style={{ color: C.muted }}>Visitas ({rango})</div>
-      {visitasFiltradas.length === 0 ? (
-        <div className="text-xs" style={{ color: C.mutedLight }}>Sin visitas registradas en este período.</div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {visitasFiltradas.slice().sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, 8).map((v) => {
-            const cliente = db.clientes.find((c) => c.id === v.clienteId);
-            const rep = db.config.repartidores.find((r) => r.id === v.repartidorId);
-            return (
-              <Card key={v.id}>
-                <div className="flex items-center justify-between">
-                  <div className="font-bold text-sm">{cliente?.nombre || v.clienteNombre || "Cliente eliminado"}</div>
-                  {v.vendio ? <Badge tone="success">{formatMoney(v.total)}</Badge> : <Badge tone="muted">No vendió</Badge>}
-                </div>
-                <div className="text-xs mt-0.5" style={{ color: C.muted }}>
-                  {fechaLegible(v.fecha)} · {rep?.nombre || "—"}
-                  {v.vendio && v.metodoPago && " · " + ({ efectivo: "Efectivo", mercadopago: "Mercado Pago", deuda: "Fiado" }[v.metodoPago] || "")}
-                </div>
-              </Card>
-            );
-          })}
-        </div>
-      )}
     </div>
   );
 }
@@ -2635,9 +3184,17 @@ function AdminGastos({ db, mutate }) {
   function guardar() {
     if (!concepto.trim() || !monto) return;
     const next = clone(db);
-    next.gastos.push({ id: uid(), concepto, monto: Number(monto), fecha: hoyISO(), timestamp: Date.now() });
+    next.gastos.push({
+      id: uid(),
+      concepto: concepto.trim(),
+      monto: Number(monto),
+      fecha: hoyISO(),
+      timestamp: Date.now(),
+    });
     mutate(next);
-    setConcepto(""); setMonto(""); setSheet(false);
+    setConcepto("");
+    setMonto("");
+    setSheet(false);
   }
 
   function borrar(g) {
@@ -2647,65 +3204,184 @@ function AdminGastos({ db, mutate }) {
     setConfirmDel(null);
   }
 
-  const total = db.gastos.reduce((s, g) => s + g.monto, 0);
+  const total = db.gastos.reduce((s, g) => s + (Number(g.monto) || 0), 0);
 
-  const gruposMes = {};
-  db.gastos.forEach((g) => {
-    const mes = g.fecha.slice(0, 7);
-    if (!gruposMes[mes]) gruposMes[mes] = [];
-    gruposMes[mes].push(g);
-  });
-  const meses = Object.keys(gruposMes).sort().reverse();
-  function nombreMesGasto(mesKey) {
-    const [y, m] = mesKey.split("-");
-    return `${NOMBRES_MES[Number(m) - 1]} ${y}`;
-  }
+  // Agrupamos por FECHA, no solamente por mes.
+  // Así se ve rápido cuánto se gastó cada día y qué gastos formaron ese total.
+  const gruposFecha = useMemo(() => {
+    const grupos = {};
+
+    db.gastos.forEach((g) => {
+      if (!g.fecha) return;
+      if (!grupos[g.fecha]) grupos[g.fecha] = [];
+      grupos[g.fecha].push(g);
+    });
+
+    return Object.entries(grupos)
+      .sort(([fechaA], [fechaB]) => fechaB.localeCompare(fechaA))
+      .map(([fecha, items]) => ({
+        fecha,
+        items: items
+          .slice()
+          .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)),
+        subtotal: items.reduce((s, g) => s + (Number(g.monto) || 0), 0),
+      }));
+  }, [db.gastos]);
 
   return (
     <div>
-      <Card style={{ background: C.primaryDark, border: "none" }} className="mb-3 flex items-center justify-between">
-        <div>
-          <div className="text-xs font-bold uppercase" style={{ color: C.accentSoft, opacity: 0.8 }}>Total gastado</div>
-          <div className="font-mono font-extrabold text-xl" style={{ color: "#fff" }}>{formatMoney(total)}</div>
+      <Card
+        style={{ background: C.primaryDark, border: "none" }}
+        className="mb-4"
+      >
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div
+              className="text-xs font-bold uppercase tracking-wide"
+              style={{ color: C.accentSoft, opacity: 0.8 }}
+            >
+              Total gastado
+            </div>
+            <div
+              className="font-mono font-extrabold text-2xl mt-0.5"
+              style={{ color: "#fff" }}
+            >
+              {formatMoney(total)}
+            </div>
+            <div className="text-[10px] mt-1" style={{ color: C.accentSoft, opacity: 0.7 }}>
+              {db.gastos.length} gasto{db.gastos.length !== 1 ? "s" : ""} registrado{db.gastos.length !== 1 ? "s" : ""}
+            </div>
+          </div>
+
+          <Btn variant="accent" icon={Plus} onClick={() => setSheet(true)}>
+            Gasto
+          </Btn>
         </div>
-        <Btn variant="accent" icon={Plus} onClick={() => setSheet(true)}>Gasto</Btn>
       </Card>
 
-      {meses.length === 0 ? (
-        <EmptyState icon={Receipt} title="Sin gastos cargados" text="Registrá combustible, mantenimiento u otros gastos del negocio." />
+      {gruposFecha.length === 0 ? (
+        <EmptyState
+          icon={Receipt}
+          title="Sin gastos cargados"
+          text="Registrá combustible, mantenimiento u otros gastos del negocio."
+        />
       ) : (
-        meses.map((mes) => {
-          const items = gruposMes[mes].slice().sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-          const subtotal = items.reduce((s, g) => s + g.monto, 0);
-          return (
-            <div key={mes} className="mb-4">
-              <div className="flex items-center justify-between mb-2">
-                <div className="text-xs font-extrabold uppercase tracking-wide" style={{ color: C.muted }}>{nombreMesGasto(mes)}</div>
-                <div className="font-mono text-xs font-bold">{formatMoney(subtotal)}</div>
-              </div>
-              <div className="flex flex-col gap-2">
-                {items.map((g) => (
-                  <Card key={g.id} className="flex items-center justify-between">
-                    <div>
-                      <div className="font-bold text-sm">{g.concepto}</div>
-                      <div className="text-xs" style={{ color: C.muted }}>{fechaLegible(g.fecha)}</div>
+        <div className="flex flex-col gap-4">
+          {gruposFecha.map(({ fecha, items, subtotal }) => {
+            const esHoy = fecha === hoyISO();
+            const numeroDia = fecha.split("-")[2];
+            const nombreDia = diaSemanaDeFecha(fecha);
+
+            return (
+              <div key={fecha}>
+                <div className="flex items-center justify-between gap-3 mb-2 px-1">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div
+                      className="w-10 h-10 rounded-xl flex flex-col items-center justify-center flex-shrink-0"
+                      style={{
+                        background: esHoy ? C.primary : C.accentSoft,
+                        color: esHoy ? "#fff" : C.primary,
+                      }}
+                    >
+                      <div className="text-[9px] font-extrabold uppercase leading-none">
+                        {nombreDia.slice(0, 3)}
+                      </div>
+                      <div className="text-sm font-extrabold leading-tight">
+                        {numeroDia}
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <div className="font-mono font-bold text-sm">{formatMoney(g.monto)}</div>
-                      <button onClick={() => setConfirmDel(g)} className="p-1 rounded-lg active:bg-black/5"><Trash2 size={14} color={C.danger} /></button>
+
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <div className="font-extrabold text-sm">{nombreDia}</div>
+                        {esHoy && <Badge tone="accent">Hoy</Badge>}
+                      </div>
+                      <div className="text-[10px]" style={{ color: C.muted }}>
+                        {fechaLegible(fecha)} · {items.length} gasto{items.length !== 1 ? "s" : ""}
+                      </div>
                     </div>
-                  </Card>
-                ))}
+                  </div>
+
+                  <div className="text-right flex-shrink-0">
+                    <div className="text-[9px] font-bold uppercase" style={{ color: C.mutedLight }}>
+                      Total del día
+                    </div>
+                    <div className="font-mono font-extrabold text-sm" style={{ color: C.danger }}>
+                      {formatMoney(subtotal)}
+                    </div>
+                  </div>
+                </div>
+
+                <Card className="p-0 overflow-hidden">
+                  {items.map((g, idx) => (
+                    <div
+                      key={g.id}
+                      className="px-4 py-3 flex items-center justify-between gap-3"
+                      style={{
+                        borderTop: idx === 0 ? "none" : `1px solid ${C.border}`,
+                      }}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="font-bold text-sm truncate">{g.concepto}</div>
+                        <div className="text-[10px] mt-0.5" style={{ color: C.mutedLight }}>
+                          Gasto registrado el {fechaLegible(g.fecha)}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <div
+                          className="font-mono font-extrabold text-sm"
+                          style={{ color: C.danger }}
+                        >
+                          -{formatMoney(g.monto)}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDel(g)}
+                          className="w-8 h-8 rounded-lg flex items-center justify-center active:scale-95"
+                          style={{ background: C.dangerBg }}
+                          aria-label={`Eliminar gasto ${g.concepto}`}
+                        >
+                          <Trash2 size={14} color={C.danger} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </Card>
               </div>
-            </div>
-          );
-        })
+            );
+          })}
+        </div>
       )}
 
       {sheet && (
         <Sheet title="Nuevo gasto" onClose={() => setSheet(false)} closeOnBackdrop={false}>
-          <Field label="Concepto"><Input value={concepto} onChange={(e) => setConcepto(e.target.value)} placeholder="Ej: Nafta" /></Field>
-          <Field label="Monto"><Input type="number" inputMode="decimal" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder="0" /></Field>
+          <Field label="Concepto">
+            <Input
+              value={concepto}
+              onChange={(e) => setConcepto(e.target.value)}
+              placeholder="Ej: Nafta, agua, repuesto..."
+              autoFocus
+            />
+          </Field>
+          <Field label="Monto">
+            <Input
+              type="number"
+              inputMode="decimal"
+              min="0"
+              value={monto}
+              onChange={(e) => setMonto(e.target.value)}
+              placeholder="0"
+            />
+          </Field>
+          <Card style={{ background: C.bg, border: "none" }} className="mb-3">
+            <div className="text-[10px] font-bold uppercase" style={{ color: C.muted }}>
+              Fecha
+            </div>
+            <div className="text-sm font-bold mt-0.5">
+              {diaSemanaHoy()} {fechaLegible(hoyISO())}
+            </div>
+          </Card>
           <div className="flex gap-2 mt-2">
             <Btn variant="ghost" full onClick={() => setSheet(false)}>Cancelar</Btn>
             <Btn full onClick={guardar}>Guardar</Btn>
@@ -2715,7 +3391,12 @@ function AdminGastos({ db, mutate }) {
 
       {confirmDel && (
         <Sheet title="Eliminar gasto" onClose={() => setConfirmDel(null)}>
-          <div className="text-sm mb-4">¿Eliminar "{confirmDel.concepto}" por {formatMoney(confirmDel.monto)}?</div>
+          <div className="text-sm mb-1">
+            ¿Eliminar <b>{confirmDel.concepto}</b>?
+          </div>
+          <div className="font-mono font-extrabold text-lg mb-4" style={{ color: C.danger }}>
+            {formatMoney(confirmDel.monto)}
+          </div>
           <div className="flex gap-2">
             <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>Cancelar</Btn>
             <Btn variant="danger" full onClick={() => borrar(confirmDel)}>Eliminar</Btn>
