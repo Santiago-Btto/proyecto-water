@@ -2309,8 +2309,13 @@ function AdminHistorial({ db, mutate }) {
     next.visitas = next.visitas.filter((x) => x.id !== v.id);
     const ci = next.clientes.findIndex((c) => c.id === v.clienteId);
     if (ci >= 0) {
-      if (v.deudaGenerada) next.clientes[ci].deudaAcumulada = Math.max(0, (next.clientes[ci].deudaAcumulada || 0) - v.deudaGenerada);
-      if (v.deudaCobrada) next.clientes[ci].deudaAcumulada = (next.clientes[ci].deudaAcumulada || 0) + v.deudaCobrada;
+      next.clientes[ci].deudaAcumulada = Math.max(
+  0,
+  (next.clientes[ci].deudaAcumulada || 0) -
+    (v.ajusteDeudaManual || 0) -
+    (v.deudaGenerada || 0) +
+    (v.deudaCobrada || 0)
+);
 
       next.clientes[ci].envasesExtra = aplicarDeltaEnvases(
         envasesExtraDe(next.clientes[ci]),
@@ -3403,11 +3408,12 @@ function RepartidorRecorrido({
 
     const copia = clone(cliente);
     copia.deudaAcumulada = Math.max(
-      0,
-      (copia.deudaAcumulada || 0) -
-        (visita.deudaGenerada || 0) +
-        (visita.deudaCobrada || 0)
-    );
+  0,
+  (copia.deudaAcumulada || 0) -
+    (visita.ajusteDeudaManual || 0) -
+    (visita.deudaGenerada || 0) +
+    (visita.deudaCobrada || 0)
+);
 
     copia.envasesExtra = aplicarDeltaEnvases(
       envasesExtraDe(copia),
@@ -3452,11 +3458,12 @@ function RepartidorRecorrido({
     // Si editamos, primero revertimos el efecto de la visita anterior.
     if (anterior) {
       next.clientes[ci].deudaAcumulada = Math.max(
-        0,
-        (next.clientes[ci].deudaAcumulada || 0) -
-          (anterior.deudaGenerada || 0) +
-          (anterior.deudaCobrada || 0)
-      );
+  0,
+  (next.clientes[ci].deudaAcumulada || 0) -
+    (anterior.ajusteDeudaManual || 0) -
+    (anterior.deudaGenerada || 0) +
+    (anterior.deudaCobrada || 0)
+);
 
       next.clientes[ci].envasesExtra = aplicarDeltaEnvases(
         envasesExtraDe(next.clientes[ci]),
@@ -3473,9 +3480,19 @@ function RepartidorRecorrido({
 
     // Aplicamos la nueva visita.
     let deuda = next.clientes[ci].deudaAcumulada || 0;
-    deuda -= nuevaVisita.deudaCobrada || 0;
-    deuda += nuevaVisita.deudaGenerada || 0;
-    next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
+
+// Primero aplicamos cualquier corrección manual
+// realizada por el repartidor.
+deuda += nuevaVisita.ajusteDeudaManual || 0;
+
+// Después descontamos lo que cobró.
+deuda -= nuevaVisita.deudaCobrada || 0;
+
+// Y finalmente agregamos el fiado nuevo
+// generado por la venta de hoy.
+deuda += nuevaVisita.deudaGenerada || 0;
+
+next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
 
     const deltaNuevo = calcularDeltaExtras(nuevaVisita);
     next.clientes[ci].envasesExtra = aplicarDeltaEnvases(
@@ -3980,6 +3997,8 @@ function VisitaSheet({
 }) {
   const permanentes = envasesPermanentesDe(cliente);
   const saldoActual = envasesExtraDe(cliente);
+  // Deuda que tenía el cliente ANTES de esta visita.
+const deudaBase = Number(cliente.deudaAcumulada) || 0;
 
   const esVisitaVieja =
     visitaInicial &&
@@ -4102,15 +4121,31 @@ function VisitaSheet({
     );
   });
 
+  const [mostrarAjusteSaldo, setMostrarAjusteSaldo] =
+  useState(false);
+
+const [saldoPendienteManual, setSaldoPendienteManual] =
+  useState(() =>
+    Math.max(
+      0,
+      deudaBase +
+        (Number(visitaInicial?.ajusteDeudaManual) || 0)
+    )
+  );
+
   const [cobrarDeuda, setCobrarDeuda] = useState(
     (visitaInicial?.deudaCobrada || 0) > 0
   );
 
-  const [montoDeuda, setMontoDeuda] = useState(
-    visitaInicial?.deudaCobrada > 0
-      ? visitaInicial.deudaCobrada
-      : cliente.deudaAcumulada || 0
-  );
+const [montoDeuda, setMontoDeuda] = useState(
+  visitaInicial?.deudaCobrada > 0
+    ? visitaInicial.deudaCobrada
+    : Math.max(
+        0,
+        deudaBase +
+          (Number(visitaInicial?.ajusteDeudaManual) || 0)
+      )
+);
 
   const [metodoDeuda, setMetodoDeuda] = useState(
     visitaInicial?.metodoDeuda || "efectivo"
@@ -4293,6 +4328,35 @@ useEffect(() => {
       permanentesRetiradosSeparados[p.key] = dePermanentes;
     });
 
+    const saldoManualFinal = Math.max(
+  0,
+  Number(saldoPendienteManual) || 0
+);
+
+const deudaCobradaFinal = cobrarDeuda
+  ? Math.max(0, Number(montoDeuda) || 0)
+  : 0;
+
+// No permitimos cobrar más deuda de la que
+// el cliente tiene registrada en este momento.
+if (deudaCobradaFinal > saldoManualFinal) {
+  setErrorStock(
+    `No podés cobrar ${formatMoney(
+      deudaCobradaFinal
+    )}. El saldo pendiente actual es ${formatMoney(
+      saldoManualFinal
+    )}.`
+  );
+  return;
+}
+
+// Puede ser positivo o negativo.
+// Ej:
+// tenía $0 y ponemos $15.000  => +15.000
+// tenía $20.000 y ponemos $15.000 => -5.000
+const ajusteDeudaManual =
+  saldoManualFinal - deudaBase;
+
     const visita = {
       id: visitaInicial?.id || uid(),
       clienteId: cliente.id,
@@ -4329,9 +4393,10 @@ useEffect(() => {
           : vendio
           ? restante
           : 0,
-      deudaCobrada: cobrarDeuda
-        ? Number(montoDeuda) || 0
-        : 0,
+      ajusteDeudaManual,
+
+deudaCobrada: deudaCobradaFinal,
+
       metodoDeuda: cobrarDeuda
         ? metodoDeuda
         : null,
@@ -4440,7 +4505,133 @@ useEffect(() => {
         </Card>
       )}
 
-      {cliente.deudaAcumulada > 0 && (
+      <div className="mb-3">
+  <button
+    type="button"
+    onClick={() =>
+      setMostrarAjusteSaldo(!mostrarAjusteSaldo)
+    }
+    className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
+    style={{
+      background:
+        Number(saldoPendienteManual) > 0
+          ? C.dangerBg
+          : C.surface,
+      border: `1px solid ${
+        Number(saldoPendienteManual) > 0
+          ? C.danger
+          : C.border
+      }`,
+    }}
+  >
+    <div className="text-left">
+      <div
+        className="text-xs font-bold"
+        style={{
+          color:
+            Number(saldoPendienteManual) > 0
+              ? C.danger
+              : C.ink,
+        }}
+      >
+        Saldo pendiente
+      </div>
+
+      <div
+        className="text-[10px]"
+        style={{ color: C.muted }}
+      >
+        {Number(saldoPendienteManual) > 0
+          ? formatMoney(saldoPendienteManual)
+          : "Sin deuda registrada"}
+      </div>
+    </div>
+
+    <ChevronRight
+      size={17}
+      color={
+        Number(saldoPendienteManual) > 0
+          ? C.danger
+          : C.muted
+      }
+      style={{
+        transform: mostrarAjusteSaldo
+          ? "rotate(90deg)"
+          : "rotate(0deg)",
+        transition: "transform 0.2s",
+      }}
+    />
+  </button>
+
+  {mostrarAjusteSaldo && (
+    <Card
+      className="mt-1"
+      style={{
+        background: C.dangerBg,
+        border: "none",
+        borderTopLeftRadius: 0,
+        borderTopRightRadius: 0,
+      }}
+    >
+      <Field
+        label="Saldo pendiente actual"
+        hint="Usalo para cargar una deuda anterior que todavía no estaba registrada o para corregir el saldo."
+      >
+        <Input
+          type="number"
+          inputMode="decimal"
+          min="0"
+          value={saldoPendienteManual || ""}
+          onChange={(e) => {
+            const nuevoSaldo = Math.max(
+              0,
+              Number(e.target.value) || 0
+            );
+
+            setSaldoPendienteManual(nuevoSaldo);
+
+            // Si todavía no está cobrando,
+            // dejamos preparado el total como
+            // monto sugerido para cobrar.
+            if (!cobrarDeuda) {
+              setMontoDeuda(nuevoSaldo);
+            } else {
+              // Si ya estaba cobrando y reduce
+              // la deuda, evitamos cobrar más
+              // que el nuevo saldo.
+              setMontoDeuda((anterior) =>
+                Math.min(
+                  Number(anterior) || 0,
+                  nuevoSaldo
+                )
+              );
+            }
+
+            if (nuevoSaldo === 0) {
+              setCobrarDeuda(false);
+              setMontoDeuda(0);
+            }
+          }}
+          placeholder="0"
+        />
+      </Field>
+
+      {Number(saldoPendienteManual) !== deudaBase && (
+        <div
+          className="text-[10px] font-semibold"
+          style={{ color: C.danger }}
+        >
+          Saldo anterior: {formatMoney(deudaBase)}
+          {" → "}
+          Nuevo saldo:{" "}
+          {formatMoney(saldoPendienteManual)}
+        </div>
+      )}
+    </Card>
+  )}
+</div>
+
+      {Number(saldoPendienteManual) > 0 && (
         <Card
           style={{
             background: C.dangerBg,
@@ -4453,7 +4644,7 @@ useEffect(() => {
               className="text-xs font-bold"
               style={{ color: C.danger }}
             >
-              Saldo pendiente: {formatMoney(cliente.deudaAcumulada)}
+              Saldo pendiente: {formatMoney(saldoPendienteManual)}
             </div>
 
             <button
