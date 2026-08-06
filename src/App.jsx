@@ -127,6 +127,28 @@ function diaSemanaDeFecha(iso) {
     return "";
   }
 }
+function proximoSabadoISO(desdeISO = hoyISO()) {
+  try {
+    const [y, m, d] = desdeISO.split("-").map(Number);
+    const fecha = new Date(y, m - 1, d);
+    let diasHastaSabado = (6 - fecha.getDay() + 7) % 7;
+
+    // Si hoy ya es sábado, programamos para el sábado siguiente.
+    if (diasHastaSabado === 0) diasHastaSabado = 7;
+
+    fecha.setDate(fecha.getDate() + diasHastaSabado);
+
+    return (
+      fecha.getFullYear() +
+      "-" +
+      String(fecha.getMonth() + 1).padStart(2, "0") +
+      "-" +
+      String(fecha.getDate()).padStart(2, "0")
+    );
+  } catch {
+    return desdeISO;
+  }
+}
 function formatMoney(n) {
   const val = Number(n) || 0;
   try {
@@ -264,6 +286,50 @@ function aplicarDeltaEnvases(envasesPrestados, delta, signo = 1) {
   });
   return ep;
 }
+function aplicarRetiroPermanentes(permanentes, retirados, signo = 1) {
+  const resultado = {
+    ...envasesVacio(),
+    ...(permanentes || {}),
+  };
+
+  PRODUCTOS_RETORNABLES.forEach((p) => {
+    const cantidad = Number(retirados?.[p.key]) || 0;
+    resultado[p.key] = Math.max(
+      0,
+      (Number(resultado[p.key]) || 0) - signo * cantidad
+    );
+  });
+
+  return resultado;
+}
+
+// Movimiento físico de stock de la camioneta.
+// Incluye extras prestados/retirados y también permanentes devueltos.
+function calcularDeltaStockEnvases(visita) {
+  // Formato nuevo.
+  if (
+    visita.extrasPrestados ||
+    visita.extrasRetirados ||
+    visita.permanentesRetirados
+  ) {
+    const delta = {};
+
+    PRODUCTOS_RETORNABLES.forEach((p) => {
+      const prestados = Number(visita.extrasPrestados?.[p.key]) || 0;
+      const extrasRetirados = Number(visita.extrasRetirados?.[p.key]) || 0;
+      const permanentesRetirados =
+        Number(visita.permanentesRetirados?.[p.key]) || 0;
+
+      const d = prestados - extrasRetirados - permanentesRetirados;
+      if (d !== 0) delta[p.key] = d;
+    });
+
+    return delta;
+  }
+
+  // Compatibilidad con visitas antiguas.
+  return calcularDeltaExtras(visita);
+}
 function textoDevoluciones(v) {
   if (!v.retornos) return "";
   return PRODUCTOS_RETORNABLES
@@ -285,6 +351,16 @@ function textoExtrasRetirados(v) {
   return PRODUCTOS_RETORNABLES
     .filter((p) => (Number(v.extrasRetirados[p.key]) || 0) > 0)
     .map((p) => `${Number(v.extrasRetirados[p.key]) || 0}×${p.corto}`)
+    .join(", ");
+}
+function textoPermanentesRetirados(v) {
+  if (!v?.permanentesRetirados) return "";
+  return PRODUCTOS_RETORNABLES
+    .filter((p) => (Number(v.permanentesRetirados[p.key]) || 0) > 0)
+    .map(
+      (p) =>
+        `${Number(v.permanentesRetirados[p.key]) || 0}×${p.corto}`
+    )
     .join(", ");
 }
 
@@ -354,6 +430,7 @@ function exportarVisitasCSV(db) {
     "Deuda cobrada",
     "Extras prestados",
     "Extras retirados",
+    "Permanentes retirados",
     "Devoluciones (registro antiguo)",
     "Notas",
   ];
@@ -387,7 +464,10 @@ function exportarVisitasCSV(db) {
         v.deudaCobrada || 0,
         textoExtrasPrestados(v) || "",
         textoExtrasRetirados(v) || "",
-        !v.extrasPrestados && !v.extrasRetirados ? (textoDevoluciones(v) || "") : "",
+        textoPermanentesRetirados(v) || "",
+        !v.extrasPrestados && !v.extrasRetirados && !v.permanentesRetirados
+          ? (textoDevoluciones(v) || "")
+          : "",
         v.notas || "",
       ];
     });
@@ -1640,7 +1720,7 @@ function guardarCliente(f) {
     next.clientes[i] = actualizado;
   } else {
     // ==========================================
-    // CLIENTE NUEVO 
+    // CLIENTE NUEVO
     // ==========================================
     const nuevo = {
   ...datosCliente,
@@ -2145,7 +2225,17 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
                         Retiró extra: {textoExtrasRetirados(v)}
                       </div>
                     )}
-                    {!v.extrasPrestados && !v.extrasRetirados && textoDevoluciones(v) && (
+                    {textoPermanentesRetirados(v) && (
+                      <div className="text-xs mt-0.5" style={{ color: C.success }}>
+                        Devolvió permanente: {textoPermanentesRetirados(v)}
+                      </div>
+                    )}
+                    {v.volverSabadoFecha && (
+                      <div className="text-xs mt-0.5" style={{ color: C.warning }}>
+                        Volver el sábado: {fechaLegible(v.volverSabadoFecha)}
+                      </div>
+                    )}
+                    {!v.extrasPrestados && !v.extrasRetirados && !v.permanentesRetirados && textoDevoluciones(v) && (
                       <div className="text-xs mt-0.5" style={{ color: C.success }}>
                         Devolvió (registro anterior): {textoDevoluciones(v)}
                       </div>
@@ -2170,10 +2260,25 @@ function AdminHistorial({ db, mutate }) {
   const hoy = diaSemanaHoy();
   const fechaHoy = hoyISO();
 
-  // Todos los clientes programados para hoy, aunque todavía no tengan visita.
+  // Todos los clientes programados para hoy, más las visitas especiales
+  // marcadas como "Volver el sábado" para la fecha de hoy.
+  const idsVolverSabadoHoy = new Set(
+    db.visitas
+      .filter((v) => v.volverSabadoFecha === fechaHoy)
+      .map((v) => v.clienteId)
+  );
+
   const clientesHoy = db.clientes
-    .filter((c) => c.diasVisita?.includes(hoy))
+    .filter(
+      (c) =>
+        c.diasVisita?.includes(hoy) ||
+        idsVolverSabadoHoy.has(c.id)
+    )
     .filter((c) => filtroRep === "todos" || c.repartidorId === filtroRep)
+    .map((c) => ({
+      ...c,
+      citaSabado: idsVolverSabadoHoy.has(c.id),
+    }))
     .sort((a, b) => (Number(a.orden) || 999) - (Number(b.orden) || 999) || a.nombre.localeCompare(b.nombre));
 
   const idsVisitadosHoy = new Set(
@@ -2198,18 +2303,33 @@ function AdminHistorial({ db, mutate }) {
 
   function borrarVisita(v) {
     const next = clone(db);
-    const delta = calcularDeltaExtras(v);
+    const deltaExtras = calcularDeltaExtras(v);
+    const deltaStock = calcularDeltaStockEnvases(v);
 
     next.visitas = next.visitas.filter((x) => x.id !== v.id);
     const ci = next.clientes.findIndex((c) => c.id === v.clienteId);
     if (ci >= 0) {
       if (v.deudaGenerada) next.clientes[ci].deudaAcumulada = Math.max(0, (next.clientes[ci].deudaAcumulada || 0) - v.deudaGenerada);
       if (v.deudaCobrada) next.clientes[ci].deudaAcumulada = (next.clientes[ci].deudaAcumulada || 0) + v.deudaCobrada;
-      next.clientes[ci].envasesExtra = aplicarDeltaEnvases(envasesExtraDe(next.clientes[ci]), delta, -1);
+
+      next.clientes[ci].envasesExtra = aplicarDeltaEnvases(
+        envasesExtraDe(next.clientes[ci]),
+        deltaExtras,
+        -1
+      );
+
+      next.clientes[ci].envasesPermanentes = aplicarRetiroPermanentes(
+        envasesPermanentesDe(next.clientes[ci]),
+        v.permanentesRetirados,
+        -1
+      );
+
       delete next.clientes[ci].envasesPrestados;
     }
 
-    if (db.config.stockActivo) moverStockRepartidor(v.repartidorId, delta, -1);
+    if (db.config.stockActivo) {
+      moverStockRepartidor(v.repartidorId, deltaStock, -1);
+    }
 
     mutate(next);
     setConfirmDel(null);
@@ -2294,6 +2414,7 @@ function AdminHistorial({ db, mutate }) {
                     <div className="flex gap-1 mt-1.5 flex-wrap">
                       {rep && <Badge tone="muted">{rep.nombre}</Badge>}
                       {c.orden && <Badge tone="accent">Orden {c.orden}</Badge>}
+                      {c.citaSabado && <Badge tone="warning">Volver sábado</Badge>}
                     </div>
                   </div>
                   <Badge tone={visitado ? "success" : "warning"}>{visitado ? "Visitado" : "Pendiente"}</Badge>
@@ -2337,7 +2458,17 @@ function AdminHistorial({ db, mutate }) {
                         Retiró extra: {textoExtrasRetirados(v)}
                       </div>
                     )}
-                    {!v.extrasPrestados && !v.extrasRetirados && textoDevoluciones(v) && (
+                    {textoPermanentesRetirados(v) && (
+                      <div className="text-xs mt-0.5" style={{ color: C.success }}>
+                        Devolvió permanente: {textoPermanentesRetirados(v)}
+                      </div>
+                    )}
+                    {v.volverSabadoFecha && (
+                      <div className="text-xs mt-0.5" style={{ color: C.warning }}>
+                        Volver el sábado: {fechaLegible(v.volverSabadoFecha)}
+                      </div>
+                    )}
+                    {!v.extrasPrestados && !v.extrasRetirados && !v.permanentesRetirados && textoDevoluciones(v) && (
                       <div className="text-xs mt-0.5" style={{ color: C.success }}>
                         Devolvió (registro anterior): {textoDevoluciones(v)}
                       </div>
@@ -2786,36 +2917,75 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
     })
     .filter(Boolean);
 
+  // Citas puntuales programadas con "Volver el sábado".
+  // Solo aparecen en la fecha exacta del sábado y NO se arrastran después.
+  const idsCitaSabadoHoy = new Set(
+    db.visitas
+      .filter((v) => v.volverSabadoFecha === fechaHoy)
+      .map((v) => v.clienteId)
+  );
+
   const pendienteAnteriorPorId = new Map(
     pendientesAnteriores.map((c) => [c.id, c.pendienteDesde])
   );
 
-  // Los clientes programados para hoy conservan la marca de pendiente
-  // anterior si también vienen arrastrados.
+  // Los clientes programados para hoy conservan marcas especiales.
   const clientesHoyConPendientes = deHoy.map((c) => {
     const pendienteDesde = pendienteAnteriorPorId.get(c.id);
-    return pendienteDesde ? { ...c, pendienteDesde } : c;
+    return {
+      ...c,
+      ...(pendienteDesde ? { pendienteDesde } : {}),
+      citaSabado: idsCitaSabadoHoy.has(c.id),
+    };
   });
 
   // Sumamos los pendientes viejos que no estaban programados para hoy.
   const idsDeHoy = new Set(deHoy.map((c) => c.id));
-  const pendientesAnterioresExtra = pendientesAnteriores.filter(
-    (c) => !idsDeHoy.has(c.id)
-  );
+  const pendientesAnterioresExtra = pendientesAnteriores
+    .filter((c) => !idsDeHoy.has(c.id))
+    .map((c) => ({
+      ...c,
+      citaSabado: idsCitaSabadoHoy.has(c.id),
+    }));
+
+  const idsYaIncluidos = new Set([
+    ...clientesHoyConPendientes.map((c) => c.id),
+    ...pendientesAnterioresExtra.map((c) => c.id),
+  ]);
+
+  const citasSabadoExtra = misClientes
+    .filter(
+      (c) =>
+        idsCitaSabadoHoy.has(c.id) &&
+        !idsYaIncluidos.has(c.id)
+    )
+    .map((c) => ({ ...c, citaSabado: true }));
 
   const clientesRecorrido = [
     ...clientesHoyConPendientes,
     ...pendientesAnterioresExtra,
+    ...citasSabadoExtra,
   ];
 
-  // Todavía no tuvo visita hoy y no viene de un día anterior.
+  // Todavía no tuvo visita hoy y no viene de un día anterior ni de cita sábado.
   const pendientes = clientesRecorrido.filter(
-    (c) => !visitaHoyPorCliente.has(c.id) && !c.pendienteDesde
+    (c) =>
+      !visitaHoyPorCliente.has(c.id) &&
+      !c.pendienteDesde &&
+      !c.citaSabado
+  );
+
+  // Citas especiales del sábado que todavía no fueron atendidas hoy.
+  const citasSabadoActivas = clientesRecorrido.filter(
+    (c) => !visitaHoyPorCliente.has(c.id) && !!c.citaSabado
   );
 
   // Pendientes de días anteriores que aún no fueron atendidos hoy.
   const pendientesAnterioresActivos = clientesRecorrido.filter(
-    (c) => !visitaHoyPorCliente.has(c.id) && !!c.pendienteDesde
+    (c) =>
+      !visitaHoyPorCliente.has(c.id) &&
+      !!c.pendienteDesde &&
+      !c.citaSabado
   );
 
   // Hoy ya se visitó, pero nuevamente quedó para volver más tarde.
@@ -2834,7 +3004,8 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
   const enProgreso =
     completadosCount > 0 ||
     volverMasTarde.length > 0 ||
-    pendientesAnterioresActivos.length > 0;
+    pendientesAnterioresActivos.length > 0 ||
+    citasSabadoActivas.length > 0;
 
   return (
     <Screen>
@@ -2873,6 +3044,7 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
             totalRecorridoCount={clientesRecorrido.length}
             pendientes={pendientes}
             pendientesAnterioresCount={pendientesAnterioresActivos.length}
+            citasSabadoCount={citasSabadoActivas.length}
             visitadosCount={completadosCount}
             porReintentarCount={volverMasTarde.length}
             enProgreso={enProgreso}
@@ -2937,6 +3109,7 @@ function RepartidorInicio({
   totalRecorridoCount,
   pendientes,
   pendientesAnterioresCount = 0,
+  citasSabadoCount = 0,
   visitadosCount,
   porReintentarCount = 0,
   enProgreso,
@@ -2945,6 +3118,7 @@ function RepartidorInicio({
   const quedanPorAtender =
     pendientes.length > 0 ||
     pendientesAnterioresCount > 0 ||
+    citasSabadoCount > 0 ||
     porReintentarCount > 0;
 
   return (
@@ -2978,6 +3152,7 @@ function RepartidorInicio({
           <div className="text-xs mb-6" style={{ color: C.muted }}>
             {visitadosCount > 0 ||
             pendientesAnterioresCount > 0 ||
+            citasSabadoCount > 0 ||
             porReintentarCount > 0 ? (
               <>
                 {visitadosCount} de {totalRecorridoCount} completados
@@ -2987,6 +3162,8 @@ function RepartidorInicio({
                   } anterior${
                     pendientesAnterioresCount !== 1 ? "es" : ""
                   }`}
+                {citasSabadoCount > 0 &&
+                  ` · ${citasSabadoCount} para volver el sábado`}
                 {porReintentarCount > 0 &&
                   ` · ${porReintentarCount} para volver hoy`}
               </>
@@ -3152,11 +3329,21 @@ function RepartidorRecorrido({
   // No dependen del buscador.
   // ==========================================
   const pendientesTotales = clientes.filter(
-    (c) => !visitaPorCliente.has(c.id) && !c.pendienteDesde
+    (c) =>
+      !visitaPorCliente.has(c.id) &&
+      !c.pendienteDesde &&
+      !c.citaSabado
+  );
+
+  const citasSabadoTotales = clientes.filter(
+    (c) => !visitaPorCliente.has(c.id) && !!c.citaSabado
   );
 
   const pendientesAnterioresTotales = clientes.filter(
-    (c) => !visitaPorCliente.has(c.id) && !!c.pendienteDesde
+    (c) =>
+      !visitaPorCliente.has(c.id) &&
+      !!c.pendienteDesde &&
+      !c.citaSabado
   );
 
   const volverMasTardeTotales = clientes.filter((c) =>
@@ -3172,11 +3359,21 @@ function RepartidorRecorrido({
   // LISTAS VISIBLES - respetan el buscador.
   // ==========================================
   const pendientes = clientesFiltrados.filter(
-    (c) => !visitaPorCliente.has(c.id) && !c.pendienteDesde
+    (c) =>
+      !visitaPorCliente.has(c.id) &&
+      !c.pendienteDesde &&
+      !c.citaSabado
+  );
+
+  const citasSabado = clientesFiltrados.filter(
+    (c) => !visitaPorCliente.has(c.id) && !!c.citaSabado
   );
 
   const pendientesAnteriores = clientesFiltrados.filter(
-    (c) => !visitaPorCliente.has(c.id) && !!c.pendienteDesde
+    (c) =>
+      !visitaPorCliente.has(c.id) &&
+      !!c.pendienteDesde &&
+      !c.citaSabado
   );
 
   const volverMasTarde = clientesFiltrados.filter((c) =>
@@ -3218,6 +3415,12 @@ function RepartidorRecorrido({
       -1
     );
 
+    copia.envasesPermanentes = aplicarRetiroPermanentes(
+      envasesPermanentesDe(copia),
+      visita.permanentesRetirados,
+      -1
+    );
+
     return copia;
   }
 
@@ -3230,7 +3433,7 @@ function RepartidorRecorrido({
 
     if (!visita) return actual;
 
-    const deltaAnterior = calcularDeltaExtras(visita);
+    const deltaAnterior = calcularDeltaStockEnvases(visita);
     PRODUCTOS_RETORNABLES.forEach((p) => {
       actual[p.key] =
         (actual[p.key] || 0) + (deltaAnterior[p.key] || 0);
@@ -3260,6 +3463,12 @@ function RepartidorRecorrido({
         calcularDeltaExtras(anterior),
         -1
       );
+
+      next.clientes[ci].envasesPermanentes = aplicarRetiroPermanentes(
+        envasesPermanentesDe(next.clientes[ci]),
+        anterior.permanentesRetirados,
+        -1
+      );
     }
 
     // Aplicamos la nueva visita.
@@ -3274,6 +3483,13 @@ function RepartidorRecorrido({
       deltaNuevo,
       1
     );
+
+    next.clientes[ci].envasesPermanentes = aplicarRetiroPermanentes(
+      envasesPermanentesDe(next.clientes[ci]),
+      nuevaVisita.permanentesRetirados,
+      1
+    );
+
     delete next.clientes[ci].envasesPrestados;
 
     // Guardamos o reemplazamos la visita del día.
@@ -3288,12 +3504,16 @@ function RepartidorRecorrido({
 
     // En stock aplicamos solamente la diferencia entre versión anterior y nueva.
     if (db.config.stockActivo) {
-      const deltaAnterior = anterior ? calcularDeltaExtras(anterior) : {};
+      const deltaStockNuevo = calcularDeltaStockEnvases(nuevaVisita);
+      const deltaStockAnterior = anterior
+        ? calcularDeltaStockEnvases(anterior)
+        : {};
       const deltaNeto = {};
 
       PRODUCTOS_RETORNABLES.forEach((p) => {
         deltaNeto[p.key] =
-          (deltaNuevo[p.key] || 0) - (deltaAnterior[p.key] || 0);
+          (deltaStockNuevo[p.key] || 0) -
+          (deltaStockAnterior[p.key] || 0);
       });
 
       moverStockRepartidor(repartidor.id, deltaNeto);
@@ -3356,6 +3576,7 @@ function RepartidorRecorrido({
       {busca.trim() &&
         pendientes.length === 0 &&
         pendientesAnteriores.length === 0 &&
+        citasSabado.length === 0 &&
         volverMasTarde.length === 0 &&
         visitadosFinalizados.length === 0 && (
           <Card className="mb-4">
@@ -3402,6 +3623,28 @@ function RepartidorRecorrido({
                 cliente={c}
                 pendienteAnterior
                 pendienteDesde={c.pendienteDesde}
+                onClick={() => abrirNuevaVisita(c)}
+              />
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* CITAS PUNTUALES: VOLVER EL SÁBADO */}
+      {citasSabado.length > 0 && (
+        <>
+          <div
+            className="text-xs font-bold uppercase tracking-wide mb-2"
+            style={{ color: C.warning }}
+          >
+            Volver el sábado ({citasSabado.length})
+          </div>
+          <div className="flex flex-col gap-2 mb-4">
+            {citasSabado.map((c) => (
+              <ClienteVisitaCard
+                key={c.id}
+                cliente={c}
+                citaSabado
                 onClick={() => abrirNuevaVisita(c)}
               />
             ))}
@@ -3492,6 +3735,7 @@ function RepartidorRecorrido({
 
       {pendientesTotales.length === 0 &&
         pendientesAnterioresTotales.length === 0 &&
+        citasSabadoTotales.length === 0 &&
         volverMasTardeTotales.length === 0 &&
         clientes.length > 0 && (
           <Card
@@ -3530,6 +3774,7 @@ function ClienteVisitaCard({
   volverMasTarde = false,
   pendienteAnterior = false,
   pendienteDesde = null,
+  citaSabado = false,
   visita,
   onClick,
 }) {
@@ -3580,6 +3825,10 @@ function ClienteVisitaCard({
 
             {pendienteAnterior && (
               <Badge tone="warning">Pendiente anterior</Badge>
+            )}
+
+            {citaSabado && (
+              <Badge tone="warning">Volver sábado</Badge>
             )}
 
             {hecho && <Badge tone="success">Vendido</Badge>}
@@ -3657,6 +3906,12 @@ function ClienteVisitaCard({
 
             {cliente.notas && <Badge tone="muted">Nota</Badge>}
           </div>
+
+          {citaSabado && !pendienteAnterior && (
+            <div className="text-[10px] mt-1.5" style={{ color: C.mutedLight }}>
+              Visita especial programada para hoy
+            </div>
+          )}
 
           {pendienteAnterior && (
             <div className="text-[10px] mt-1.5" style={{ color: C.mutedLight }}>
@@ -3775,13 +4030,19 @@ function VisitaSheet({
     return inicial;
   });
 
+  // Este estado representa el TOTAL retirado por producto.
+  // Al guardar se reparte: primero extras, y si no alcanzan, permanentes.
   const [extrasRetirados, setExtrasRetirados] = useState(() => {
     const inicial = stockVacio();
 
     PRODUCTOS_RETORNABLES.forEach((p) => {
-      if (visitaInicial?.extrasRetirados) {
+      if (
+        visitaInicial?.extrasRetirados ||
+        visitaInicial?.permanentesRetirados
+      ) {
         inicial[p.key] =
-          Number(visitaInicial.extrasRetirados[p.key]) || 0;
+          (Number(visitaInicial?.extrasRetirados?.[p.key]) || 0) +
+          (Number(visitaInicial?.permanentesRetirados?.[p.key]) || 0);
       } else {
         inicial[p.key] = Math.max(
           0,
@@ -3801,9 +4062,11 @@ function VisitaSheet({
         ? Number(visitaInicial.extrasPrestados[p.key]) || 0
         : Math.max(0, Number(deltaViejo[p.key]) || 0);
 
-      const retirados = visitaInicial?.extrasRetirados
-        ? Number(visitaInicial.extrasRetirados[p.key]) || 0
-        : Math.max(0, -(Number(deltaViejo[p.key]) || 0));
+      const retirados =
+        visitaInicial?.extrasRetirados || visitaInicial?.permanentesRetirados
+          ? (Number(visitaInicial?.extrasRetirados?.[p.key]) || 0) +
+            (Number(visitaInicial?.permanentesRetirados?.[p.key]) || 0)
+          : Math.max(0, -(Number(deltaViejo[p.key]) || 0));
 
       if (prestados > 0 || retirados > 0) {
         tocados.add(p.key);
@@ -3857,6 +4120,14 @@ function VisitaSheet({
     visitaInicial?.notas || ""
   );
 
+  const [volverSabado, setVolverSabado] = useState(
+    !!visitaInicial?.volverSabadoFecha
+  );
+
+  const fechaVolverSabado =
+    visitaInicial?.volverSabadoFecha ||
+    proximoSabadoISO(visitaInicial?.fecha || hoyISO());
+
   const [errorStock, setErrorStock] = useState("");
 
   const [mostrarExtras, setMostrarExtras] = useState(() => {
@@ -3869,7 +4140,8 @@ function VisitaSheet({
       Number(visitaInicial.extrasPrestados?.[p.key]) || 0;
 
     const retirados =
-      Number(visitaInicial.extrasRetirados?.[p.key]) || 0;
+      (Number(visitaInicial.extrasRetirados?.[p.key]) || 0) +
+      (Number(visitaInicial.permanentesRetirados?.[p.key]) || 0);
 
     return prestados > 0 || retirados > 0;
   });
@@ -3990,21 +4262,36 @@ useEffect(() => {
       }
     }
 
-    // Solo pueden retirarse envases EXTRA que ya estén registrados
-    // a nombre del cliente.
+    // Se pueden retirar envases EXTRA y, si no alcanzan,
+    // también PERMANENTES. Nunca más de los que el cliente tiene en total.
     for (const p of PRODUCTOS_RETORNABLES) {
-      const extraActual =
-        Number(saldoActual[p.key]) || 0;
-      const retirados =
-        Number(extrasRetirados[p.key]) || 0;
+      const extraActual = Number(saldoActual[p.key]) || 0;
+      const permanenteActual = Number(permanentes[p.key]) || 0;
+      const totalCliente = extraActual + permanenteActual;
+      const retirados = Number(extrasRetirados[p.key]) || 0;
 
-      if (retirados > extraActual) {
+      if (retirados > totalCliente) {
         setErrorStock(
-          `${cliente.nombre} tiene ${extraActual} ${p.label} extra. No podés retirar ${retirados}.`
+          `${cliente.nombre} tiene ${totalCliente} ${p.label} en total (${extraActual} extra + ${permanenteActual} permanentes). No podés retirar ${retirados}.`
         );
         return;
       }
     }
+
+    // Repartimos lo retirado: primero salen extras y después permanentes.
+    const extrasRetiradosSeparados = stockVacio();
+    const permanentesRetiradosSeparados = stockVacio();
+
+    PRODUCTOS_RETORNABLES.forEach((p) => {
+      const totalRetirado = Number(extrasRetirados[p.key]) || 0;
+      const extraActual = Number(saldoActual[p.key]) || 0;
+
+      const deExtras = Math.min(totalRetirado, extraActual);
+      const dePermanentes = Math.max(0, totalRetirado - deExtras);
+
+      extrasRetiradosSeparados[p.key] = deExtras;
+      permanentesRetiradosSeparados[p.key] = dePermanentes;
+    });
 
     const visita = {
       id: visitaInicial?.id || uid(),
@@ -4021,9 +4308,14 @@ useEffect(() => {
         sifon: Number(extrasPrestados.sifon) || 0,
       },
       extrasRetirados: {
-        b20: Number(extrasRetirados.b20) || 0,
-        b12: Number(extrasRetirados.b12) || 0,
-        sifon: Number(extrasRetirados.sifon) || 0,
+        b20: Number(extrasRetiradosSeparados.b20) || 0,
+        b12: Number(extrasRetiradosSeparados.b12) || 0,
+        sifon: Number(extrasRetiradosSeparados.sifon) || 0,
+      },
+      permanentesRetirados: {
+        b20: Number(permanentesRetiradosSeparados.b20) || 0,
+        b12: Number(permanentesRetiradosSeparados.b12) || 0,
+        sifon: Number(permanentesRetiradosSeparados.sifon) || 0,
       },
       total: vendio ? total : 0,
       metodoPago: vendio ? metodoPago : null,
@@ -4044,6 +4336,7 @@ useEffect(() => {
         ? metodoDeuda
         : null,
       notas,
+      volverSabadoFecha: volverSabado ? fechaVolverSabado : null,
       timestamp:
         visitaInicial?.timestamp || Date.now(),
       editadoEl: visitaInicial ? Date.now() : null,
@@ -4387,6 +4680,39 @@ useEffect(() => {
               }
             />
           </Field>
+          <Field label="Próxima visita especial">
+            <button
+              type="button"
+              onClick={() => setVolverSabado(!volverSabado)}
+              className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
+              style={{
+                background: volverSabado ? C.warningBg : C.bg,
+                border: `1px solid ${volverSabado ? C.warning : C.border}`,
+              }}
+            >
+              <div className="text-left">
+                <div
+                  className="text-xs font-bold"
+                  style={{ color: volverSabado ? C.warning : C.ink }}
+                >
+                  Volver el sábado
+                </div>
+                <div className="text-[10px]" style={{ color: C.muted }}>
+                  {fechaLegible(fechaVolverSabado)} · aparece solo ese sábado
+                </div>
+              </div>
+
+              <div
+                className="w-5 h-5 rounded-md flex items-center justify-center"
+                style={{
+                  background: volverSabado ? C.warning : C.surface,
+                  border: `1px solid ${volverSabado ? C.warning : C.border}`,
+                }}
+              >
+                {volverSabado && <Check size={13} color="#fff" />}
+              </div>
+            </button>
+          </Field>
         </>
       ) : (
         <>
@@ -4412,6 +4738,39 @@ useEffect(() => {
                 </button>
               ))}
             </div>
+          </Field>
+          <Field label="Próxima visita especial">
+            <button
+              type="button"
+              onClick={() => setVolverSabado(!volverSabado)}
+              className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
+              style={{
+                background: volverSabado ? C.warningBg : C.bg,
+                border: `1px solid ${volverSabado ? C.warning : C.border}`,
+              }}
+            >
+              <div className="text-left">
+                <div
+                  className="text-xs font-bold"
+                  style={{ color: volverSabado ? C.warning : C.ink }}
+                >
+                  Volver el sábado
+                </div>
+                <div className="text-[10px]" style={{ color: C.muted }}>
+                  {fechaLegible(fechaVolverSabado)} · aparece solo ese sábado
+                </div>
+              </div>
+
+              <div
+                className="w-5 h-5 rounded-md flex items-center justify-center"
+                style={{
+                  background: volverSabado ? C.warning : C.surface,
+                  border: `1px solid ${volverSabado ? C.warning : C.border}`,
+                }}
+              >
+                {volverSabado && <Check size={13} color="#fff" />}
+              </div>
+            </button>
           </Field>
         </>
       )}
@@ -4439,14 +4798,14 @@ useEffect(() => {
           className="text-xs font-bold"
           style={{ color: C.warning }}
         >
-          Envases extra
+          Movimiento de envases
         </div>
 
         <div
           className="text-[10px]"
           style={{ color: C.muted }}
         >
-          Prestar o retirar envases
+          Prestar extras o retirar envases
         </div>
       </div>
     </div>
@@ -4477,14 +4836,17 @@ useEffect(() => {
         className="text-[11px] mb-3"
         style={{ color: C.muted }}
       >
-        Indicá solamente si hoy dejás un envase extra
-        o retirás uno que el cliente ya tenía.
+        Si retirás envases, primero se descuentan de los extras.
+        Si no alcanzan, el resto se descuenta de los permanentes.
       </div>
 
       <div className="flex flex-col gap-3">
         {PRODUCTOS_RETORNABLES.map((p) => {
           const actuales =
             Number(saldoActual[p.key]) || 0;
+
+          const permanentesActuales =
+            Number(permanentes[p.key]) || 0;
 
           const prestados =
             Number(extrasPrestados[p.key]) || 0;
@@ -4516,7 +4878,7 @@ useEffect(() => {
                     className="text-[10px]"
                     style={{ color: C.muted }}
                   >
-                    Extras actuales: {actuales}
+                    Extras: {actuales} · Permanentes: {permanentesActuales}
                   </div>
                 </div>
 
