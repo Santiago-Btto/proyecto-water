@@ -1351,6 +1351,38 @@ function AdminDashboard({ db }) {
   const balance = efectivo + mp + fiado - totalGastos;
   const movimientosExtras = resumenExtrasVisitas(visitasFiltradas);
 
+  // ======================================================
+// BULTOS VENDIDOS EN EL PERÍODO SELECCIONADO
+// Solo cuenta productos de visitas donde hubo venta.
+// No mezcla envases prestados, retirados ni permanentes.
+// ======================================================
+const bultosVendidos = useMemo(() => {
+  const resultado = {};
+
+  PRODUCTOS.forEach((p) => {
+    resultado[p.key] = 0;
+  });
+
+  visitasFiltradas.forEach((visita) => {
+    if (!visita.vendio) return;
+
+    (visita.items || []).forEach((item) => {
+      if (!(item.tipo in resultado)) return;
+
+      resultado[item.tipo] +=
+        Number(item.cantidad) || 0;
+    });
+  });
+
+  return resultado;
+}, [visitasFiltradas]);
+
+const totalBultosVendidos = PRODUCTOS.reduce(
+  (total, producto) =>
+    total + (Number(bultosVendidos[producto.key]) || 0),
+  0
+);
+
   const deudaTotalClientes = db.clientes.reduce(
     (s, c) => s + (Number(c.deudaAcumulada) || 0),
     0
@@ -1566,6 +1598,114 @@ function AdminDashboard({ db }) {
           </div>
         </Card>
       )}
+
+      {/* =====================================================
+    BULTOS VENDIDOS
+    ===================================================== */}
+<Card className="mb-4">
+  <div className="flex items-start justify-between gap-3 mb-3">
+    <div>
+      <div
+        className="text-xs font-extrabold uppercase tracking-wide"
+        style={{ color: C.muted }}
+      >
+        Bultos vendidos
+      </div>
+
+      <div
+        className="text-[10px] mt-0.5"
+        style={{ color: C.mutedLight }}
+      >
+        {etiquetaRango}
+      </div>
+    </div>
+
+    <div
+      className="rounded-xl px-3 py-2 text-center"
+      style={{
+        background: C.primaryDark,
+        minWidth: 74,
+      }}
+    >
+      <div
+        className="text-[9px] font-bold uppercase"
+        style={{
+          color: C.accentSoft,
+          opacity: 0.8,
+        }}
+      >
+        Total
+      </div>
+
+      <div
+        className="font-mono font-extrabold text-xl"
+        style={{ color: "#fff" }}
+      >
+        {totalBultosVendidos}
+      </div>
+    </div>
+  </div>
+
+  <div className="grid grid-cols-2 gap-2">
+    {PRODUCTOS.map((p) => {
+      const cantidad =
+        Number(bultosVendidos[p.key]) || 0;
+
+      return (
+        <div
+          key={p.key}
+          className="rounded-xl px-3 py-2.5 flex items-center justify-between gap-2"
+          style={{
+            background:
+              cantidad > 0
+                ? C.accentSoft
+                : C.bg,
+            border: `1px solid ${
+              cantidad > 0
+                ? C.accent
+                : C.border
+            }`,
+          }}
+        >
+          <div className="min-w-0">
+            <div
+              className="text-[10px] font-bold truncate"
+              style={{
+                color:
+                  cantidad > 0
+                    ? C.primary
+                    : C.muted,
+              }}
+            >
+              {p.label}
+            </div>
+          </div>
+
+          <div
+            className="font-mono font-extrabold text-lg flex-shrink-0"
+            style={{
+              color:
+                cantidad > 0
+                  ? C.primary
+                  : C.mutedLight,
+            }}
+          >
+            {cantidad}
+          </div>
+        </div>
+      );
+    })}
+  </div>
+
+  {totalBultosVendidos === 0 && (
+    <div
+      className="text-[10px] text-center mt-3"
+      style={{ color: C.mutedLight }}
+    >
+      No hay productos vendidos en este período.
+    </div>
+  )}
+</Card>
 
       <Card className="mb-4">
         <div className="flex items-center justify-between mb-2">
