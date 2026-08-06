@@ -3825,6 +3825,8 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
     return visita && !esVolverMasTarde(visita);
   });
 
+ 
+
   const completadosCount = visitadosFinalizados.length;
 
   const enProgreso =
@@ -3888,6 +3890,7 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
             mutate={mutate}
             repartidor={repartidor}
             clientes={clientesRecorrido}
+            todosLosClientes={misClientes}
             visitasHoy={visitasHoy}
             onSalir={() => setVista("inicio")}
           />
@@ -4124,6 +4127,7 @@ function RepartidorRecorrido({
   mutate,
   repartidor,
   clientes,
+  todosLosClientes = [],
   visitasHoy,
   onSalir,
 }) {
@@ -4131,6 +4135,13 @@ function RepartidorRecorrido({
   const [visitaEditando, setVisitaEditando] = useState(null);
   const [mostrarVisitados, setMostrarVisitados] = useState(false);
   const [busca, setBusca] = useState("");
+  // Clientes cuyo día normal ya pasó durante esta semana.
+// Empieza cerrado.
+const [mostrarDiasAnteriores, setMostrarDiasAnteriores] =
+  useState(false);
+
+const [buscaDiasAnteriores, setBuscaDiasAnteriores] =
+  useState("");
 
   // Si hubiese más de una visita del mismo cliente hoy, tomamos la más reciente.
   const visitaPorCliente = new Map();
@@ -4149,6 +4160,136 @@ function RepartidorRecorrido({
     const direccion = (c.direccion || "").toLowerCase();
     return nombre.includes(textoBusqueda) || direccion.includes(textoBusqueda);
   });
+
+  // ==========================================================
+// CLIENTES DE DÍAS ANTERIORES DE ESTA SEMANA
+//
+// Ejemplo:
+// si hoy es jueves:
+//   lunes, martes y miércoles.
+//
+// No incluimos:
+// - clientes que ya forman parte del recorrido actual;
+// - clientes que ya fueron visitados hoy;
+// - días futuros;
+// - el día de hoy.
+//
+// Si un cliente tiene más de un día asignado, tomamos
+// como referencia el día anterior más cercano a hoy.
+// ==========================================================
+const indiceHoy = DIAS.indexOf(diaSemanaHoy());
+
+const diasAnterioresSemana =
+  indiceHoy > 0
+    ? DIAS.slice(0, indiceHoy)
+    : [];
+
+const idsClientesRecorrido = new Set(
+  clientes.map((c) => c.id)
+);
+
+const textoBuscaDiasAnteriores =
+  buscaDiasAnteriores.trim().toLowerCase();
+
+const clientesDiasAnteriores = todosLosClientes
+  .filter((c) => {
+    // Ya está incluido normalmente en el recorrido.
+    if (idsClientesRecorrido.has(c.id)) return false;
+
+    // Ya fue atendido hoy.
+    if (visitaPorCliente.has(c.id)) return false;
+
+    // Buscamos qué días anteriores tiene asignados.
+    const diasCliente = c.diasVisita || [];
+
+    const tieneDiaAnterior =
+      diasAnterioresSemana.some((dia) =>
+        diasCliente.includes(dia)
+      );
+
+    if (!tieneDiaAnterior) return false;
+
+    // Buscador interno.
+    if (textoBuscaDiasAnteriores) {
+      const nombre =
+        (c.nombre || "").toLowerCase();
+
+      const direccion =
+        (c.direccion || "").toLowerCase();
+
+      if (
+        !nombre.includes(textoBuscaDiasAnteriores) &&
+        !direccion.includes(textoBuscaDiasAnteriores)
+      ) {
+        return false;
+      }
+    }
+
+    return true;
+  })
+  .map((c) => {
+    // Si tiene varios días anteriores, usamos el más cercano.
+    const diasCliente = c.diasVisita || [];
+
+    const diaAnteriorReferencia =
+      [...diasAnterioresSemana]
+        .reverse()
+        .find((dia) =>
+          diasCliente.includes(dia)
+        ) || "";
+
+    return {
+      ...c,
+      diaAnteriorReferencia,
+    };
+  })
+  .sort((a, b) => {
+    const ia = DIAS.indexOf(
+      a.diaAnteriorReferencia
+    );
+
+    const ib = DIAS.indexOf(
+      b.diaAnteriorReferencia
+    );
+
+    if (ia !== ib) return ia - ib;
+
+    const ordenA =
+      a.orden === "" ||
+      a.orden === null ||
+      a.orden === undefined
+        ? Infinity
+        : Number(a.orden);
+
+    const ordenB =
+      b.orden === "" ||
+      b.orden === null ||
+      b.orden === undefined
+        ? Infinity
+        : Number(b.orden);
+
+    if (ordenA !== ordenB) {
+      return ordenA - ordenB;
+    }
+
+    return (a.nombre || "").localeCompare(
+      b.nombre || ""
+    );
+  });
+
+// Agrupamos visualmente por lunes, martes, miércoles, etc.
+const gruposDiasAnteriores =
+  diasAnterioresSemana
+    .map((dia) => ({
+      dia,
+      clientes: clientesDiasAnteriores.filter(
+        (c) =>
+          c.diaAnteriorReferencia === dia
+      ),
+    }))
+    .filter(
+      (grupo) => grupo.clientes.length > 0
+    );
 
   // ==========================================
   // TOTALES REALES DEL RECORRIDO
@@ -4210,6 +4351,47 @@ function RepartidorRecorrido({
     const visita = visitaPorCliente.get(c.id);
     return visita && !esVolverMasTarde(visita);
   });
+
+  // ==========================================================
+  // CLIENTES ATENDIDOS HOY DE MANERA EXTRAORDINARIA
+  // No estaban originalmente en el recorrido del día.
+  // ==========================================================
+  const idsRecorridoActual = new Set(
+    clientes.map((c) => c.id)
+  );
+
+  const visitadosExtraHoy = todosLosClientes.filter((c) => {
+    // Si ya estaba en el recorrido normal, no lo agregamos nuevamente.
+    if (idsRecorridoActual.has(c.id)) return false;
+
+    const visita = visitaPorCliente.get(c.id);
+
+    // Solamente mostramos clientes que efectivamente tuvieron una visita hoy.
+    if (!visita) return false;
+
+    // Si quedó para volver más tarde, todavía no lo consideramos finalizado.
+    if (esVolverMasTarde(visita)) return false;
+
+    // Respetamos también el buscador general.
+    if (textoBusqueda) {
+      const nombre = (c.nombre || "").toLowerCase();
+      const direccion = (c.direccion || "").toLowerCase();
+
+      if (
+        !nombre.includes(textoBusqueda) &&
+        !direccion.includes(textoBusqueda)
+      ) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+
+  const visitadosParaMostrar = [
+    ...visitadosFinalizados,
+    ...visitadosExtraHoy,
+  ];
 
   function abrirNuevaVisita(cliente) {
     setActivo(cliente);
@@ -4517,8 +4699,235 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
         </>
       )}
 
+      {/* =====================================================
+    CLIENTES DE DÍAS ANTERIORES
+    ===================================================== */}
+{diasAnterioresSemana.length > 0 && (
+  <div className="mb-4">
+    <button
+      type="button"
+      onClick={() =>
+        setMostrarDiasAnteriores(
+          !mostrarDiasAnteriores
+        )
+      }
+      className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
+      style={{
+        background: C.surface,
+        border: `1px solid ${C.border}`,
+      }}
+    >
+      <div className="flex items-center gap-2">
+        <div
+          className="w-8 h-8 rounded-lg flex items-center justify-center"
+          style={{
+            background: C.accentSoft,
+          }}
+        >
+          <Users
+            size={16}
+            color={C.primary}
+          />
+        </div>
+
+        <div className="text-left">
+          <div className="text-sm font-bold">
+            Clientes de días anteriores
+          </div>
+
+          <div
+            className="text-[10px]"
+            style={{ color: C.muted }}
+          >
+            {clientesDiasAnteriores.length} cliente
+            {clientesDiasAnteriores.length !== 1
+              ? "s"
+              : ""}{" "}
+            disponible
+            {clientesDiasAnteriores.length !== 1
+              ? "s"
+              : ""}
+          </div>
+        </div>
+      </div>
+
+      <ChevronRight
+        size={17}
+        color={C.muted}
+        style={{
+          transform: mostrarDiasAnteriores
+            ? "rotate(90deg)"
+            : "rotate(0deg)",
+          transition: "transform 0.2s",
+        }}
+      />
+    </button>
+
+    {mostrarDiasAnteriores && (
+      <div className="mt-2">
+        {/* BUSCADOR INTERNO */}
+        <div className="relative mb-3">
+          <Search
+            size={15}
+            color={C.mutedLight}
+            style={{
+              position: "absolute",
+              left: 10,
+              top: 11,
+            }}
+          />
+
+          <input
+            value={buscaDiasAnteriores}
+            onChange={(e) =>
+              setBuscaDiasAnteriores(
+                e.target.value
+              )
+            }
+            placeholder="Buscar cliente anterior..."
+            className="w-full rounded-xl pl-8 pr-8 py-2.5 text-sm outline-none"
+            style={{
+              background: C.surface,
+              border: `1px solid ${C.border}`,
+              color: C.ink,
+            }}
+          />
+
+          {buscaDiasAnteriores && (
+            <button
+              type="button"
+              onClick={() =>
+                setBuscaDiasAnteriores("")
+              }
+              style={{
+                position: "absolute",
+                right: 10,
+                top: 10,
+              }}
+            >
+              <X
+                size={17}
+                color={C.muted}
+              />
+            </button>
+          )}
+        </div>
+
+        {clientesDiasAnteriores.length === 0 ? (
+          <Card>
+            <div
+              className="text-xs text-center"
+              style={{
+                color: C.mutedLight,
+              }}
+            >
+              {buscaDiasAnteriores
+                ? "No encontramos clientes con esa búsqueda."
+                : "No hay clientes disponibles de días anteriores."}
+            </div>
+          </Card>
+        ) : (
+          <div className="flex flex-col gap-4">
+            {gruposDiasAnteriores.map(
+              ({ dia, clientes: clientesGrupo }) => (
+                <div key={dia}>
+                  <div
+                    className="text-[10px] font-extrabold uppercase tracking-wide mb-2 px-1"
+                    style={{
+                      color: C.primary,
+                    }}
+                  >
+                    {dia}
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    {clientesGrupo.map((c) => (
+                      <Card
+                        key={`anterior-${c.id}`}
+                        onClick={() =>
+                          abrirNuevaVisita(c)
+                        }
+                        style={{
+                          cursor: "pointer",
+                        }}
+                      >
+                        <div className="flex items-start gap-2">
+                          <div
+                            className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0"
+                            style={{
+                              background:
+                                C.accentSoft,
+                              color: C.primary,
+                            }}
+                          >
+                            <Plus size={15} />
+                          </div>
+
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <div className="font-bold text-sm">
+                                {c.nombre}
+                              </div>
+
+                              <Badge tone="accent">
+                                {dia.slice(0, 3)}
+                              </Badge>
+                            </div>
+
+                            <div
+                              className="text-xs"
+                              style={{
+                                color: C.muted,
+                              }}
+                            >
+                              {c.direccion}
+                            </div>
+
+                            {Number(
+                              c.deudaAcumulada
+                            ) > 0 && (
+                              <div className="mt-1">
+                                <Badge tone="danger">
+                                  Debe{" "}
+                                  {formatMoney(
+                                    c.deudaAcumulada
+                                  )}
+                                </Badge>
+                              </div>
+                            )}
+
+                            <div
+                              className="text-[10px] mt-1.5"
+                              style={{
+                                color:
+                                  C.mutedLight,
+                              }}
+                            >
+                              Tocar para registrar una
+                              visita extraordinaria hoy
+                            </div>
+                          </div>
+
+                          <ChevronRight
+                            size={17}
+                            color={C.mutedLight}
+                          />
+                        </div>
+                      </Card>
+                    ))}
+                  </div>
+                </div>
+              )
+            )}
+          </div>
+        )}
+      </div>
+    )}
+  </div>
+)}
+
       {/* CLIENTES VISITADOS Y FINALIZADOS */}
-      {visitadosFinalizados.length > 0 && (
+      {visitadosParaMostrar.length > 0 && (
         <div className="mb-4">
           <button
             type="button"
@@ -4532,7 +4941,7 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
             <div className="flex items-center gap-2">
               <CheckCircle2 size={16} color={C.success} />
               <span className="text-sm font-bold">
-                Clientes visitados ({visitadosFinalizados.length})
+                Clientes visitados ({visitadosParaMostrar.length})
               </span>
             </div>
 
@@ -4551,7 +4960,7 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
 
           {(mostrarVisitados || busca.trim()) && (
             <div className="flex flex-col gap-2 mt-2">
-              {visitadosFinalizados.map((c) => {
+              {visitadosParaMostrar.map((c) => {
                 const visita = visitaPorCliente.get(c.id);
                 const fueVenta = visita?.vendio === true;
 
