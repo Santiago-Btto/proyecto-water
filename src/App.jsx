@@ -1261,6 +1261,7 @@ function AdminDashboard({ db }) {
   const [rango, setRango] = useState("hoy"); // hoy | semana | mes | todo | dia
   const [fechaSeleccionada, setFechaSeleccionada] = useState(hoy);
   const [mostrarCalendario, setMostrarCalendario] = useState(false);
+  const [mostrarVisitas, setMostrarVisitas] = useState(false);
 
   function fechaLocal(iso) {
     try {
@@ -1405,6 +1406,10 @@ const totalBultosVendidos = PRODUCTOS.reduce(
       : rango === "todo"
       ? "Todo el historial"
       : `${diaSemanaDeFecha(fechaSeleccionada)} ${fechaLegible(fechaSeleccionada)}`;
+
+  useEffect(() => {
+    setMostrarVisitas(false);
+  }, [rango, fechaSeleccionada]);
 
   function elegirRango(nuevoRango) {
     setRango(nuevoRango);
@@ -1803,116 +1808,198 @@ const totalBultosVendidos = PRODUCTOS.reduce(
         </div>
       )}
 
-      <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
-        Visitas · {etiquetaRango} ({visitasFiltradas.length})
-      </div>
+      {/* =====================================================
+          VISITAS - DESPLEGABLE
+          ===================================================== */}
+      <div className="mb-4">
+        <button
+          type="button"
+          onClick={() => setMostrarVisitas(!mostrarVisitas)}
+          className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
+          style={{
+            background: C.surface,
+            border: `1px solid ${C.border}`,
+          }}
+        >
+          <div className="flex items-center gap-2">
+            <div
+              className="w-8 h-8 rounded-lg flex items-center justify-center"
+              style={{ background: C.accentSoft }}
+            >
+              <ClipboardList size={16} color={C.primary} />
+            </div>
 
-      {visitasFiltradas.length === 0 ? (
-        <Card className="mb-4">
-          <div className="text-xs text-center" style={{ color: C.mutedLight }}>
-            No hay visitas registradas para este período.
+            <div className="text-left">
+              <div
+                className="text-xs font-extrabold uppercase tracking-wide"
+                style={{ color: C.muted }}
+              >
+                Visitas · {etiquetaRango}
+              </div>
+              <div className="text-[10px]" style={{ color: C.mutedLight }}>
+                {visitasFiltradas.length} visita
+                {visitasFiltradas.length !== 1 ? "s" : ""} registrada
+                {visitasFiltradas.length !== 1 ? "s" : ""}
+              </div>
+            </div>
           </div>
-        </Card>
-      ) : (
-        <div className="flex flex-col gap-2 mb-4">
-          {visitasFiltradas.map((v) => {
-            const cliente = db.clientes.find((c) => c.id === v.clienteId);
-            const rep = db.config.repartidores.find((r) => r.id === v.repartidorId);
-            const productos = (v.items || [])
-              .filter((it) => (Number(it.cantidad) || 0) > 0)
-              .map((it) => {
-                const prod = PRODUCTOS.find((p) => p.key === it.tipo);
-                return `${it.cantidad}× ${prod?.corto || it.tipo}`;
-              })
-              .join(", ");
 
-            return (
-              <Card key={v.id}>
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="font-bold text-sm">
-                      {cliente?.nombre || v.clienteNombre || "Cliente eliminado"}
-                    </div>
-                    <div className="text-xs" style={{ color: C.muted }}>
-                      {rango === "dia" || rango === "hoy" ? "" : `${fechaLegible(v.fecha)} · `}
-                      {rep?.nombre || "—"}
-                    </div>
-                  </div>
-                  {v.vendio ? (
-                    <Badge tone="success">{formatMoney(v.total)}</Badge>
-                  ) : (
-                    <Badge tone="muted">No vendió</Badge>
-                  )}
+          <div className="flex items-center gap-2">
+            <div
+              className="rounded-lg px-2.5 py-1 font-mono font-extrabold text-sm"
+              style={{
+                background: C.primaryDark,
+                color: "#fff",
+                minWidth: 38,
+                textAlign: "center",
+              }}
+            >
+              {visitasFiltradas.length}
+            </div>
+
+            <ChevronRight
+              size={18}
+              color={C.muted}
+              style={{
+                transform: mostrarVisitas ? "rotate(90deg)" : "rotate(0deg)",
+                transition: "transform 0.2s",
+              }}
+            />
+          </div>
+        </button>
+
+        {mostrarVisitas && (
+          <div className="mt-2">
+            {visitasFiltradas.length === 0 ? (
+              <Card>
+                <div
+                  className="text-xs text-center"
+                  style={{ color: C.mutedLight }}
+                >
+                  No hay visitas registradas para este período.
                 </div>
-
-                {v.vendio && productos && (
-                  <div className="text-xs mt-1">{productos}</div>
-                )}
-
-                <div className="flex flex-wrap gap-1 mt-2">
-                  {(Number(v.pagos?.efectivo) || 0) > 0 && (
-                    <Badge tone="success">
-                      Efectivo {formatMoney(v.pagos.efectivo)}
-                    </Badge>
-                  )}
-                  {(Number(v.pagos?.mercadopago) || 0) > 0 && (
-                    <Badge tone="accent">
-                      MP {formatMoney(v.pagos.mercadopago)}
-                    </Badge>
-                  )}
-                  {(Number(v.deudaGenerada) || 0) > 0 && (
-                    <Badge tone="danger">
-                      Fiado {formatMoney(v.deudaGenerada)}
-                    </Badge>
-                  )}
-                </div>
-
-                {(Number(v.deudaCobrada) || 0) > 0 && (
-                  <div className="text-xs mt-1" style={{ color: C.success }}>
-                    Cobró deuda anterior: {formatMoney(v.deudaCobrada)}
-                  </div>
-                )}
-
-                {v.ajusteDeudaManual !== undefined && Number(v.ajusteDeudaManual) !== 0 && (
-                  <div
-                    className="text-xs mt-1"
-                    style={{ color: Number(v.ajusteDeudaManual) > 0 ? C.danger : C.success }}
-                  >
-                    Ajuste manual de saldo: {Number(v.ajusteDeudaManual) > 0 ? "+" : ""}
-                    {formatMoney(v.ajusteDeudaManual)}
-                  </div>
-                )}
-
-                {textoExtrasPrestados(v) && (
-                  <div className="text-xs mt-1" style={{ color: C.warning }}>
-                    Prestó extra: {textoExtrasPrestados(v)}
-                  </div>
-                )}
-                {textoExtrasRetirados(v) && (
-                  <div className="text-xs mt-1" style={{ color: C.success }}>
-                    Retiró extra: {textoExtrasRetirados(v)}
-                  </div>
-                )}
-                {textoPermanentesRetirados(v) && (
-                  <div className="text-xs mt-1" style={{ color: C.success }}>
-                    Devolvió permanente: {textoPermanentesRetirados(v)}
-                  </div>
-                )}
-                {v.volverSabadoFecha && (
-                  <div className="text-xs mt-1" style={{ color: C.warning }}>
-                    Volver el sábado: {fechaLegible(v.volverSabadoFecha)}
-                  </div>
-                )}
-                {v.notas && (
-                  <div className="text-xs mt-1 italic" style={{ color: C.mutedLight }}>
-                    {v.notas}
-                  </div>
-                )}
               </Card>
-            );
-          })}
-        </div>
-      )}
+            ) : (
+              <div className="flex flex-col gap-2">
+                {visitasFiltradas.map((v) => {
+                  const cliente = db.clientes.find((c) => c.id === v.clienteId);
+                  const rep = db.config.repartidores.find(
+                    (r) => r.id === v.repartidorId
+                  );
+                  const productos = (v.items || [])
+                    .filter((it) => (Number(it.cantidad) || 0) > 0)
+                    .map((it) => {
+                      const prod = PRODUCTOS.find((p) => p.key === it.tipo);
+                      return `${it.cantidad}× ${prod?.corto || it.tipo}`;
+                    })
+                    .join(", ");
+
+                  return (
+                    <Card key={v.id}>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="font-bold text-sm">
+                            {cliente?.nombre ||
+                              v.clienteNombre ||
+                              "Cliente eliminado"}
+                          </div>
+                          <div className="text-xs" style={{ color: C.muted }}>
+                            {rango === "dia" || rango === "hoy"
+                              ? ""
+                              : `${fechaLegible(v.fecha)} · `}
+                            {rep?.nombre || "—"}
+                          </div>
+                        </div>
+
+                        {v.vendio ? (
+                          <Badge tone="success">{formatMoney(v.total)}</Badge>
+                        ) : (
+                          <Badge tone="muted">No vendió</Badge>
+                        )}
+                      </div>
+
+                      {v.vendio && productos && (
+                        <div className="text-xs mt-1">{productos}</div>
+                      )}
+
+                      <div className="flex flex-wrap gap-1 mt-2">
+                        {(Number(v.pagos?.efectivo) || 0) > 0 && (
+                          <Badge tone="success">
+                            Efectivo {formatMoney(v.pagos.efectivo)}
+                          </Badge>
+                        )}
+                        {(Number(v.pagos?.mercadopago) || 0) > 0 && (
+                          <Badge tone="accent">
+                            MP {formatMoney(v.pagos.mercadopago)}
+                          </Badge>
+                        )}
+                        {(Number(v.deudaGenerada) || 0) > 0 && (
+                          <Badge tone="danger">
+                            Fiado {formatMoney(v.deudaGenerada)}
+                          </Badge>
+                        )}
+                      </div>
+
+                      {(Number(v.deudaCobrada) || 0) > 0 && (
+                        <div className="text-xs mt-1" style={{ color: C.success }}>
+                          Cobró deuda anterior: {formatMoney(v.deudaCobrada)}
+                        </div>
+                      )}
+
+                      {v.ajusteDeudaManual !== undefined &&
+                        Number(v.ajusteDeudaManual) !== 0 && (
+                          <div
+                            className="text-xs mt-1"
+                            style={{
+                              color:
+                                Number(v.ajusteDeudaManual) > 0
+                                  ? C.danger
+                                  : C.success,
+                            }}
+                          >
+                            Ajuste manual de saldo: {
+                              Number(v.ajusteDeudaManual) > 0 ? "+" : ""
+                            }
+                            {formatMoney(v.ajusteDeudaManual)}
+                          </div>
+                        )}
+
+                      {textoExtrasPrestados(v) && (
+                        <div className="text-xs mt-1" style={{ color: C.warning }}>
+                          Prestó extra: {textoExtrasPrestados(v)}
+                        </div>
+                      )}
+                      {textoExtrasRetirados(v) && (
+                        <div className="text-xs mt-1" style={{ color: C.success }}>
+                          Retiró extra: {textoExtrasRetirados(v)}
+                        </div>
+                      )}
+                      {textoPermanentesRetirados(v) && (
+                        <div className="text-xs mt-1" style={{ color: C.success }}>
+                          Devolvió permanente: {textoPermanentesRetirados(v)}
+                        </div>
+                      )}
+                      {v.volverSabadoFecha && (
+                        <div className="text-xs mt-1" style={{ color: C.warning }}>
+                          Volver el sábado: {fechaLegible(v.volverSabadoFecha)}
+                        </div>
+                      )}
+                      {v.notas && (
+                        <div
+                          className="text-xs mt-1 italic"
+                          style={{ color: C.mutedLight }}
+                        >
+                          {v.notas}
+                        </div>
+                      )}
+                    </Card>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
         Gastos · {etiquetaRango} ({gastosFiltrados.length})
@@ -3780,38 +3867,25 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
   ]);
 
   const citasSabadoExtra = misClientes
-  .filter(
-    (c) =>
-      idsCitaSabadoHoy.has(c.id) &&
-      !idsYaIncluidos.has(c.id)
-  )
-  .map((c) => ({
-    ...c,
-    citaSabado: true,
-  }))
-  .sort((a, b) => {
-    const ordenA =
-      a.orden === "" ||
-      a.orden === null ||
-      a.orden === undefined
-        ? Infinity
-        : Number(a.orden);
+    .filter(
+      (c) =>
+        idsCitaSabadoHoy.has(c.id) &&
+        !idsYaIncluidos.has(c.id)
+    )
+    .map((c) => ({ ...c, citaSabado: true }))
+    .sort((a, b) => {
+      const ordenA =
+        a.orden === "" || a.orden === null || a.orden === undefined
+          ? Infinity
+          : Number(a.orden);
+      const ordenB =
+        b.orden === "" || b.orden === null || b.orden === undefined
+          ? Infinity
+          : Number(b.orden);
 
-    const ordenB =
-      b.orden === "" ||
-      b.orden === null ||
-      b.orden === undefined
-        ? Infinity
-        : Number(b.orden);
-
-    if (ordenA !== ordenB) {
-      return ordenA - ordenB;
-    }
-
-    return (a.nombre || "").localeCompare(
-      b.nombre || ""
-    );
-  });
+      if (ordenA !== ordenB) return ordenA - ordenB;
+      return (a.nombre || "").localeCompare(b.nombre || "");
+    });
 
   const clientesRecorrido = [
     ...clientesHoyConPendientes,
@@ -4047,15 +4121,37 @@ function RepartidorInicio({
 function RepartidorClientes({ db, mutate, repartidor }) {
   const [sheet, setSheet] = useState(null);
   const [busca, setBusca] = useState("");
-  const misClientes = db.clientes
-    .filter((c) => c.repartidorId === repartidor.id)
-    .filter((c) => c.nombre.toLowerCase().includes(busca.toLowerCase()) || c.direccion.toLowerCase().includes(busca.toLowerCase()))
-    .sort((a, b) => a.nombre.localeCompare(b.nombre));
+  const [detalleId, setDetalleId] = useState(null);
+
+  // Base completa de clientes de este repartidor.
+  // El historial solo puede abrirse para clientes que le pertenecen.
+  const clientesDelRepartidor = db.clientes
+    .filter((c) => c.repartidorId === repartidor.id);
+
+  const misClientes = clientesDelRepartidor
+    .filter((c) => {
+      const texto = busca.toLowerCase();
+      const nombre = (c.nombre || "").toLowerCase();
+      const direccion = (c.direccion || "").toLowerCase();
+      return nombre.includes(texto) || direccion.includes(texto);
+    })
+    .sort((a, b) => (a.nombre || "").localeCompare(b.nombre || ""));
+
+  const clienteDetalle = detalleId
+    ? clientesDelRepartidor.find((c) => c.id === detalleId)
+    : null;
 
   function guardar(f) {
     const next = clone(db);
+
     if (f.id) {
       const i = next.clientes.findIndex((c) => c.id === f.id);
+      if (i < 0) return;
+
+      // Seguridad adicional: el repartidor solo puede modificar
+      // un cliente que siga asignado a su perfil.
+      if (next.clientes[i].repartidorId !== repartidor.id) return;
+
       const actualizado = {
         ...next.clientes[i],
         ...f,
@@ -4063,6 +4159,7 @@ function RepartidorClientes({ db, mutate, repartidor }) {
         envasesPermanentes: envasesPermanentesDe(next.clientes[i]),
         envasesExtra: envasesExtraDe(next.clientes[i]),
       };
+
       delete actualizado.envasesPrestados;
       next.clientes[i] = actualizado;
     } else {
@@ -4070,24 +4167,60 @@ function RepartidorClientes({ db, mutate, repartidor }) {
         ...f,
         id: uid(),
         repartidorId: repartidor.id,
-        deudaAcumulada:
-  Math.max(0, Number(f.deudaAcumulada) || 0),
+        deudaAcumulada: Math.max(0, Number(f.deudaAcumulada) || 0),
         envasesPermanentes: envasesVacio(),
         envasesExtra: envasesVacio(),
         creadoEl: hoyISO(),
       };
+
       delete nuevo.envasesPrestados;
       next.clientes.push(nuevo);
     }
+
     mutate(next);
     setSheet(null);
+  }
+
+  // Al tocar un cliente, primero mostramos su historial.
+  // Desde ahí el repartidor todavía puede entrar a Editar.
+  if (clienteDetalle) {
+    return (
+      <div>
+        <ClienteHistorial
+          cliente={clienteDetalle}
+          db={db}
+          onBack={() => setDetalleId(null)}
+          onEditar={() => setSheet(clienteDetalle)}
+        />
+
+        {sheet && (
+          <Sheet
+            title="Editar cliente"
+            onClose={() => setSheet(null)}
+            closeOnBackdrop={false}
+          >
+            <ClienteForm
+              initial={sheet === "nuevo" ? null : sheet}
+              repartidores={db.config.repartidores}
+              isAdmin={false}
+              onSave={guardar}
+              onCancel={() => setSheet(null)}
+            />
+          </Sheet>
+        )}
+      </div>
+    );
   }
 
   return (
     <div>
       <div className="flex gap-2 mb-3">
         <div className="flex-1 relative">
-          <Search size={16} color={C.mutedLight} style={{ position: "absolute", left: 10, top: 11 }} />
+          <Search
+            size={16}
+            color={C.mutedLight}
+            style={{ position: "absolute", left: 10, top: 11 }}
+          />
           <input
             value={busca}
             onChange={(e) => setBusca(e.target.value)}
@@ -4096,51 +4229,119 @@ function RepartidorClientes({ db, mutate, repartidor }) {
             style={{ background: C.surface, border: `1px solid ${C.border}` }}
           />
         </div>
-        <Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo</Btn>
+
+        <Btn icon={Plus} onClick={() => setSheet("nuevo")}>
+          Nuevo
+        </Btn>
       </div>
+
       {misClientes.length === 0 ? (
-        <EmptyState icon={Users} title={busca ? "Sin resultados" : "Todavía no tenés clientes"} text={busca ? "Probá con otro nombre o dirección." : "Agregá tu primer cliente para que aparezca en tu recorrido."} action={!busca && <Btn icon={Plus} onClick={() => setSheet("nuevo")}>Nuevo cliente</Btn>} />
+        <EmptyState
+          icon={Users}
+          title={busca ? "Sin resultados" : "Todavía no tenés clientes"}
+          text={
+            busca
+              ? "Probá con otro nombre o dirección."
+              : "Agregá tu primer cliente para que aparezca en tu recorrido."
+          }
+          action={
+            !busca && (
+              <Btn icon={Plus} onClick={() => setSheet("nuevo")}>
+                Nuevo cliente
+              </Btn>
+            )
+          }
+        />
       ) : (
         <div className="flex flex-col gap-2">
           {misClientes.map((c) => (
-            <Card key={c.id} onClick={() => setSheet(c)}>
-              <div className="font-bold text-sm">{c.nombre}</div>
-              <div className="text-xs" style={{ color: C.muted }}>{c.direccion}</div>
-              {c.deudaAcumulada > 0 && (
-                <div
-                  className="rounded-xl px-3 py-2 mt-2"
-                  style={{
-                    background: C.dangerBg,
-                    border: `1px solid ${C.danger}`,
-                  }}
-                >
-                  <div
-                    className="text-[10px] font-extrabold uppercase tracking-wide"
-                    style={{ color: C.danger }}
-                  >
-                    Saldo pendiente
+            <Card
+              key={c.id}
+              onClick={() => setDetalleId(c.id)}
+              style={{ cursor: "pointer" }}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="font-bold text-sm">{c.nombre}</div>
+                  <div className="text-xs" style={{ color: C.muted }}>
+                    {c.direccion}
                   </div>
+
+                  {c.deudaAcumulada > 0 && (
+                    <div
+                      className="rounded-xl px-3 py-2 mt-2"
+                      style={{
+                        background: C.dangerBg,
+                        border: `1px solid ${C.danger}`,
+                      }}
+                    >
+                      <div
+                        className="text-[10px] font-extrabold uppercase tracking-wide"
+                        style={{ color: C.danger }}
+                      >
+                        Saldo pendiente
+                      </div>
+                      <div
+                        className="font-mono font-extrabold text-base"
+                        style={{ color: C.danger }}
+                      >
+                        {formatMoney(c.deudaAcumulada)}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap gap-1 mt-1.5">
+                    {(c.diasVisita || []).map((d) => (
+                      <Badge key={d} tone="accent">
+                        {d.slice(0, 3)}
+                      </Badge>
+                    ))}
+
+                    {totalEnvasesPrestados(envasesPermanentesDe(c)) > 0 && (
+                      <Badge tone="accent">
+                        Permanentes: {textoEnvasesPrestados(envasesPermanentesDe(c))}
+                      </Badge>
+                    )}
+
+                    {totalEnvasesPrestados(envasesExtraDe(c)) > 0 && (
+                      <Badge tone="warning">
+                        Extra: {textoEnvasesPrestados(envasesExtraDe(c))}
+                      </Badge>
+                    )}
+
+                    {c.maquinaFrioCalor && (
+                      <Badge tone="accent">Máquina F/C</Badge>
+                    )}
+                  </div>
+
                   <div
-                    className="font-mono font-extrabold text-base"
-                    style={{ color: C.danger }}
+                    className="text-[10px] mt-2 font-semibold"
+                    style={{ color: C.primary }}
                   >
-                    {formatMoney(c.deudaAcumulada)}
+                    Tocar para ver historial de compras
                   </div>
                 </div>
-              )}
-              <div className="flex flex-wrap gap-1 mt-1.5">
-                {c.diasVisita.map((d) => <Badge key={d} tone="accent">{d.slice(0, 3)}</Badge>)}
-                {totalEnvasesPrestados(envasesPermanentesDe(c)) > 0 && <Badge tone="accent">Permanentes: {textoEnvasesPrestados(envasesPermanentesDe(c))}</Badge>}
-                      {totalEnvasesPrestados(envasesExtraDe(c)) > 0 && <Badge tone="warning">Extra: {textoEnvasesPrestados(envasesExtraDe(c))}</Badge>}
-                {c.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
+
+                <ChevronRight size={18} color={C.mutedLight} />
               </div>
             </Card>
           ))}
         </div>
       )}
+
       {sheet && (
-        <Sheet title={sheet === "nuevo" ? "Nuevo cliente" : "Editar cliente"} onClose={() => setSheet(null)} closeOnBackdrop={false}>
-          <ClienteForm initial={sheet === "nuevo" ? null : sheet} repartidores={db.config.repartidores} isAdmin={false} onSave={guardar} onCancel={() => setSheet(null)} />
+        <Sheet
+          title={sheet === "nuevo" ? "Nuevo cliente" : "Editar cliente"}
+          onClose={() => setSheet(null)}
+          closeOnBackdrop={false}
+        >
+          <ClienteForm
+            initial={sheet === "nuevo" ? null : sheet}
+            repartidores={db.config.repartidores}
+            isAdmin={false}
+            onSave={guardar}
+            onCancel={() => setSheet(null)}
+          />
         </Sheet>
       )}
     </div>
@@ -4359,37 +4560,20 @@ const gruposDiasAnteriores =
   );
 
   const citasSabado = clientesFiltrados
-  .filter(
-    (c) =>
-      !visitaPorCliente.has(c.id) &&
-      !!c.citaSabado
-  )
-  .sort((a, b) => {
-    const ordenA =
-      a.orden === "" ||
-      a.orden === null ||
-      a.orden === undefined
-        ? Infinity
-        : Number(a.orden);
+    .filter((c) => !visitaPorCliente.has(c.id) && !!c.citaSabado)
+    .sort((a, b) => {
+      const ordenA =
+        a.orden === "" || a.orden === null || a.orden === undefined
+          ? Infinity
+          : Number(a.orden);
+      const ordenB =
+        b.orden === "" || b.orden === null || b.orden === undefined
+          ? Infinity
+          : Number(b.orden);
 
-    const ordenB =
-      b.orden === "" ||
-      b.orden === null ||
-      b.orden === undefined
-        ? Infinity
-        : Number(b.orden);
-
-    // Primero ordenamos por número de recorrido
-    if (ordenA !== ordenB) {
-      return ordenA - ordenB;
-    }
-
-    // Si tienen el mismo número,
-    // ordenamos alfabéticamente
-    return (a.nombre || "").localeCompare(
-      b.nombre || ""
-    );
-  });
+      if (ordenA !== ordenB) return ordenA - ordenB;
+      return (a.nombre || "").localeCompare(b.nombre || "");
+    });
 
   const pendientesAnteriores = clientesFiltrados.filter(
     (c) =>
@@ -5058,6 +5242,9 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
           precios={db.config.precios}
           stockActivo={db.config.stockActivo}
           stockRepartidor={stockAntesDeVisita(visitaEditando)}
+          historialVisitas={db.visitas.filter(
+            (v) => v.clienteId === clienteParaSheet.id
+          )}
           onClose={() => {
             setActivo(null);
             setVisitaEditando(null);
@@ -5277,6 +5464,7 @@ function VisitaSheet({
   precios,
   stockActivo,
   stockRepartidor,
+  historialVisitas = [],
   onClose,
   onGuardar,
 }) {
@@ -5449,6 +5637,37 @@ const [montoDeuda, setMontoDeuda] = useState(
     proximoSabadoISO(visitaInicial?.fecha || hoyISO());
 
   const [errorStock, setErrorStock] = useState("");
+
+  // Historial rápido dentro de la visita. Se mantiene cerrado por defecto
+  // para no molestar durante el reparto y se consulta solo cuando hace falta.
+  const [mostrarHistorialCompras, setMostrarHistorialCompras] =
+    useState(false);
+
+  // Al editar una visita, excluimos esa misma visita del historial porque
+  // ya está abierta en el formulario actual. El resto queda ordenado de
+  // más reciente a más antiguo.
+  const visitasHistorialCliente = useMemo(() => {
+    return (historialVisitas || [])
+      .filter((v) => v.id !== visitaInicial?.id)
+      .slice()
+      .sort((a, b) => {
+        const porFecha = (b.fecha || "").localeCompare(a.fecha || "");
+        if (porFecha !== 0) return porFecha;
+        return (b.timestamp || 0) - (a.timestamp || 0);
+      });
+  }, [historialVisitas, visitaInicial?.id]);
+
+  const gruposHistorialCliente = useMemo(() => {
+    const grupos = {};
+
+    visitasHistorialCliente.forEach((v) => {
+      const mes = (v.fecha || "").slice(0, 7) || "sin-fecha";
+      if (!grupos[mes]) grupos[mes] = [];
+      grupos[mes].push(v);
+    });
+
+    return Object.entries(grupos);
+  }, [visitasHistorialCliente]);
 
   const [mostrarExtras, setMostrarExtras] = useState(() => {
   // Si estamos editando una visita que ya tuvo
@@ -5789,6 +6008,231 @@ deudaCobrada: deudaCobradaFinal,
           </div>
         </Card>
       )}
+
+
+      {/* =====================================================
+          HISTORIAL RÁPIDO DEL CLIENTE DURANTE EL REPARTO
+          Cerrado por defecto. No permite editar visitas viejas.
+          ===================================================== */}
+      <div className="mb-3">
+        <button
+          type="button"
+          onClick={() =>
+            setMostrarHistorialCompras(!mostrarHistorialCompras)
+          }
+          className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
+          style={{
+            background: C.surface,
+            border: `1px solid ${C.border}`,
+          }}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <div
+              className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
+              style={{ background: C.accentSoft }}
+            >
+              <ClipboardList size={17} color={C.primary} />
+            </div>
+
+            <div className="text-left min-w-0">
+              <div className="text-xs font-extrabold" style={{ color: C.ink }}>
+                Historial de compras
+              </div>
+              <div className="text-[10px] truncate" style={{ color: C.muted }}>
+                {visitasHistorialCliente.length === 0
+                  ? "Sin visitas anteriores"
+                  : `${visitasHistorialCliente.length} visita${
+                      visitasHistorialCliente.length !== 1 ? "s" : ""
+                    } anterior${
+                      visitasHistorialCliente.length !== 1 ? "es" : ""
+                    }`}
+              </div>
+            </div>
+          </div>
+
+          <ChevronRight
+            size={18}
+            color={C.muted}
+            style={{
+              transform: mostrarHistorialCompras
+                ? "rotate(90deg)"
+                : "rotate(0deg)",
+              transition: "transform 0.2s",
+            }}
+          />
+        </button>
+
+        {mostrarHistorialCompras && (
+          <div
+            className="mt-1 rounded-2xl p-3"
+            style={{
+              background: C.bg,
+              border: `1px solid ${C.border}`,
+              borderTopLeftRadius: 0,
+              borderTopRightRadius: 0,
+            }}
+          >
+            {visitasHistorialCliente.length === 0 ? (
+              <div
+                className="text-xs text-center py-4"
+                style={{ color: C.mutedLight }}
+              >
+                Este cliente todavía no tiene visitas anteriores registradas.
+              </div>
+            ) : (
+              <div className="flex flex-col gap-4">
+                {gruposHistorialCliente.map(([mes, visitasMes]) => {
+                  let tituloMes = mes;
+
+                  if (mes !== "sin-fecha") {
+                    const [anio, numeroMes] = mes.split("-");
+                    const nombreMes = NOMBRES_MES[Number(numeroMes) - 1];
+                    tituloMes = nombreMes
+                      ? `${nombreMes} ${anio}`
+                      : mes;
+                  }
+
+                  return (
+                    <div key={mes}>
+                      <div
+                        className="text-[10px] font-extrabold uppercase tracking-wide mb-2 px-1"
+                        style={{ color: C.primary }}
+                      >
+                        {tituloMes}
+                      </div>
+
+                      <div className="flex flex-col gap-2">
+                        {visitasMes.map((v) => {
+                          const productos = (v.items || [])
+                            .filter((it) => (Number(it.cantidad) || 0) > 0)
+                            .map((it) => {
+                              const producto = PRODUCTOS.find(
+                                (p) => p.key === it.tipo
+                              );
+                              return `${it.cantidad}× ${
+                                producto?.corto || it.tipo
+                              }`;
+                            })
+                            .join(", ");
+
+                          const metodo = {
+                            efectivo: "Efectivo",
+                            mercadopago: "Mercado Pago",
+                            deuda: "Fiado",
+                          }[v.metodoPago];
+
+                          return (
+                            <div
+                              key={v.id}
+                              className="rounded-xl px-3 py-2.5"
+                              style={{
+                                background: C.surface,
+                                border: `1px solid ${C.border}`,
+                              }}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div>
+                                  <div
+                                    className="text-[10px] font-bold"
+                                    style={{ color: C.muted }}
+                                  >
+                                    {v.fecha ? fechaLegible(v.fecha) : "Sin fecha"}
+                                  </div>
+
+                                  {v.vendio && productos && (
+                                    <div className="text-xs font-semibold mt-0.5">
+                                      {productos}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {v.vendio ? (
+                                  <Badge tone="success">
+                                    {formatMoney(v.total || 0)}
+                                  </Badge>
+                                ) : (
+                                  <Badge tone="muted">No vendió</Badge>
+                                )}
+                              </div>
+
+                              {v.vendio && metodo && (
+                                <div
+                                  className="text-[10px] mt-1"
+                                  style={{ color: C.muted }}
+                                >
+                                  {metodo}
+                                  {(Number(v.deudaGenerada) || 0) > 0 &&
+                                    ` · Fiado ${formatMoney(
+                                      v.deudaGenerada
+                                    )}`}
+                                </div>
+                              )}
+
+                              {(Number(v.deudaCobrada) || 0) > 0 && (
+                                <div
+                                  className="text-[10px] mt-1 font-semibold"
+                                  style={{ color: C.success }}
+                                >
+                                  Cobró deuda anterior: {formatMoney(v.deudaCobrada)}
+                                </div>
+                              )}
+
+                              {textoExtrasPrestados(v) && (
+                                <div
+                                  className="text-[10px] mt-1"
+                                  style={{ color: C.warning }}
+                                >
+                                  Prestó extra: {textoExtrasPrestados(v)}
+                                </div>
+                              )}
+
+                              {textoExtrasRetirados(v) && (
+                                <div
+                                  className="text-[10px] mt-1"
+                                  style={{ color: C.success }}
+                                >
+                                  Retiró extra: {textoExtrasRetirados(v)}
+                                </div>
+                              )}
+
+                              {textoPermanentesRetirados(v) && (
+                                <div
+                                  className="text-[10px] mt-1"
+                                  style={{ color: C.success }}
+                                >
+                                  Devolvió permanente: {textoPermanentesRetirados(v)}
+                                </div>
+                              )}
+
+                              {v.volverSabadoFecha && (
+                                <div
+                                  className="text-[10px] mt-1"
+                                  style={{ color: C.warning }}
+                                >
+                                  Volver sábado: {fechaLegible(v.volverSabadoFecha)}
+                                </div>
+                              )}
+
+                              {v.notas && (
+                                <div
+                                  className="text-[10px] mt-1 italic"
+                                  style={{ color: C.mutedLight }}
+                                >
+                                  {v.notas}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       <div className="mb-3">
   <button
