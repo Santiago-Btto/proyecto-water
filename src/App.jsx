@@ -3780,12 +3780,38 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
   ]);
 
   const citasSabadoExtra = misClientes
-    .filter(
-      (c) =>
-        idsCitaSabadoHoy.has(c.id) &&
-        !idsYaIncluidos.has(c.id)
-    )
-    .map((c) => ({ ...c, citaSabado: true }));
+  .filter(
+    (c) =>
+      idsCitaSabadoHoy.has(c.id) &&
+      !idsYaIncluidos.has(c.id)
+  )
+  .map((c) => ({
+    ...c,
+    citaSabado: true,
+  }))
+  .sort((a, b) => {
+    const ordenA =
+      a.orden === "" ||
+      a.orden === null ||
+      a.orden === undefined
+        ? Infinity
+        : Number(a.orden);
+
+    const ordenB =
+      b.orden === "" ||
+      b.orden === null ||
+      b.orden === undefined
+        ? Infinity
+        : Number(b.orden);
+
+    if (ordenA !== ordenB) {
+      return ordenA - ordenB;
+    }
+
+    return (a.nombre || "").localeCompare(
+      b.nombre || ""
+    );
+  });
 
   const clientesRecorrido = [
     ...clientesHoyConPendientes,
@@ -4332,9 +4358,38 @@ const gruposDiasAnteriores =
       !c.citaSabado
   );
 
-  const citasSabado = clientesFiltrados.filter(
-    (c) => !visitaPorCliente.has(c.id) && !!c.citaSabado
-  );
+  const citasSabado = clientesFiltrados
+  .filter(
+    (c) =>
+      !visitaPorCliente.has(c.id) &&
+      !!c.citaSabado
+  )
+  .sort((a, b) => {
+    const ordenA =
+      a.orden === "" ||
+      a.orden === null ||
+      a.orden === undefined
+        ? Infinity
+        : Number(a.orden);
+
+    const ordenB =
+      b.orden === "" ||
+      b.orden === null ||
+      b.orden === undefined
+        ? Infinity
+        : Number(b.orden);
+
+    // Primero ordenamos por número de recorrido
+    if (ordenA !== ordenB) {
+      return ordenA - ordenB;
+    }
+
+    // Si tienen el mismo número,
+    // ordenamos alfabéticamente
+    return (a.nombre || "").localeCompare(
+      b.nombre || ""
+    );
+  });
 
   const pendientesAnteriores = clientesFiltrados.filter(
     (c) =>
