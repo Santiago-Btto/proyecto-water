@@ -4,7 +4,7 @@ import {
   ChevronRight, Undo2, Redo2, LogOut, CreditCard, Banknote,
   HandCoins, AlertCircle, Search, Edit2, Trash2,
   ArrowLeft, Lock, ClipboardList, CheckCircle2, Circle, BarChart3,
-  UserCog, Phone, MapPin, Save, Minus, Settings2,
+  UserCog, MessageCircle, MapPin, Save, Minus, Settings2,
   Home as HomeIcon, WifiOff, Download, Boxes, CalendarDays
 } from "lucide-react";
 import {
@@ -118,6 +118,80 @@ function fechaLegible(iso) {
   } catch {
     return iso;
   }
+}
+
+// Convierte teléfonos argentinos al formato que espera WhatsApp.
+//
+// Admite, entre otros:
+//   +54 9 261 5551234
+//   54 9 261 5551234
+//   0261 15 5551234
+//   261 5551234
+//
+// WhatsApp necesita solamente números, con código de país,
+// sin "+", espacios, guiones, 0 de característica ni "15".
+function telefonoAWhatsApp(telefono) {
+  if (!telefono) return "";
+
+  let numero = String(telefono).replace(/\D/g, "");
+  if (!numero) return "";
+
+  // Prefijo internacional escrito como 0054...
+  if (numero.startsWith("00")) {
+    numero = numero.slice(2);
+  }
+
+  // Si ya viene con código de país Argentina.
+  if (numero.startsWith("54")) {
+    let resto = numero.slice(2);
+
+    // Caso ya correcto: 549...
+    if (resto.startsWith("9")) {
+      resto = resto.slice(1).replace(/^0+/, "");
+      return "549" + resto;
+    }
+
+    resto = resto.replace(/^0+/, "");
+
+    // Formato viejo con 15: buscamos el "15" después
+    // de una característica de 2, 3 o 4 dígitos.
+    if (resto.length === 12) {
+      for (const pos of [2, 3, 4]) {
+        if (resto.slice(pos, pos + 2) === "15") {
+          resto = resto.slice(0, pos) + resto.slice(pos + 2);
+          break;
+        }
+      }
+    }
+
+    return "549" + resto;
+  }
+
+  // Número nacional/local.
+  numero = numero.replace(/^0+/, "");
+
+  // Formato argentino viejo: característica + 15 + número.
+  // Ej.: 261155551234 -> 2615551234.
+  if (numero.length === 12) {
+    for (const pos of [2, 3, 4]) {
+      if (numero.slice(pos, pos + 2) === "15") {
+        numero = numero.slice(0, pos) + numero.slice(pos + 2);
+        break;
+      }
+    }
+  }
+
+  return "549" + numero;
+}
+
+function urlWhatsApp(telefono) {
+  const numero = telefonoAWhatsApp(telefono);
+  return numero ? `https://wa.me/${numero}` : "";
+}
+
+function urlGoogleMaps(direccion) {
+  if (!direccion) return "";
+  return `https://maps.google.com/?q=${encodeURIComponent(direccion)}`;
 }
 function diaSemanaDeFecha(iso) {
   try {
@@ -2725,12 +2799,31 @@ function guardarCliente(f) {
                                   )}
                               </div>
 
-                              <div
-                                className="text-xs truncate"
-                                style={{ color: C.muted }}
+                              <a
+                                href={urlGoogleMaps(c.direccion)}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-xs truncate flex items-center gap-1"
+                                style={{ color: C.primary }}
                               >
-                                {c.direccion}
-                              </div>
+                                <MapPin size={12} className="flex-shrink-0" />
+                                <span className="truncate">{c.direccion}</span>
+                              </a>
+
+                              {c.telefono && (
+                                <a
+                                  href={urlWhatsApp(c.telefono)}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="text-xs mt-1 flex items-center gap-1 w-fit"
+                                  style={{ color: C.success }}
+                                >
+                                  <MessageCircle size={12} />
+                                  <span>{c.telefono}</span>
+                                </a>
+                              )}
 
                               <div className="flex flex-wrap gap-1 mt-1.5">
                                 {rep && <Badge tone="muted">{rep.nombre}</Badge>}
@@ -2799,9 +2892,30 @@ function guardarCliente(f) {
                     onClick={() => setDetalleId(c.id)}
                   >
                     <div className="font-bold text-sm">{c.nombre}</div>
-                    <div className="text-xs" style={{ color: C.muted }}>
-                      {c.direccion}
-                    </div>
+                    <a
+                      href={urlGoogleMaps(c.direccion)}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-xs flex items-center gap-1 w-fit"
+                      style={{ color: C.primary }}
+                    >
+                      <MapPin size={12} />
+                      <span>{c.direccion}</span>
+                    </a>
+                    {c.telefono && (
+                      <a
+                        href={urlWhatsApp(c.telefono)}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-xs mt-1 flex items-center gap-1 w-fit"
+                        style={{ color: C.success }}
+                      >
+                        <MessageCircle size={12} />
+                        <span>{c.telefono}</span>
+                      </a>
+                    )}
                     <div className="mt-1">
                       <Badge tone="danger">Falta asignar día</Badge>
                     </div>
@@ -2923,7 +3037,35 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
 
       <Card className="mb-4">
         <div className="font-extrabold text-base">{cliente.nombre}</div>
-        <div className="text-xs" style={{ color: C.muted }}>{cliente.direccion}</div>
+
+        <div className="flex flex-wrap gap-2 mt-1.5">
+          {cliente.direccion && (
+            <a
+              href={urlGoogleMaps(cliente.direccion)}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
+              style={{ background: C.accentSoft, color: C.primary }}
+            >
+              <MapPin size={13} />
+              <span>{cliente.direccion}</span>
+            </a>
+          )}
+
+          {cliente.telefono && (
+            <a
+              href={urlWhatsApp(cliente.telefono)}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
+              style={{ background: C.successBg, color: C.success }}
+            >
+              <MessageCircle size={13} />
+              <span>WhatsApp · {cliente.telefono}</span>
+            </a>
+          )}
+        </div>
+
         {cliente.deudaAcumulada > 0 && (
           <div
             className="rounded-xl px-3 py-2 mt-2"
@@ -4263,9 +4405,32 @@ function RepartidorClientes({ db, mutate, repartidor }) {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
                   <div className="font-bold text-sm">{c.nombre}</div>
-                  <div className="text-xs" style={{ color: C.muted }}>
-                    {c.direccion}
-                  </div>
+
+                  <a
+                    href={urlGoogleMaps(c.direccion)}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="text-xs flex items-center gap-1 w-fit"
+                    style={{ color: C.primary }}
+                  >
+                    <MapPin size={12} />
+                    <span>{c.direccion}</span>
+                  </a>
+
+                  {c.telefono && (
+                    <a
+                      href={urlWhatsApp(c.telefono)}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-xs mt-1 flex items-center gap-1 w-fit"
+                      style={{ color: C.success }}
+                    >
+                      <MessageCircle size={12} />
+                      <span>{c.telefono}</span>
+                    </a>
+                  )}
 
                   {c.deudaAcumulada > 0 && (
                     <div
@@ -5329,9 +5494,17 @@ function ClienteVisitaCard({
             )}
           </div>
 
-          <div className="text-xs" style={{ color: C.muted }}>
-            {cliente.direccion}
-          </div>
+          <a
+            href={urlGoogleMaps(cliente.direccion)}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="text-xs flex items-center gap-1 w-fit"
+            style={{ color: C.primary }}
+          >
+            <MapPin size={12} />
+            <span>{cliente.direccion}</span>
+          </a>
 
           {cliente.deudaAcumulada > 0 && (
             <div
@@ -5423,22 +5596,26 @@ function ClienteVisitaCard({
         >
           {cliente.telefono && (
             <a
-              href={`tel:${cliente.telefono}`}
+              href={urlWhatsApp(cliente.telefono)}
+              target="_blank"
+              rel="noreferrer"
               className="p-1.5 rounded-lg"
-              style={{ background: C.bg }}
+              style={{ background: C.successBg }}
+              aria-label={`Abrir WhatsApp de ${cliente.nombre}`}
+              title="Abrir WhatsApp"
             >
-              <Phone size={13} color={C.primary} />
+              <MessageCircle size={13} color={C.success} />
             </a>
           )}
 
           <a
-            href={`https://maps.google.com/?q=${encodeURIComponent(
-              cliente.direccion
-            )}`}
+            href={urlGoogleMaps(cliente.direccion)}
             target="_blank"
             rel="noreferrer"
             className="p-1.5 rounded-lg"
             style={{ background: C.bg }}
+            aria-label={`Abrir ubicación de ${cliente.nombre}`}
+            title="Abrir en Google Maps"
           >
             <MapPin size={13} color={C.primary} />
           </a>
@@ -5948,11 +6125,32 @@ deudaCobrada: deudaCobradaFinal,
         </Btn>
       }
     >
-      <div
-        className="text-xs mb-3"
-        style={{ color: C.muted }}
-      >
-        {cliente.direccion}
+      <div className="flex flex-wrap gap-2 mb-3">
+        {cliente.direccion && (
+          <a
+            href={urlGoogleMaps(cliente.direccion)}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
+            style={{ background: C.accentSoft, color: C.primary }}
+          >
+            <MapPin size={13} />
+            <span>{cliente.direccion}</span>
+          </a>
+        )}
+
+        {cliente.telefono && (
+          <a
+            href={urlWhatsApp(cliente.telefono)}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
+            style={{ background: C.successBg, color: C.success }}
+          >
+            <MessageCircle size={13} />
+            <span>WhatsApp · {cliente.telefono}</span>
+          </a>
+        )}
       </div>
 
       {(totalEnvasesPrestados(permanentes) > 0 ||
