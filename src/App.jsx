@@ -1604,8 +1604,59 @@ const totalBultosVendidos = PRODUCTOS.reduce(
         <Meter label="Facturado" value={formatMoney(facturado)} />
         <Meter label="Efectivo" value={formatMoney(efectivo)} />
         <Meter label="Mercado Pago" value={formatMoney(mp)} />
-        <Meter label="Fiado" value={formatMoney(fiado)} />
+        <Meter label="Fiado generado" value={formatMoney(fiado)} />
       </div>
+
+      {/* =====================================================
+          PLATA EN LA CALLE
+          Es el saldo ACTUAL de todos los clientes.
+          No depende del filtro Hoy / Semana / Mes / Todo.
+          ===================================================== */}
+      <Card
+        className="mb-4"
+        style={{
+          background: deudaTotalClientes > 0 ? C.dangerBg : C.successBg,
+          border: `1px solid ${
+            deudaTotalClientes > 0 ? C.danger : C.success
+          }`,
+        }}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div
+              className="text-xs font-extrabold uppercase tracking-wide"
+              style={{
+                color: deudaTotalClientes > 0 ? C.danger : C.success,
+              }}
+            >
+              Plata en la calle
+            </div>
+
+            <div
+              className="text-[10px] mt-1"
+              style={{ color: C.muted }}
+            >
+              Saldo pendiente actual de todos los clientes
+            </div>
+
+            <div
+              className="text-[10px] mt-0.5"
+              style={{ color: C.mutedLight }}
+            >
+              Este valor es actual y no cambia con el filtro del período.
+            </div>
+          </div>
+
+          <div
+            className="font-mono font-extrabold text-2xl text-right"
+            style={{
+              color: deudaTotalClientes > 0 ? C.danger : C.success,
+            }}
+          >
+            {formatMoney(deudaTotalClientes)}
+          </div>
+        </div>
+      </Card>
 
       <Card
         className="mb-4"
@@ -1623,7 +1674,7 @@ const totalBultosVendidos = PRODUCTOS.reduce(
               Balance
             </div>
             <div className="text-[11px] mt-1" style={{ color: C.muted }}>
-              Efectivo + Mercado Pago + Fiado - Gastos
+              Efectivo + Mercado Pago + Fiado generado - Gastos
             </div>
           </div>
 
@@ -1873,7 +1924,7 @@ const totalBultosVendidos = PRODUCTOS.reduce(
                   <Badge tone="success">Efectivo {formatMoney(ef)}</Badge>
                   <Badge tone="accent">MP {formatMoney(mpr)}</Badge>
                   <Badge tone={fiadoRep > 0 ? "danger" : "muted"}>
-                    Fiado {formatMoney(fiadoRep)}
+                    Fiado generado {formatMoney(fiadoRep)}
                   </Badge>
                 </div>
               </Card>
@@ -2106,31 +2157,15 @@ const totalBultosVendidos = PRODUCTOS.reduce(
       <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
         Estado actual
       </div>
-      <div className="grid grid-cols-2 gap-3 mb-4">
-        <Card>
-          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>
-            Deuda total clientes
-          </div>
-          <div
-            className="font-mono font-extrabold text-xl"
-            style={{ color: deudaTotalClientes > 0 ? C.danger : C.ink }}
-          >
-            {formatMoney(deudaTotalClientes)}
-          </div>
-          <div className="text-[10px] mt-1" style={{ color: C.mutedLight }}>
-            Valor actual, no histórico.
-          </div>
-        </Card>
-        <Card>
-          <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>
-            Envases en clientes
-          </div>
-          <div className="font-mono font-extrabold text-xl">{envasesEnCalle}</div>
-          <div className="text-[10px] mt-1" style={{ color: C.mutedLight }}>
-            Permanentes + extras actuales.
-          </div>
-        </Card>
-      </div>
+      <Card className="mb-4">
+        <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: C.muted }}>
+          Envases en clientes
+        </div>
+        <div className="font-mono font-extrabold text-xl">{envasesEnCalle}</div>
+        <div className="text-[10px] mt-1" style={{ color: C.mutedLight }}>
+          Permanentes + extras actuales.
+        </div>
+      </Card>
     </div>
   );
 }
@@ -2231,7 +2266,7 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
                 : C.ink,
           }}
         >
-          Saldo pendiente
+          Saldo antes de esta visita
         </div>
 
         <div
@@ -5881,11 +5916,51 @@ useEffect(() => {
 }, [extrasPrestados, extrasRetirados]);
 
   const total = totalPedido(items);
+
   const pagadoFinal =
     montoPagado === null
       ? total
-      : Number(montoPagado) || 0;
+      : Math.max(0, Number(montoPagado) || 0);
+
   const restante = Math.max(0, total - pagadoFinal);
+
+  // ==========================================================
+  // DEUDA / FIADO DE ESTA VISITA
+  //
+  // IMPORTANTE:
+  // - saldoBaseEditado = deuda que el cliente tenía antes de
+  //   considerar el cobro y la venta actual.
+  // - deudaCobradaPrevista = lo que paga de deuda anterior.
+  // - deudaGeneradaPrevista = lo nuevo que queda fiado HOY.
+  // - saldoFinalPrevisto = lo que realmente quedará debiendo.
+  //
+  // Esta MISMA cuenta se usa luego al guardar, para evitar que
+  // la pantalla muestre una cosa y Firebase guarde otra.
+  // ==========================================================
+  const saldoBaseEditado = Math.max(
+    0,
+    Number(saldoPendienteManual) || 0
+  );
+
+  const deudaCobradaPrevista = cobrarDeuda
+    ? Math.max(0, Number(montoDeuda) || 0)
+    : 0;
+
+  const deudaGeneradaPrevista = vendio
+    ? metodoPago === "deuda"
+      ? total
+      : restante
+    : 0;
+
+  const ajusteManualPrevisto =
+    saldoBaseEditado - deudaBase;
+
+  const saldoFinalPrevisto = Math.max(
+    0,
+    saldoBaseEditado -
+      deudaCobradaPrevista +
+      deudaGeneradaPrevista
+  );
 
   function actualizarCantidad(idx, valor) {
     const p = PRODUCTOS[idx];
@@ -6009,14 +6084,11 @@ useEffect(() => {
       permanentesRetiradosSeparados[p.key] = dePermanentes;
     });
 
-    const saldoManualFinal = Math.max(
-  0,
-  Number(saldoPendienteManual) || 0
-);
-
-const deudaCobradaFinal = cobrarDeuda
-  ? Math.max(0, Number(montoDeuda) || 0)
-  : 0;
+    // Usamos exactamente los mismos valores que se muestran
+    // en la previsualización de "Saldo final".
+    const saldoManualFinal = saldoBaseEditado;
+    const deudaCobradaFinal = deudaCobradaPrevista;
+    const deudaGeneradaFinal = deudaGeneradaPrevista;
 
 // No permitimos cobrar más deuda de la que
 // el cliente tiene registrada en este momento.
@@ -6068,12 +6140,9 @@ const ajusteDeudaManual =
         vendio && metodoPago !== "deuda"
           ? { [metodoPago]: pagadoFinal }
           : {},
-      deudaGenerada:
-        vendio && metodoPago === "deuda"
-          ? total
-          : vendio
-          ? restante
-          : 0,
+      // Deuda NUEVA generada por esta venta.
+      // Ej.: 7 sifones × $1.200 fiados = $8.400.
+      deudaGenerada: deudaGeneradaFinal,
       ajusteDeudaManual,
 
 deudaCobrada: deudaCobradaFinal,
@@ -6470,7 +6539,7 @@ deudaCobrada: deudaCobradaFinal,
       >
         {Number(saldoPendienteManual) > 0
           ? formatMoney(saldoPendienteManual)
-          : "Sin deuda registrada"}
+          : "Sin deuda anterior"}
       </div>
     </div>
 
@@ -6501,8 +6570,8 @@ deudaCobrada: deudaCobradaFinal,
       }}
     >
       <Field
-        label="Saldo pendiente actual"
-        hint="Usalo para cargar una deuda anterior que todavía no estaba registrada o para corregir el saldo."
+        label="Saldo anterior / pendiente"
+        hint="Es la deuda que tenía el cliente antes de aplicar el cobro y el fiado de esta visita. También podés corregirla manualmente."
       >
         <Input
           type="number"
@@ -6571,7 +6640,7 @@ deudaCobrada: deudaCobradaFinal,
               className="text-xs font-bold"
               style={{ color: C.danger }}
             >
-              Saldo pendiente: {formatMoney(saldoPendienteManual)}
+              Deuda anterior: {formatMoney(saldoPendienteManual)}
             </div>
 
             <button
@@ -6892,6 +6961,128 @@ deudaCobrada: deudaCobradaFinal,
           </Field>
         </>
       )}
+
+      {/* =====================================================
+          SALDO FINAL DE LA CUENTA
+          Se actualiza en tiempo real antes de guardar.
+          ===================================================== */}
+      <Card
+        className="mb-3"
+        style={{
+          background:
+            saldoFinalPrevisto > 0
+              ? C.dangerBg
+              : C.successBg,
+          border: `1px solid ${
+            saldoFinalPrevisto > 0
+              ? C.danger
+              : C.success
+          }`,
+        }}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div
+              className="text-[10px] font-extrabold uppercase tracking-wide"
+              style={{
+                color:
+                  saldoFinalPrevisto > 0
+                    ? C.danger
+                    : C.success,
+              }}
+            >
+              Saldo final después de esta visita
+            </div>
+
+            <div className="text-[10px] mt-1" style={{ color: C.muted }}>
+              Lo que quedará debiendo el cliente al guardar.
+            </div>
+          </div>
+
+          <div
+            className="font-mono font-extrabold text-xl"
+            style={{
+              color:
+                saldoFinalPrevisto > 0
+                  ? C.danger
+                  : C.success,
+            }}
+          >
+            {formatMoney(saldoFinalPrevisto)}
+          </div>
+        </div>
+
+        <div
+          className="mt-3 pt-2 flex flex-col gap-1"
+          style={{ borderTop: `1px solid ${C.border}` }}
+        >
+          <div className="flex items-center justify-between text-xs">
+            <span style={{ color: C.muted }}>
+              Saldo anterior
+            </span>
+            <span className="font-mono font-bold">
+              {formatMoney(deudaBase)}
+            </span>
+          </div>
+
+          {ajusteManualPrevisto !== 0 && (
+            <div className="flex items-center justify-between text-xs">
+              <span style={{ color: C.muted }}>
+                Ajuste manual
+              </span>
+              <span
+                className="font-mono font-bold"
+                style={{
+                  color:
+                    ajusteManualPrevisto > 0
+                      ? C.danger
+                      : C.success,
+                }}
+              >
+                {ajusteManualPrevisto > 0 ? "+" : ""}
+                {formatMoney(ajusteManualPrevisto)}
+              </span>
+            </div>
+          )}
+
+          {deudaCobradaPrevista > 0 && (
+            <div className="flex items-center justify-between text-xs">
+              <span style={{ color: C.muted }}>
+                Cobro de deuda anterior
+              </span>
+              <span
+                className="font-mono font-bold"
+                style={{ color: C.success }}
+              >
+                -{formatMoney(deudaCobradaPrevista)}
+              </span>
+            </div>
+          )}
+
+          {deudaGeneradaPrevista > 0 && (
+            <div className="flex items-center justify-between text-xs">
+              <span style={{ color: C.muted }}>
+                Nuevo fiado de esta visita
+              </span>
+              <span
+                className="font-mono font-bold"
+                style={{ color: C.danger }}
+              >
+                +{formatMoney(deudaGeneradaPrevista)}
+              </span>
+            </div>
+          )}
+
+          {deudaCobradaPrevista > saldoBaseEditado && (
+            <div
+              className="text-[10px] font-semibold mt-1"
+              style={{ color: C.danger }}
+            >
+              El cobro supera la deuda anterior. Corregí el monto antes de guardar.
+            </div>
+          )}
+        </div>
+      </Card>
 
       {/* Esta sección aparece SIEMPRE, venda o no venda. */}
 {/* ENVASES EXTRA PLEGABLE */}
