@@ -8,9 +8,10 @@ import {
   Home as HomeIcon, WifiOff, Download, Boxes, CalendarDays
 } from "lucide-react";
 import {
-  collection, doc, onSnapshot, setDoc, deleteDoc, getDoc, getDocs, increment
+  collection, doc, onSnapshot, setDoc, deleteDoc, getDoc, getDocs, increment, runTransaction
 } from "firebase/firestore";
 import { firestore, COLLECTION } from "./firebaseConfig";
+import { saveDeliveryVisit } from "./operationalIntegrity";
 
 /* ============================================================
    TOKENS DE DISEÑO
@@ -4894,96 +4895,27 @@ const gruposDiasAnteriores =
     return actual;
   }
 
-  function guardarVisita(cliente, nuevaVisita) {
-    const next = clone(db);
-    const anterior = visitaEditando;
-    const ci = next.clientes.findIndex((c) => c.id === cliente.id);
+  async function guardarVisita(cliente, nuevaVisita) {
+    const result = await saveDeliveryVisit({
+      runTransaction,
+      db: firestore,
+      refs: {
+        client: doc(colRef("clientes"), cliente.id),
+        visit: doc(colRef("visitas"), nuevaVisita.id),
+        stock: db.config.stockActivo
+          ? doc(colRef("stock"), repartidor.id)
+          : null,
+      },
+      stockActive: db.config.stockActivo,
+      visit: nuevaVisita,
+    });
 
-    if (ci < 0) return;
-
-    // Si editamos, primero revertimos el efecto de la visita anterior.
-    if (anterior) {
-      next.clientes[ci].deudaAcumulada = Math.max(
-  0,
-  (next.clientes[ci].deudaAcumulada || 0) -
-    (anterior.ajusteDeudaManual || 0) -
-    (anterior.deudaGenerada || 0) +
-    (anterior.deudaCobrada || 0)
-);
-
-      next.clientes[ci].envasesExtra = aplicarDeltaEnvases(
-        envasesExtraDe(next.clientes[ci]),
-        calcularDeltaExtras(anterior),
-        -1
-      );
-
-      next.clientes[ci].envasesPermanentes = aplicarRetiroPermanentes(
-        envasesPermanentesDe(next.clientes[ci]),
-        anterior.permanentesRetirados,
-        -1
-      );
+    if (result.ok) {
+      setActivo(null);
+      setVisitaEditando(null);
     }
 
-    // Aplicamos la nueva visita.
-    let deuda = next.clientes[ci].deudaAcumulada || 0;
-
-// Primero aplicamos cualquier corrección manual
-// realizada por el repartidor.
-deuda += nuevaVisita.ajusteDeudaManual || 0;
-
-// Después descontamos lo que cobró.
-deuda -= nuevaVisita.deudaCobrada || 0;
-
-// Y finalmente agregamos el fiado nuevo
-// generado por la venta de hoy.
-deuda += nuevaVisita.deudaGenerada || 0;
-
-next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
-
-    const deltaNuevo = calcularDeltaExtras(nuevaVisita);
-    next.clientes[ci].envasesExtra = aplicarDeltaEnvases(
-      envasesExtraDe(next.clientes[ci]),
-      deltaNuevo,
-      1
-    );
-
-    next.clientes[ci].envasesPermanentes = aplicarRetiroPermanentes(
-      envasesPermanentesDe(next.clientes[ci]),
-      nuevaVisita.permanentesRetirados,
-      1
-    );
-
-    delete next.clientes[ci].envasesPrestados;
-
-    // Guardamos o reemplazamos la visita del día.
-    if (anterior) {
-      const vi = next.visitas.findIndex((v) => v.id === anterior.id);
-      if (vi >= 0) next.visitas[vi] = nuevaVisita;
-    } else {
-      next.visitas.push(nuevaVisita);
-    }
-
-    mutate(next, { history: false });
-
-    // En stock aplicamos solamente la diferencia entre versión anterior y nueva.
-    if (db.config.stockActivo) {
-      const deltaStockNuevo = calcularDeltaStockEnvases(nuevaVisita);
-      const deltaStockAnterior = anterior
-        ? calcularDeltaStockEnvases(anterior)
-        : {};
-      const deltaNeto = {};
-
-      PRODUCTOS_RETORNABLES.forEach((p) => {
-        deltaNeto[p.key] =
-          (deltaStockNuevo[p.key] || 0) -
-          (deltaStockAnterior[p.key] || 0);
-      });
-
-      moverStockRepartidor(repartidor.id, deltaNeto);
-    }
-
-    setActivo(null);
-    setVisitaEditando(null);
+    return result;
   }
 
   const clienteParaSheet =
@@ -6021,6 +5953,7 @@ const [montoDeuda, setMontoDeuda] = useState(
     proximoSabadoISO(visitaInicial?.fecha || hoyISO());
 
   const [errorStock, setErrorStock] = useState("");
+  const [guardando, setGuardando] = useState(false);
 
   // Historial rápido dentro de la visita. Se mantiene cerrado por defecto
   // para no molestar durante el reparto y se consulta solo cuando hace falta.
@@ -6197,8 +6130,14 @@ useEffect(() => {
     }));
   }
 
-  function guardar() {
+  async function guardar() {
+    if (guardando) return;
     setErrorStock("");
+
+    if (!isValidSale({ vendio, items, total })) {
+      setErrorStock("La venta necesita al menos un producto con cantidad y un total mayor a $0.");
+      return;
+    }
 
     // Los únicos movimientos que cambian el stock físico de envases
     // de la camioneta son los extras prestados o retirados.
@@ -6341,7 +6280,16 @@ deudaCobrada: deudaCobradaFinal,
       };
     }
 
-    onGuardar(visita);
+    setGuardando(true);
+    const result = await onGuardar(visita);
+    setGuardando(false);
+
+    if (!result?.ok) {
+      setErrorStock(result?.error || "No se pudo guardar la visita. Intentá nuevamente.");
+      return;
+    }
+
+    onClose();
   }
 
   return (
@@ -6359,8 +6307,11 @@ deudaCobrada: deudaCobradaFinal,
           size="lg"
           onClick={guardar}
           icon={Check}
+          disabled={guardando}
         >
-          {visitaInicial
+          {guardando
+            ? "Guardando..."
+            : visitaInicial
             ? "Guardar cambios"
             : "Guardar visita"}
         </Btn>
