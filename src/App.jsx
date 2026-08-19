@@ -4567,9 +4567,6 @@ function RepartidorRecorrido({
 const [mostrarDiasAnteriores, setMostrarDiasAnteriores] =
   useState(false);
 
-const [buscaDiasAnteriores, setBuscaDiasAnteriores] =
-  useState("");
-
   // Si hubiese más de una visita del mismo cliente hoy, tomamos la más reciente.
   const visitaPorCliente = new Map();
   visitasHoy
@@ -4581,12 +4578,38 @@ const [buscaDiasAnteriores, setBuscaDiasAnteriores] =
 
   const textoBusqueda = busca.trim().toLowerCase();
 
-  const clientesFiltrados = clientes.filter((c) => {
-    if (!textoBusqueda) return true;
-    const nombre = (c.nombre || "").toLowerCase();
-    const direccion = (c.direccion || "").toLowerCase();
-    return nombre.includes(textoBusqueda) || direccion.includes(textoBusqueda);
-  });
+  // ==========================================================
+  // BUSCADOR GLOBAL DEL REPARTIDOR
+  //
+  // Busca entre TODOS los clientes asignados a este repartidor,
+  // sin importar el día habitual de visita.
+  //
+  // Si el cliente ya fue visitado hoy, al tocarlo abrimos esa
+  // visita para editarla. Si todavía no fue visitado hoy,
+  // permitimos registrar una visita extraordinaria sin cambiar
+  // sus días habituales.
+  // ==========================================================
+  const resultadosBusqueda = textoBusqueda
+    ? todosLosClientes
+        .filter((c) => {
+          const nombre = (c.nombre || "").toLowerCase();
+          const direccion = (c.direccion || "").toLowerCase();
+
+          return (
+            nombre.includes(textoBusqueda) ||
+            direccion.includes(textoBusqueda)
+          );
+        })
+        .slice()
+        .sort((a, b) =>
+          (a.nombre || "").localeCompare(b.nombre || "")
+        )
+    : [];
+
+  // Las listas normales del recorrido ya no dependen del buscador.
+  // Cuando hay texto de búsqueda se ocultan visualmente y mostramos
+  // una única lista global de resultados.
+  const clientesFiltrados = clientes;
 
   // ==========================================================
 // CLIENTES DE DÍAS ANTERIORES DE ESTA SEMANA
@@ -4615,9 +4638,6 @@ const idsClientesRecorrido = new Set(
   clientes.map((c) => c.id)
 );
 
-const textoBuscaDiasAnteriores =
-  buscaDiasAnteriores.trim().toLowerCase();
-
 const clientesDiasAnteriores = todosLosClientes
   .filter((c) => {
     // Ya está incluido normalmente en el recorrido.
@@ -4635,22 +4655,6 @@ const clientesDiasAnteriores = todosLosClientes
       );
 
     if (!tieneDiaAnterior) return false;
-
-    // Buscador interno.
-    if (textoBuscaDiasAnteriores) {
-      const nombre =
-        (c.nombre || "").toLowerCase();
-
-      const direccion =
-        (c.direccion || "").toLowerCase();
-
-      if (
-        !nombre.includes(textoBuscaDiasAnteriores) &&
-        !direccion.includes(textoBuscaDiasAnteriores)
-      ) {
-        return false;
-      }
-    }
 
     return true;
   })
@@ -5013,7 +5017,7 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
         <input
           value={busca}
           onChange={(e) => setBusca(e.target.value)}
-          placeholder="Buscar por nombre o dirección..."
+          placeholder="Buscar cualquier cliente por nombre o dirección..."
           className="w-full rounded-xl pl-9 pr-9 py-2.5 text-sm outline-none"
           style={{
             background: C.surface,
@@ -5032,21 +5036,238 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
         )}
       </div>
 
-      {busca.trim() &&
-        pendientes.length === 0 &&
-        pendientesAnteriores.length === 0 &&
-        citasSabado.length === 0 &&
-        volverMasTarde.length === 0 &&
-        visitadosFinalizados.length === 0 && (
-          <Card className="mb-4">
-            <div className="text-xs text-center" style={{ color: C.muted }}>
-              No se encontraron clientes con "{busca}".
+      {/* =====================================================
+          RESULTADOS DEL BUSCADOR GLOBAL
+          Busca cualquier cliente del repartidor, sea del día que sea.
+          ===================================================== */}
+      {textoBusqueda && (
+        <div className="mb-4">
+          <div
+            className="text-xs font-bold uppercase tracking-wide mb-2"
+            style={{ color: C.primary }}
+          >
+            Resultados de búsqueda ({resultadosBusqueda.length})
+          </div>
+
+          {resultadosBusqueda.length === 0 ? (
+            <Card>
+              <div
+                className="text-xs text-center"
+                style={{ color: C.muted }}
+              >
+                No se encontraron clientes con "{busca}".
+              </div>
+            </Card>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {resultadosBusqueda.map((c) => {
+                const visitaHoy = visitaPorCliente.get(c.id);
+                const yaVisitadoHoy = !!visitaHoy;
+                const quedoVolverMasTarde =
+                  esVolverMasTarde(visitaHoy);
+                const diasHabituales = c.diasVisita || [];
+                const correspondeHoy =
+                  diasHabituales.includes(diaSemanaHoy());
+
+                return (
+                  <Card
+                    key={`busqueda-global-${c.id}`}
+                    onClick={() =>
+                      yaVisitadoHoy
+                        ? abrirVisitaExistente(c)
+                        : abrirNuevaVisita(c)
+                    }
+                    style={{ cursor: "pointer" }}
+                  >
+                    <div className="flex items-start gap-2">
+                      <div
+                        className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 font-extrabold text-xs"
+                        style={{
+                          background: yaVisitadoHoy
+                            ? C.successBg
+                            : C.accentSoft,
+                          color: yaVisitadoHoy
+                            ? C.success
+                            : C.primary,
+                        }}
+                      >
+                        {c.orden !== "" &&
+                        c.orden !== null &&
+                        c.orden !== undefined ? (
+                          c.orden
+                        ) : yaVisitadoHoy ? (
+                          <Check size={15} />
+                        ) : (
+                          <Search size={14} />
+                        )}
+                      </div>
+
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <div className="font-bold text-sm">
+                            {c.nombre}
+                          </div>
+
+                          {yaVisitadoHoy && (
+                            <Badge
+                              tone={
+                                quedoVolverMasTarde
+                                  ? "warning"
+                                  : "success"
+                              }
+                            >
+                              {quedoVolverMasTarde
+                                ? "Volver más tarde"
+                                : "Visitado hoy"}
+                            </Badge>
+                          )}
+
+                          {!yaVisitadoHoy && correspondeHoy && (
+                            <Badge tone="success">
+                              Corresponde hoy
+                            </Badge>
+                          )}
+                        </div>
+
+                        <a
+                          href={urlGoogleMaps(c.direccion)}
+                          target="_blank"
+                          rel="noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-xs flex items-center gap-1 w-fit mt-0.5"
+                          style={{ color: C.primary }}
+                        >
+                          <MapPin size={12} />
+                          <span>{c.direccion}</span>
+                        </a>
+
+                        {/* Día/s habitual/es del cliente.
+                            Esto permite saber enseguida si, por ejemplo,
+                            estamos un miércoles buscando un cliente del sábado. */}
+                        <div className="mt-2">
+                          <div
+                            className="text-[10px] font-bold uppercase tracking-wide mb-1"
+                            style={{ color: C.muted }}
+                          >
+                            {diasHabituales.length === 1
+                              ? "Día habitual"
+                              : "Días habituales"}
+                          </div>
+
+                          <div className="flex flex-wrap gap-1">
+                            {diasHabituales.length === 0 ? (
+                              <Badge tone="danger">
+                                Sin día asignado
+                              </Badge>
+                            ) : (
+                              diasHabituales.map((dia) => (
+                                <Badge
+                                  key={`${c.id}-${dia}`}
+                                  tone={
+                                    dia === diaSemanaHoy()
+                                      ? "success"
+                                      : "accent"
+                                  }
+                                >
+                                  {dia === diaSemanaHoy()
+                                    ? `${dia} · Hoy`
+                                    : dia}
+                                </Badge>
+                              ))
+                            )}
+                          </div>
+                        </div>
+
+                        {!correspondeHoy && !yaVisitadoHoy && (
+                          <div
+                            className="text-[10px] mt-1.5 font-semibold"
+                            style={{ color: C.warning }}
+                          >
+                            No corresponde al recorrido de hoy. Tocar para
+                            registrar una visita extraordinaria.
+                          </div>
+                        )}
+
+                        {Number(c.deudaAcumulada) > 0 && (
+                          <div className="mt-1.5">
+                            <Badge tone="danger">
+                              Debe {formatMoney(c.deudaAcumulada)}
+                            </Badge>
+                          </div>
+                        )}
+
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {totalEnvasesPrestados(
+                            envasesPermanentesDe(c)
+                          ) > 0 && (
+                            <Badge tone="accent">
+                              Permanentes:{" "}
+                              {textoEnvasesPrestados(
+                                envasesPermanentesDe(c)
+                              )}
+                            </Badge>
+                          )}
+
+                          {totalEnvasesPrestados(
+                            envasesExtraDe(c)
+                          ) > 0 && (
+                            <Badge tone="warning">
+                              Extra:{" "}
+                              {textoEnvasesPrestados(
+                                envasesExtraDe(c)
+                              )}
+                            </Badge>
+                          )}
+                        </div>
+                      </div>
+
+                      <div
+                        className="flex gap-1 flex-shrink-0"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {c.telefono && (
+                          <a
+                            href={urlWhatsApp(c.telefono)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="p-1.5 rounded-lg"
+                            style={{
+                              background: C.successBg,
+                            }}
+                            aria-label={`Abrir WhatsApp de ${c.nombre}`}
+                          >
+                            <MessageCircle
+                              size={13}
+                              color={C.success}
+                            />
+                          </a>
+                        )}
+
+                        <a
+                          href={urlGoogleMaps(c.direccion)}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="p-1.5 rounded-lg"
+                          style={{ background: C.bg }}
+                          aria-label={`Abrir ubicación de ${c.nombre}`}
+                        >
+                          <MapPin
+                            size={13}
+                            color={C.primary}
+                          />
+                        </a>
+                      </div>
+                    </div>
+                  </Card>
+                );
+              })}
             </div>
-          </Card>
-        )}
+          )}
+        </div>
+      )}
 
       {/* PENDIENTES NORMALES DE HOY */}
-      {pendientes.length > 0 && (
+      {!textoBusqueda && pendientes.length > 0 && (
         <>
           <div
             className="text-xs font-bold uppercase tracking-wide mb-2"
@@ -5067,7 +5288,7 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
       )}
 
       {/* PENDIENTES ARRASTRADOS DE DÍAS ANTERIORES */}
-      {pendientesAnteriores.length > 0 && (
+      {!textoBusqueda && pendientesAnteriores.length > 0 && (
         <>
           <div
             className="text-xs font-bold uppercase tracking-wide mb-2"
@@ -5090,7 +5311,7 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
       )}
 
       {/* CITAS PUNTUALES: VOLVER EL SÁBADO */}
-      {citasSabado.length > 0 && (
+      {!textoBusqueda && citasSabado.length > 0 && (
         <>
           <div
             className="text-xs font-bold uppercase tracking-wide mb-2"
@@ -5112,7 +5333,7 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
       )}
 
       {/* CLIENTES PARA VOLVER MÁS TARDE EN EL MISMO DÍA */}
-      {volverMasTarde.length > 0 && (
+      {!textoBusqueda && volverMasTarde.length > 0 && (
         <>
           <div
             className="text-xs font-bold uppercase tracking-wide mb-2"
@@ -5141,7 +5362,7 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
       {/* =====================================================
     CLIENTES DE DÍAS ANTERIORES
     ===================================================== */}
-{diasAnterioresSemana.length > 0 && (
+{!textoBusqueda && diasAnterioresSemana.length > 0 && (
   <div className="mb-4">
     <button
       type="button"
@@ -5204,54 +5425,6 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
 
     {mostrarDiasAnteriores && (
       <div className="mt-2">
-        {/* BUSCADOR INTERNO */}
-        <div className="relative mb-3">
-          <Search
-            size={15}
-            color={C.mutedLight}
-            style={{
-              position: "absolute",
-              left: 10,
-              top: 11,
-            }}
-          />
-
-          <input
-            value={buscaDiasAnteriores}
-            onChange={(e) =>
-              setBuscaDiasAnteriores(
-                e.target.value
-              )
-            }
-            placeholder="Buscar cliente anterior..."
-            className="w-full rounded-xl pl-8 pr-8 py-2.5 text-sm outline-none"
-            style={{
-              background: C.surface,
-              border: `1px solid ${C.border}`,
-              color: C.ink,
-            }}
-          />
-
-          {buscaDiasAnteriores && (
-            <button
-              type="button"
-              onClick={() =>
-                setBuscaDiasAnteriores("")
-              }
-              style={{
-                position: "absolute",
-                right: 10,
-                top: 10,
-              }}
-            >
-              <X
-                size={17}
-                color={C.muted}
-              />
-            </button>
-          )}
-        </div>
-
         {clientesDiasAnteriores.length === 0 ? (
           <Card>
             <div
@@ -5260,9 +5433,7 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
                 color: C.mutedLight,
               }}
             >
-              {buscaDiasAnteriores
-                ? "No encontramos clientes con esa búsqueda."
-                : "No hay clientes disponibles de días anteriores."}
+              No hay clientes disponibles de días anteriores.
             </div>
           </Card>
         ) : (
@@ -5366,7 +5537,7 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
 )}
 
       {/* CLIENTES VISITADOS Y FINALIZADOS */}
-      {visitadosParaMostrar.length > 0 && (
+      {!textoBusqueda && visitadosParaMostrar.length > 0 && (
         <div className="mb-4">
           <button
             type="button"
@@ -5419,7 +5590,8 @@ next.clientes[ci].deudaAcumulada = Math.max(0, deuda);
         </div>
       )}
 
-      {pendientesTotales.length === 0 &&
+      {!textoBusqueda &&
+        pendientesTotales.length === 0 &&
         pendientesAnterioresTotales.length === 0 &&
         citasSabadoTotales.length === 0 &&
         volverMasTardeTotales.length === 0 &&
