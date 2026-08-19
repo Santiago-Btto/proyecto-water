@@ -4,6 +4,7 @@ import {
   isValidSale,
   saveDeliveryVisit,
   saveVisitAtomically,
+  submitVisit,
 } from "./operationalIntegrity";
 
 describe("isValidSale", () => {
@@ -212,5 +213,73 @@ describe("saveDeliveryVisit", () => {
       stockActive: false,
       visit: { id: "visita-1" },
     });
+  });
+});
+
+describe("submitVisit", () => {
+  it("rejects an invalid sale without invoking persistence and returns inline feedback", async () => {
+    const save = vi.fn();
+
+    await expect(
+      submitVisit({
+        sale: {
+          vendio: true,
+          items: [{ tipo: "b20", cantidad: 0, precioUnitario: 5000 }],
+          total: 0,
+        },
+        save,
+      })
+    ).resolves.toMatchObject({ ok: false, inlineError: expect.stringMatching(/cantidad.*total/i) });
+
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failed save retryable with its returned feedback", async () => {
+    const save = vi.fn().mockResolvedValue({ ok: false, error: "No se pudo confirmar la operación." });
+
+    await expect(
+      submitVisit({
+        sale: { vendio: true, items: [{ tipo: "b20", cantidad: 1 }], total: 5000 },
+        save,
+      })
+    ).resolves.toEqual({ ok: false, inlineError: "No se pudo confirmar la operación." });
+  });
+
+  it("converts a thrown connection failure into actionable inline feedback", async () => {
+    const save = vi.fn().mockRejectedValue(new Error("Failed to fetch: offline"));
+    const setPending = vi.fn();
+
+    await expect(
+      submitVisit({
+        sale: { vendio: true, items: [{ tipo: "b20", cantidad: 1 }], total: 5000 },
+        save,
+        setPending,
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      inlineError: expect.stringMatching(/conexi.n.*reintent/i),
+    });
+
+    expect(setPending).toHaveBeenNthCalledWith(1, true);
+    expect(setPending).toHaveBeenLastCalledWith(false);
+  });
+
+  it("accepts one x20 bidon sold fiado with a positive total and reaches the save callback", async () => {
+    const result = { ok: true };
+    const save = vi.fn().mockResolvedValue(result);
+
+    await expect(
+      submitVisit({
+        sale: {
+          vendio: true,
+          items: [{ tipo: "b20", cantidad: 1, precioUnitario: 5000 }],
+          total: 5000,
+          metodoPago: "deuda",
+        },
+        save,
+      })
+    ).resolves.toEqual(result);
+
+    expect(save).toHaveBeenCalledOnce();
   });
 });

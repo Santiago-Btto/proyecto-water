@@ -7,6 +7,39 @@ export function isValidSale({ vendio, items = [], total }) {
   );
 }
 
+const INVALID_SALE_ERROR =
+  "La venta necesita al menos un producto con cantidad y un total mayor a $0.";
+const SAVE_ERROR = "No se pudo guardar la visita. Intentá nuevamente.";
+const CONNECTION_ERROR =
+  "No se pudo guardar la visita. Revisá la conexión antes de reintentar.";
+
+function isConnectionFailure(error) {
+  return /connection|conexi.n|offline|network|fetch|unavailable/i.test(
+    String(error?.message || error || "")
+  );
+}
+
+export async function submitVisit({ sale, save, setPending }) {
+  if (!isValidSale(sale)) {
+    return { ok: false, inlineError: INVALID_SALE_ERROR };
+  }
+
+  setPending?.(true);
+  try {
+    const result = await save();
+    if (result?.ok) return result;
+
+    return { ok: false, inlineError: result?.error || SAVE_ERROR };
+  } catch (error) {
+    return {
+      ok: false,
+      inlineError: isConnectionFailure(error) ? CONNECTION_ERROR : SAVE_ERROR,
+    };
+  } finally {
+    setPending?.(false);
+  }
+}
+
 const RETURNABLE_PRODUCTS = ["b20", "b12", "sifon"];
 
 function emptyContainers() {

@@ -11,7 +11,7 @@ import {
   collection, doc, onSnapshot, setDoc, deleteDoc, getDoc, getDocs, increment, runTransaction
 } from "firebase/firestore";
 import { firestore, COLLECTION } from "./firebaseConfig";
-import { saveDeliveryVisit } from "./operationalIntegrity";
+import { saveDeliveryVisit, submitVisit } from "./operationalIntegrity";
 
 /* ============================================================
    TOKENS DE DISEÑO
@@ -6280,12 +6280,14 @@ deudaCobrada: deudaCobradaFinal,
       };
     }
 
-    setGuardando(true);
-    const result = await onGuardar(visita);
-    setGuardando(false);
+    const result = await submitVisit({
+      sale: { vendio, items, total },
+      save: () => onGuardar(visita),
+      setPending: setGuardando,
+    });
 
     if (!result?.ok) {
-      setErrorStock(result?.error || "No se pudo guardar la visita. Intentá nuevamente.");
+      setErrorStock(result.inlineError);
       return;
     }
 
@@ -6302,19 +6304,31 @@ deudaCobrada: deudaCobradaFinal,
       onClose={onClose}
       closeOnBackdrop={false}
       footer={
-        <Btn
-          full
-          size="lg"
-          onClick={guardar}
-          icon={Check}
-          disabled={guardando}
-        >
-          {guardando
-            ? "Guardando..."
-            : visitaInicial
-            ? "Guardar cambios"
-            : "Guardar visita"}
-        </Btn>
+        <div className="space-y-2">
+          {errorStock && (
+            <div
+              className="rounded-xl px-3 py-2 text-xs font-bold flex items-start gap-1.5"
+              style={{ background: C.dangerBg, color: C.danger }}
+              role="alert"
+            >
+              <AlertCircle size={14} className="flex-shrink-0 mt-0.5" />
+              <span>{errorStock}</span>
+            </div>
+          )}
+          <Btn
+            full
+            size="lg"
+            onClick={guardar}
+            icon={Check}
+            disabled={guardando}
+          >
+            {guardando
+              ? "Guardando..."
+              : visitaInicial
+              ? "Guardar cambios"
+              : "Guardar visita"}
+          </Btn>
+        </div>
       }
     >
       <div className="flex flex-wrap gap-2 mb-3">
@@ -7383,26 +7397,6 @@ deudaCobrada: deudaCobradaFinal,
   )}
 </div>
 
-      {errorStock && (
-        <Card
-          style={{
-            background: C.dangerBg,
-            border: "none",
-          }}
-          className="mt-3"
-        >
-          <div
-            className="text-xs font-bold flex items-start gap-1.5"
-            style={{ color: C.danger }}
-          >
-            <AlertCircle
-              size={14}
-              className="flex-shrink-0 mt-0.5"
-            />
-            <span>{errorStock}</span>
-          </div>
-        </Card>
-      )}
     </Sheet>
   );
 }

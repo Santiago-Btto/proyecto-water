@@ -14,5 +14,13 @@
 
 ## 3. Verification
 
-- [x] 3.1 Run the complete automated test suite and `npm run build`; fix only regressions introduced by this change.
-- [ ] 3.2 Manually verify the edit flow with an existing fiado visit changed to a Mercado Pago prior-debt payment, confirming the saved visit, customer debt, and "Plata en la calle" agree.
+- [x] 3.1 Run the current focused suites before the new form-boundary work and record the passing baseline; stop and report any pre-existing failure.
+- [x] 3.2 Add a failing regression test at the narrowest existing form or submit seam for an invalid sale, asserting its validation message is rendered next to the sticky "Guardar visita" button and persistence is not invoked.
+- [x] 3.3 Add a failing regression test for a persistence failure result and a separate thrown save callback, asserting retained form data, retryable error feedback next to "Guardar visita", and pending state cleared in both cases.
+- [x] 3.4 Add a failing regression test for an offline or connection failure that asserts the displayed error instructs the worker to check connectivity before retrying.
+- [x] 3.5 Add a failing regression test for one positive-quantity x20 bidon sold fiado with a valid total, asserting validation accepts it and reaches the save callback.
+- [x] 3.6 Implement the minimum `try`/`catch`/`finally` submit-boundary behavior and colocated error rendering needed to make the new tests pass, preserving all existing sale-validation rejections.
+- [x] 3.7 Investigate any failing x20 fiado regression and make only the narrow fix required for the valid sale to enter the normal save path; rerun focused tests after each change.
+- [x] 3.8 Run the complete automated test suite and `npm run build`; fix only regressions introduced by this change.
+- [ ] 3.9 Manually verify the edit flow with an existing fiado visit changed to a Mercado Pago prior-debt payment, confirming the saved visit, customer debt, and "Plata en la calle" agree.
+- [ ] 3.10 Manually verify an invalid sale, a connection failure, and a one-x20-bidon fiado sale on desktop and mobile, confirming feedback appears by "Guardar visita", retry is possible, and the valid sale starts saving.
