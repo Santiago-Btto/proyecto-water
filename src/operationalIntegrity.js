@@ -29,7 +29,12 @@ export async function submitVisit({ sale, save, setPending }) {
     const result = await save();
     if (result?.ok) return result;
 
-    return { ok: false, inlineError: result?.error || SAVE_ERROR };
+    return {
+      ok: false,
+      inlineError: isConnectionFailure(result?.error)
+        ? CONNECTION_ERROR
+        : result?.error || SAVE_ERROR,
+    };
   } catch (error) {
     return {
       ok: false,
@@ -146,6 +151,52 @@ export function deriveVisitEffects({ client, previousVisit = null, visit }) {
   });
 
   return { client: nextClient, stockDelta: netStock };
+}
+
+export function totalStreetDebt(clients = []) {
+  return clients.reduce((total, client) => total + (Number(client.deudaAcumulada) || 0), 0);
+}
+
+export function applyDeliveryVisitMutation({ state, visit, mutate }) {
+  try {
+    const clientIndex = state.clientes.findIndex((client) => client.id === visit.clienteId);
+    if (clientIndex < 0) throw new Error("Cliente no encontrado");
+
+    const visitIndex = state.visitas.findIndex((current) => current.id === visit.id);
+    const previousVisit = visitIndex >= 0 ? state.visitas[visitIndex] : null;
+    const { client, stockDelta } = deriveVisitEffects({
+      client: state.clientes[clientIndex],
+      previousVisit,
+      visit,
+    });
+    const clientes = state.clientes.slice();
+    const visitas = state.visitas.slice();
+    clientes[clientIndex] = client;
+    if (visitIndex >= 0) visitas[visitIndex] = visit;
+    else visitas.push(visit);
+
+    let stock = state.stock;
+    if (state.config.stockActivo) {
+      const stockIndex = stock.findIndex((current) => current.id === visit.repartidorId);
+      const currentStock = stockIndex >= 0 ? stock[stockIndex] : { id: visit.repartidorId };
+      const nextStock = { ...currentStock };
+      RETURNABLE_PRODUCTS.forEach((type) => {
+        nextStock[type] = (Number(currentStock[type]) || 0) - stockDelta[type];
+      });
+      stock = stock.slice();
+      if (stockIndex >= 0) stock[stockIndex] = nextStock;
+      else stock.push(nextStock);
+    }
+
+    mutate({ ...state, clientes, visitas, stock }, { history: false });
+    return { ok: true };
+  } catch (error) {
+    console.error("No se pudo guardar la visita", error);
+    return {
+      ok: false,
+      error: "No se pudo guardar la visita. Revisá la conexión e intentá nuevamente.",
+    };
+  }
 }
 
 export async function saveVisitAtomically({

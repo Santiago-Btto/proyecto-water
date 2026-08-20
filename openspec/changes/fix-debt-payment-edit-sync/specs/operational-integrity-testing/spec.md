@@ -1,15 +1,15 @@
 ## MODIFIED Requirements
 
-### Requirement: Integrity behavior is covered by automated tests
-The automated test suite SHALL cover the sale-validity rules, visible and recoverable form-save failures, the all-or-nothing handling of affected visit records, the valid fiado sale of one x20 bidon, and the debt effect of replacing an edited fiado visit with a prior-debt payment through Mercado Pago.
+### Requirement: Integrity behavior is covered by automated and manual offline verification
+The test suite SHALL cover the sale-validity rules, visible and recoverable form-save failures, coherent local mutation of affected visit records, the valid fiado sale of one x20 bidon, and the debt effect of replacing an edited fiado visit with a prior-debt payment through Mercado Pago. Manual verification SHALL cover offline local saving and synchronization after reconnecting without a server transaction.
 
 #### Scenario: Invalid sale test coverage
 - **WHEN** the test suite evaluates sales with no positive-quantity product or with a zero total
 - **THEN** it SHALL verify that each sale is rejected
 
-#### Scenario: Atomic-operation failure test coverage
-- **WHEN** the test suite simulates a failure while persisting an affected visit record
-- **THEN** it SHALL verify that no partial operation is reported as saved, the failure is surfaced beside the save control, and the form can be submitted again
+#### Scenario: Local-mutation failure test coverage
+- **WHEN** the test suite simulates a failure while applying an affected visit record locally
+- **THEN** it SHALL verify that no partial local operation is reported as saved, the failure is surfaced beside the save control, and the form can be submitted again
 
 #### Scenario: Thrown save callback test coverage
 - **WHEN** the test suite simulates a save callback that throws
@@ -24,5 +24,9 @@ The automated test suite SHALL cover the sale-validity rules, visible and recove
 - **THEN** it SHALL verify that validation accepts the sale and invokes the save path
 
 #### Scenario: Fiado replacement regression coverage
-- **WHEN** the test suite edits a persisted fiado visit into a visit that records a prior-debt payment through Mercado Pago
-- **THEN** it SHALL verify the resulting accumulated debt no longer includes the replaced fiado and includes the debt payment deduction
+- **WHEN** the test suite starts with $1500 customer debt including a persisted $500 fiado visit and edits it into a $1000 prior-debt payment through Mercado Pago
+- **THEN** it SHALL verify the local mutation replaces the visit and customer state, `deudaAcumulada` is $0, and the dashboard's "Plata en la calle" total is $0
+
+#### Scenario: Offline and reconnect verification coverage
+- **WHEN** a tester saves the fiado-replacement edit while offline and reconnects the device afterwards
+- **THEN** the tester SHALL verify the local visit, customer debt, and dashboard total immediately, then verify synchronization completes without using a server transaction

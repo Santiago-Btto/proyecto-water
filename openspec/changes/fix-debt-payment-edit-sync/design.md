@@ -1,48 +1,49 @@
 ## Context
 
-See `proposal.md` for motivation and the delta specs for the behavior contract. The completed operational-integrity change introduced `saveVisitAtomically`, which reads the current client and prior visit in a Firestore transaction before deriving replacement effects. `VisitaSheet` already awaits an `{ ok, error? }` save result, but the delivery route's `guardarVisita` still derives a cloned local database, persists it through `mutate`, adjusts stock separately, clears local editing state, and returns no result.
+See `proposal.md` for motivation and the delta specs for the behavior contract. The delivery route already has an offline-first `mutate` path backed by Firestore's persistent local cache. Its debt arithmetic correctly handles replacing a persisted $500 fiado visit when the customer's total debt is $1500 with a $1000 Mercado Pago payment of prior debt: the resulting customer debt is $0. The route must apply that recalculated customer and the edited visit together in local state, return an `{ ok, error? }` result to `VisitaSheet`, and retain the sheet's feedback and pending behavior. Firestore `runTransaction` is explicitly excluded from this save path.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Give every delivery visit save one transactional persistence boundary for its visit, client, and applicable stock effects.
-- Preserve the existing transaction helper's authoritative read of the stored prior visit when an edit replaces debt effects.
+- Give every delivery visit save one offline-first local mutation boundary for its visit, client, and applicable stock effects.
+- Preserve the existing local replacement arithmetic when an edit replaces debt effects.
+- Ensure the visit and recalculated client become visible together through the persistent local cache, including while offline.
 - Preserve the form's pending, success, and failure behavior through a returned result or thrown-error recovery.
 - Keep validation failures and persistence failures visible beside the sticky save control, with actionable connectivity guidance.
 - Confirm that a positive-quantity x20 bidon sold fiado remains a valid sale and cannot silently leave the form without feedback.
 - Cover the reported debt-edit regression with a focused test-first sequence.
 
 **Non-Goals:**
-- Change debt calculation rules, payment-entry fields, historical visit data, or stock behavior beyond routing existing effects through the established transaction.
-- Convert unrelated `mutate` operations to transactions.
+- Change debt calculation rules, payment-entry fields, historical visit data, or stock behavior beyond applying existing effects in the visit's local mutation.
+- Convert this or unrelated `mutate` operations to transactions.
 - Change authentication, client-side PIN handling, or Firestore security rules.
 - Relax the existing sale-validity rules or reinterpret a sale with no positive quantity or zero total as valid.
 
 ## Decisions
 
-### Delegate delivery saves to the existing transaction helper
+### Preserve one offline-first local mutation for delivery saves
 
-`guardarVisita` will become asynchronous and construct the existing visit, client, and conditional stock document references for `saveVisitAtomically`. It will pass the active stock setting and return the helper's `{ ok, error? }` value directly. Local sheet and edit state will be cleared only after a successful result; Firestore listeners remain the source of refreshed operational data.
+`guardarVisita` will retain the persistent-cache `mutate` route. In one local mutation it will replace the visit, derive the client from the prior visit and edited visit, and update the applicable stock state. It will return an `{ ok, error? }` result to the caller. The edit state will clear only after a successful local result; listeners can subsequently confirm remote synchronization without being required for immediate feedback.
 
-**Rationale:** The helper already reads current Firestore data, derives the difference between the persisted and edited visit, and writes affected records in one transaction. Re-implementing this calculation in `App.jsx` risks further divergence.
+**Rationale:** The app must remain usable offline and expose the save through Firestore's persistent local cache. Updating the visit and derived client in one local state mutation prevents a locally visible half-update and does not block on server availability.
 
-**Alternative considered:** Fixing only the local `mutate` debt arithmetic was rejected because it retains non-atomic writes and can use a stale prior visit.
+**Alternative considered:** Using `runTransaction` or the existing transaction helper was rejected because server transaction availability conflicts with the required offline-first delivery workflow.
 
-### Remove visit-specific local persistence and stock movement
+### Keep visit-specific persistence local and derive all related effects together
 
-The visit save path will no longer call `mutate` or `moverStockRepartidor`; they remain available to unrelated features. The transaction helper alone will write stock when it is enabled.
+The visit save path will not call Firestore `runTransaction`. Its `mutate` callback will apply the edited visit, recalculated customer, and enabled stock effect from the same prior local snapshot. No related write may be issued outside that mutation for a visit save.
 
-**Rationale:** Separate local persistence and stock writes violate the all-or-nothing visit contract and can produce a successful-looking form result despite a failed related write.
+**Rationale:** A single local mutation provides a coherent offline-visible result while persistent local cache queues synchronization for reconnection.
 
-**Alternative considered:** Retaining the local update for optimistic UI was rejected because snapshot updates provide the canonical state and the form already has an explicit pending state.
+**Alternative considered:** Separate local writes for the visit and customer were rejected because the sheet and dashboard could temporarily show incompatible debt information.
 
-### Extend the focused integrity test suite first
+### Extend the focused local-state test suite first
 
-Before changing production routing, add a failing test that starts from a client debt including a persisted fiado visit, replaces that visit with a Mercado Pago prior-debt payment, and asserts the recalculated `deudaAcumulada`. Add a second boundary-level case that verifies the transaction reports success and writes the corrected client result for the same replacement pattern.
+Before changing production routing, add a failing test that starts with a customer debt of $1500 containing a persisted $500 fiado visit, replaces that visit with a $1000 Mercado Pago prior-debt payment, and asserts a final `deudaAcumulada` of $0. Add a second case at the local mutation boundary that verifies the edited visit and corrected customer state are committed together. Add a dashboard-level assertion that "Plata en la calle" is $0 for the resulting local state.
 
-**Rationale:** The pure helper verifies the accounting invariant while the transaction case guards the path that must persist it. The two cases satisfy strict TDD triangulation without requiring a mounted application or live Firebase.
+**Rationale:** The pure calculation, local mutation, and dashboard total separately prove the accounting invariant, persistence boundary, and operational indicator without a mounted application or live Firebase.
 
-**Alternative considered:** Browser-level testing of the full sheet was rejected because the reported defect is in the persistence routing and the project already has a deterministic transaction test seam.
+**Alternative considered:** Testing a Firestore server transaction was rejected because it cannot establish the required offline behavior and is outside the delivery save design.
 
 ### Contain all submit outcomes in the form save boundary
 
@@ -62,8 +63,8 @@ The implementation investigation will trace validation through submit and persis
 
 ## Risks / Trade-offs
 
-- Transaction integration needs Firestore references from the delivery route -> Reuse the established collection and document reference conventions and preserve helper error handling.
-- Snapshot refresh is asynchronous after a successful transaction -> Close the form only after success and rely on the listener instead of mutating stale local state.
+- A local mutation can be queued while the server is unavailable -> Return clear pending/success feedback from the local save, retain actionable offline feedback for failures, and manually confirm synchronization after reconnecting.
+- A related effect outside the local mutation can expose inconsistent local data -> Keep visit, client, and enabled stock changes in the same mutation.
 - Tests may cover calculation and helper persistence but not component wiring directly -> Add a small, testable routing seam only if the existing test boundary cannot prove `guardarVisita` delegates and returns the result; do not introduce UI-test infrastructure solely for this regression.
 - An unexpected save exception can bypass result-based UI logic -> Catch it at the form boundary, always clear pending state, and expose a retryable message beside the save button.
 - The x20 fiado report may be a connectivity symptom rather than validation -> Cover the valid input separately from connection failures so the diagnosis does not weaken validation rules.
@@ -71,8 +72,8 @@ The implementation investigation will trace validation through submit and persis
 ## Migration Plan
 
 1. Run the focused existing integrity tests to establish a passing baseline.
-2. Add failing regression tests for the fiado-to-Mercado-Pago replacement at the pure-effect and transaction boundaries.
-3. Route the delivery save through the transaction helper and remove the duplicate local persistence path until the focused tests pass.
+2. Add failing regression tests for the exact fiado-to-Mercado-Pago replacement, local mutation state, and dashboard debt total.
+3. Correct the existing `mutate` path until the focused tests pass, without adding `runTransaction` to the delivery save path.
 4. Add failing tests for a thrown save callback, visible validation and persistence feedback, and one positive-quantity x20 bidon sold fiado reaching the save path; implement the minimum form-boundary changes until green.
 5. Run the complete test suite and production build.
-6. Deploy the client without a data migration. If a regression appears, roll back the client build; the document shape and security rules are unchanged.
+6. Manually save the edit while offline, confirm local visit/customer/dashboard values, reconnect, and confirm queued synchronization without a server transaction. Deploy without a data migration; if a regression appears, roll back the client build because document shape and security rules are unchanged.

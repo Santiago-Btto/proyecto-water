@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  applyDeliveryVisitMutation,
   deriveVisitEffects,
   isValidSale,
   saveDeliveryVisit,
   saveVisitAtomically,
   submitVisit,
+  totalStreetDebt,
 } from "./operationalIntegrity";
 
 describe("isValidSale", () => {
@@ -105,6 +107,80 @@ describe("deriveVisitEffects", () => {
     });
 
     expect(client.deudaAcumulada).toBe(0);
+  });
+});
+
+describe("applyDeliveryVisitMutation", () => {
+  const previousVisit = { id: "visita-1", clienteId: "cliente-1", deudaGenerada: 500 };
+  const replacementVisit = {
+    id: "visita-1",
+    clienteId: "cliente-1",
+    deudaCobrada: 1000,
+    metodoDeuda: "mercadoPago",
+  };
+
+  it("replaces the visit and its client debt together through one local mutation", () => {
+    const mutate = vi.fn();
+    const state = {
+      clientes: [{ id: "cliente-1", deudaAcumulada: 1500 }],
+      visitas: [previousVisit],
+      stock: [],
+      config: { stockActivo: false },
+    };
+
+    expect(
+      applyDeliveryVisitMutation({ state, visit: replacementVisit, mutate })
+    ).toEqual({ ok: true });
+
+    expect(mutate).toHaveBeenCalledOnce();
+    const [nextState, options] = mutate.mock.calls[0];
+    expect(options).toEqual({ history: false });
+    expect(nextState.visitas).toEqual([replacementVisit]);
+    expect(nextState.clientes[0].deudaAcumulada).toBe(0);
+  });
+
+  it("does not report a partial save when the affected client is missing", () => {
+    const mutate = vi.fn();
+
+    expect(
+      applyDeliveryVisitMutation({
+        state: { clientes: [], visitas: [previousVisit], stock: [], config: {} },
+        visit: replacementVisit,
+        mutate,
+      })
+    ).toMatchObject({ ok: false, error: expect.stringMatching(/guardar/i) });
+
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it("updates enabled worker stock in the same local mutation", () => {
+    const mutate = vi.fn();
+    const state = {
+      clientes: [{ id: "cliente-1", deudaAcumulada: 0 }],
+      visitas: [],
+      stock: [{ id: "repartidor-1", b20: 5 }],
+      config: { stockActivo: true },
+    };
+
+    expect(
+      applyDeliveryVisitMutation({
+        state,
+        visit: { id: "visita-2", clienteId: "cliente-1", repartidorId: "repartidor-1", extrasPrestados: { b20: 1 } },
+        mutate,
+      })
+    ).toEqual({ ok: true });
+
+    expect(mutate.mock.calls[0][0].stock[0]).toMatchObject({ b20: 4 });
+  });
+});
+
+describe("totalStreetDebt", () => {
+  it("reports zero Plata en la calle after a fiado replacement", () => {
+    expect(totalStreetDebt([{ id: "cliente-1", deudaAcumulada: 0 }])).toBe(0);
+  });
+
+  it("adds debt across clients", () => {
+    expect(totalStreetDebt([{ deudaAcumulada: 500 }, { deudaAcumulada: 1000 }])).toBe(1500);
   });
 });
 
@@ -243,6 +319,20 @@ describe("submitVisit", () => {
         save,
       })
     ).resolves.toEqual({ ok: false, inlineError: "No se pudo confirmar la operación." });
+  });
+
+  it("makes a returned connection failure actionable", async () => {
+    const save = vi.fn().mockResolvedValue({ ok: false, error: "offline" });
+
+    await expect(
+      submitVisit({
+        sale: { vendio: true, items: [{ tipo: "b20", cantidad: 1 }], total: 5000 },
+        save,
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      inlineError: expect.stringMatching(/conexi.n.*reintent/i),
+    });
   });
 
   it("converts a thrown connection failure into actionable inline feedback", async () => {
