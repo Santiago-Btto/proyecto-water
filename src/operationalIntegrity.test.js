@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   applyDeliveryVisitMutation,
+  deleteDeliveryVisitMutation,
   deriveVisitEffects,
   isValidSale,
   saveDeliveryVisit,
@@ -171,6 +172,50 @@ describe("applyDeliveryVisitMutation", () => {
     ).toEqual({ ok: true });
 
     expect(mutate.mock.calls[0][0].stock[0]).toMatchObject({ b20: 4 });
+  });
+
+  it("updates an explicitly attributed subscription with the visit in the same local mutation", () => {
+    const mutate = vi.fn();
+    const state = {
+      clientes: [{ id: "cliente-1", deudaAcumulada: 0 }], visitas: [], stock: [{ id: "repartidor-1", b20: 5 }],
+      subscriptions: [{ id: "cliente-1-2026-08", clienteId: "cliente-1", periodo: "2026-08", cantidadX20: 4, cantidadConsumida: 1 }],
+      config: { stockActivo: true },
+    };
+    const visit = { id: "visita-sub", clienteId: "cliente-1", repartidorId: "repartidor-1", subscriptionAttribution: { subscriptionId: "cliente-1-2026-08", periodo: "2026-08", cantidadX20: 2 }, extrasPrestados: { b20: 2 } };
+
+    expect(applyDeliveryVisitMutation({ state, visit, mutate })).toEqual({ ok: true });
+    const next = mutate.mock.calls[0][0];
+    expect(next.subscriptions[0]).toMatchObject({ cantidadConsumida: 3, cantidadRestante: 1 });
+    expect(next.clientes[0].subscriptionSummary).toMatchObject({ subscriptionId: "cliente-1-2026-08", cantidadConsumida: 3, cantidadRestante: 1 });
+    expect(next.visitas[0].subscriptionAttribution).toEqual(visit.subscriptionAttribution);
+  });
+
+  it("reverses the old attributed quantity on edit without changing fiado debt", () => {
+    const mutate = vi.fn();
+    const oldVisit = { id: "visita-sub", clienteId: "cliente-1", subscriptionAttribution: { subscriptionId: "s", cantidadX20: 2 }, deudaGenerada: 500 };
+    const state = { clientes: [{ id: "cliente-1", deudaAcumulada: 500 }], visitas: [oldVisit], stock: [], subscriptions: [{ id: "s", clienteId: "cliente-1", cantidadX20: 4, cantidadConsumida: 2 }], config: { stockActivo: false } };
+
+    applyDeliveryVisitMutation({ state, visit: { ...oldVisit, subscriptionAttribution: { subscriptionId: "s", cantidadX20: 1 }, deudaGenerada: 500 }, mutate });
+    expect(mutate.mock.calls[0][0].subscriptions[0]).toMatchObject({ cantidadConsumida: 1, cantidadRestante: 3 });
+    expect(mutate.mock.calls[0][0].clientes[0].deudaAcumulada).toBe(500);
+  });
+
+  it("moves attribution between periods by reversing the old subscription first", () => {
+    const mutate = vi.fn();
+    const oldVisit = { id: "visita-sub", clienteId: "cliente-1", subscriptionAttribution: { subscriptionId: "julio", cantidadX20: 2 } };
+    const state = { clientes: [{ id: "cliente-1", deudaAcumulada: 0 }], visitas: [oldVisit], stock: [], subscriptions: [{ id: "julio", clienteId: "cliente-1", cantidadX20: 4, cantidadConsumida: 2 }, { id: "agosto", clienteId: "cliente-1", cantidadX20: 4, cantidadConsumida: 0 }], config: { stockActivo: false } };
+    applyDeliveryVisitMutation({ state, visit: { ...oldVisit, subscriptionAttribution: { subscriptionId: "agosto", cantidadX20: 1 } }, mutate });
+    expect(mutate.mock.calls[0][0].subscriptions).toMatchObject([{ id: "julio", cantidadConsumida: 0 }, { id: "agosto", cantidadConsumida: 1 }]);
+  });
+
+  it("deletes an attributed visit and restores only its consumed quota", () => {
+    const mutate = vi.fn();
+    const visit = { id: "visita-sub", clienteId: "cliente-1", subscriptionAttribution: { subscriptionId: "s", cantidadX20: 2 }, deudaGenerada: 500 };
+    const state = { clientes: [{ id: "cliente-1", deudaAcumulada: 500 }], visitas: [visit], stock: [], subscriptions: [{ id: "s", clienteId: "cliente-1", cantidadX20: 4, cantidadConsumida: 2 }], config: { stockActivo: false } };
+    expect(deleteDeliveryVisitMutation({ state, visitId: visit.id, mutate })).toEqual({ ok: true });
+    expect(mutate.mock.calls[0][0].visitas).toEqual([]);
+    expect(mutate.mock.calls[0][0].subscriptions[0]).toMatchObject({ cantidadConsumida: 0, cantidadRestante: 4 });
+    expect(mutate.mock.calls[0][0].clientes[0].deudaAcumulada).toBe(0);
   });
 });
 

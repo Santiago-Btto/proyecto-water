@@ -157,6 +157,29 @@ export function totalStreetDebt(clients = []) {
   return clients.reduce((total, client) => total + (Number(client.deudaAcumulada) || 0), 0);
 }
 
+function applySubscriptionAttribution(subscriptions = [], attribution, direction) {
+  if (!attribution?.subscriptionId) return subscriptions;
+  const index = subscriptions.findIndex((subscription) => subscription.id === attribution.subscriptionId);
+  if (index < 0) throw new Error("Suscripción no encontrada");
+  const next = subscriptions.slice();
+  const current = next[index];
+  const cantidadConsumida = Math.max(0, (Number(current.cantidadConsumida) || 0) + direction * (Number(attribution.cantidadX20) || 0));
+  next[index] = { ...current, cantidadConsumida, cantidadRestante: Math.max(0, (Number(current.cantidadX20) || 0) - cantidadConsumida) };
+  return next;
+}
+
+function subscriptionSummary(subscriptions, clientId) {
+  const subscription = subscriptions.find((item) => item.clienteId === clientId);
+  if (!subscription) return null;
+  return {
+    subscriptionId: subscription.id,
+    periodo: subscription.periodo,
+    estadoPago: subscription.estadoPago,
+    cantidadConsumida: subscription.cantidadConsumida || 0,
+    cantidadRestante: subscription.cantidadRestante ?? Math.max(0, (Number(subscription.cantidadX20) || 0) - (Number(subscription.cantidadConsumida) || 0)),
+  };
+}
+
 export function applyDeliveryVisitMutation({ state, visit, mutate }) {
   try {
     const clientIndex = state.clientes.findIndex((client) => client.id === visit.clienteId);
@@ -171,7 +194,15 @@ export function applyDeliveryVisitMutation({ state, visit, mutate }) {
     });
     const clientes = state.clientes.slice();
     const visitas = state.visitas.slice();
-    clientes[clientIndex] = client;
+    const hasSubscriptionEffect = !!(previousVisit?.subscriptionAttribution || visit.subscriptionAttribution);
+    let subscriptions = state.subscriptions || [];
+    if (hasSubscriptionEffect) {
+      subscriptions = applySubscriptionAttribution(subscriptions, previousVisit?.subscriptionAttribution, -1);
+      subscriptions = applySubscriptionAttribution(subscriptions, visit.subscriptionAttribution, 1);
+    }
+    clientes[clientIndex] = hasSubscriptionEffect
+      ? { ...client, subscriptionSummary: subscriptionSummary(subscriptions, client.id) }
+      : client;
     if (visitIndex >= 0) visitas[visitIndex] = visit;
     else visitas.push(visit);
 
@@ -188,7 +219,7 @@ export function applyDeliveryVisitMutation({ state, visit, mutate }) {
       else stock.push(nextStock);
     }
 
-    mutate({ ...state, clientes, visitas, stock }, { history: false });
+    mutate(hasSubscriptionEffect ? { ...state, clientes, visitas, stock, subscriptions } : { ...state, clientes, visitas, stock }, { history: false });
     return { ok: true };
   } catch (error) {
     console.error("No se pudo guardar la visita", error);
@@ -196,6 +227,37 @@ export function applyDeliveryVisitMutation({ state, visit, mutate }) {
       ok: false,
       error: "No se pudo guardar la visita. Revisá la conexión e intentá nuevamente.",
     };
+  }
+}
+
+export function deleteDeliveryVisitMutation({ state, visitId, mutate }) {
+  try {
+    const visitIndex = state.visitas.findIndex((visit) => visit.id === visitId);
+    if (visitIndex < 0) throw new Error("Visita no encontrada");
+    const previousVisit = state.visitas[visitIndex];
+    const clientIndex = state.clientes.findIndex((client) => client.id === previousVisit.clienteId);
+    if (clientIndex < 0) throw new Error("Cliente no encontrado");
+    const { client, stockDelta } = deriveVisitEffects({ client: state.clientes[clientIndex], previousVisit, visit: {} });
+    const subscriptions = applySubscriptionAttribution(state.subscriptions || [], previousVisit.subscriptionAttribution, -1);
+    const clientes = state.clientes.slice();
+    clientes[clientIndex] = previousVisit.subscriptionAttribution
+      ? { ...client, subscriptionSummary: subscriptionSummary(subscriptions, client.id) }
+      : client;
+    let stock = state.stock;
+    if (state.config.stockActivo) {
+      const index = stock.findIndex((item) => item.id === previousVisit.repartidorId);
+      if (index >= 0) {
+        stock = stock.slice();
+        const next = { ...stock[index] };
+        RETURNABLE_PRODUCTS.forEach((type) => { next[type] = (Number(next[type]) || 0) - stockDelta[type]; });
+        stock[index] = next;
+      }
+    }
+    mutate({ ...state, clientes, visitas: state.visitas.filter((visit) => visit.id !== visitId), stock, subscriptions }, { history: false });
+    return { ok: true };
+  } catch (error) {
+    console.error("No se pudo borrar la visita", error);
+    return { ok: false, error: "No se pudo borrar la visita. Revisá la conexión e intentá nuevamente." };
   }
 }
 

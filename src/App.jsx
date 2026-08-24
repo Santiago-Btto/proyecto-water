@@ -12,6 +12,7 @@ import {
 } from "firebase/firestore";
 import { firestore, COLLECTION } from "./firebaseConfig";
 import { applyDeliveryVisitMutation, submitVisit, totalStreetDebt } from "./operationalIntegrity";
+import { applySubscriptionMigration, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, migrationPreview, recordSubscriptionPayment, splitX20Delivery, subscriptionMetrics, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
 
 /* ============================================================
    TOKENS DE DISEÑO
@@ -1108,6 +1109,82 @@ function AdminGate({ config, onUnlock, onBack, onSetPin }) {
   );
 }
 
+function AdminSuscripciones({ db, mutate }) {
+  const [nombre, setNombre] = useState("");
+  const [cantidadX20, setCantidadX20] = useState("4");
+  const [precioMensual, setPrecioMensual] = useState("");
+  const [error, setError] = useState("");
+  const [migrationPeriod, setMigrationPeriod] = useState(hoyISO().slice(0, 7));
+  const [migrationPromotionId, setMigrationPromotionId] = useState("");
+  const [migrationSelectedIds, setMigrationSelectedIds] = useState([]);
+  const [migrationConfirmed, setMigrationConfirmed] = useState(false);
+  const metrics = subscriptionMetrics(db.subscriptions || []);
+
+  function savePromotion() {
+    const promotion = { id: uid(), nombre: nombre || `${cantidadX20} bidones 20L`, cantidadX20: Number(cantidadX20), precioMensual: Number(precioMensual), activo: true };
+    const validation = validatePromotion(promotion);
+    if (!validation.ok) return setError(validation.error);
+    mutate({ ...db, promotions: upsertPromotion(db.promotions || [], promotion) });
+    setNombre(""); setPrecioMensual(""); setError("");
+  }
+
+  function selectSubscription(client, promotion) {
+    try {
+      const subscription = createSubscription({ client, promotion, subscriptions: db.subscriptions || [] });
+      const clients = db.clientes.map((item) => item.id === client.id ? { ...item, subscriptionSummary: { subscriptionId: subscription.id, periodo: subscription.periodo, estadoPago: subscription.estadoPago, cantidadConsumida: 0, cantidadRestante: subscription.cantidadX20 } } : item);
+      mutate({ ...db, clientes: clients, subscriptions: [...(db.subscriptions || []), subscription] });
+    } catch (cause) { setError(cause.message); }
+  }
+
+  function pay(subscription, metodo) {
+    const paid = recordSubscriptionPayment(subscription, { metodo });
+    const subscriptions = db.subscriptions.map((item) => item.id === subscription.id ? paid : item);
+    const clientes = db.clientes.map((client) => client.id === subscription.clienteId && client.subscriptionSummary?.subscriptionId === subscription.id ? { ...client, subscriptionSummary: { ...client.subscriptionSummary, estadoPago: "pagada" } } : client);
+    mutate({ ...db, subscriptions, clientes });
+  }
+
+  const migrationPromotion = (db.promotions || []).find((promotion) => promotion.id === migrationPromotionId && promotion.activo);
+  const migration = migrationPromotion
+    ? migrationPreview({ clients: db.clientes || [], subscriptions: db.subscriptions || [], period: migrationPeriod, promotion: migrationPromotion })
+    : null;
+
+  function toggleMigrationClient(clientId) {
+    setMigrationSelectedIds((ids) => ids.includes(clientId) ? ids.filter((id) => id !== clientId) : [...ids, clientId]);
+  }
+
+  function applyMigration() {
+    try {
+      const result = applySubscriptionMigration({
+        clients: db.clientes,
+        subscriptions: db.subscriptions || [],
+        selectedClientIds: migrationSelectedIds,
+        period: migrationPeriod,
+        promotion: migrationPromotion,
+        confirmed: migrationConfirmed,
+      });
+      mutate({ ...db, subscriptions: result.subscriptions });
+      setMigrationSelectedIds([]);
+      setMigrationConfirmed(false);
+      setError("");
+    } catch (cause) { setError(cause.message); }
+  }
+
+  return <div className="space-y-3">
+    <Card><div className="font-bold text-sm mb-2">Promociones de máquina F/C</div>
+      <Field label="Nombre"><Input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Ej. Plan 6 bidones" /></Field>
+      <div className="flex gap-2"><Field label="Bidones 20L"><select value={cantidadX20} onChange={(e) => setCantidadX20(e.target.value)} className="rounded-xl px-2 py-2.5 text-sm" style={{ border: `1px solid ${C.border}` }}>{[4, 6, 8, 10].map((n) => <option key={n}>{n}</option>)}</select></Field><Field label="Total mensual"><Input type="number" value={precioMensual} onChange={(e) => setPrecioMensual(e.target.value)} /></Field></div>
+      {error && <div className="text-xs mb-2" style={{ color: C.danger }}>{error}</div>}<Btn size="sm" onClick={savePromotion} icon={Save}>Guardar promoción</Btn>
+      {(db.promotions || []).map((promotion) => <div key={promotion.id} className="flex justify-between text-xs mt-3"><span>{promotion.nombre}: {promotion.cantidadX20}×20L · {formatMoney(promotion.precioMensual)}</span><button onClick={() => mutate({ ...db, promotions: upsertPromotion(db.promotions, { ...promotion, activo: !promotion.activo }) })} style={{ color: C.primary }}>{promotion.activo ? "Desactivar" : "Activar"}</button></div>)}
+    </Card>
+    <Card><div className="font-bold text-sm mb-2">Resumen de suscripciones</div><div className="text-xs" style={{ color: C.muted }}>Pagado {formatMoney(metrics.paidTotal)} · Pendiente {formatMoney(metrics.pendingTotal)} · Vencido {formatMoney(metrics.overdueTotal)} · Cupo restante {metrics.remainingTotal}</div></Card>
+    <Card><div className="font-bold text-sm mb-1">Migración manual por lote</div><div className="text-xs mb-2" style={{ color: C.muted }}>Solo agrega suscripciones al período elegido. No modifica clientes, visitas, deuda ni stock.</div>
+      <div className="flex gap-2 mb-2"><Field label="Período"><Input type="month" value={migrationPeriod} onChange={(e) => setMigrationPeriod(e.target.value)} /></Field><Field label="Promoción"><select value={migrationPromotionId} onChange={(e) => { setMigrationPromotionId(e.target.value); setMigrationSelectedIds([]); }} className="rounded-xl px-2 py-2.5 text-sm" style={{ border: `1px solid ${C.border}` }}><option value="">Elegir</option>{(db.promotions || []).filter((promotion) => promotion.activo).map((promotion) => <option key={promotion.id} value={promotion.id}>{promotion.nombre}</option>)}</select></Field></div>
+      {migration && <><div className="text-xs font-semibold mb-1">Vista previa: {migration.clients.length} cliente(s) elegibles · {migration.promotion.nombre} · {migration.promotion.cantidadX20}×20L · {formatMoney(migration.promotion.precioMensual)}</div>{migration.clients.map((client) => <label key={client.id} className="flex gap-2 text-xs mb-1"><input type="checkbox" checked={migrationSelectedIds.includes(client.id)} onChange={() => toggleMigrationClient(client.id)} />{client.nombre}</label>)}{migration.clients.length === 0 && <div className="text-xs" style={{ color: C.muted }}>No hay clientes elegibles para este período.</div>}<label className="flex gap-2 text-xs font-semibold mt-2"><input type="checkbox" checked={migrationConfirmed} onChange={(e) => setMigrationConfirmed(e.target.checked)} />Confirmo crear solo {migrationSelectedIds.length} registro(s) de suscripción.</label><Btn size="sm" onClick={applyMigration} disabled={!migrationConfirmed || migrationSelectedIds.length === 0} className="mt-2" icon={Check}>Aplicar lote seleccionado</Btn></>}
+    </Card>
+    {(db.clientes || []).filter((client) => client.maquinaFrioCalor).map((client) => { const summary = client.subscriptionSummary; const current = (db.subscriptions || []).find((item) => item.id === summary?.subscriptionId); const view = clientSubscriptionSummaryView({ client, subscription: current }); const selectable = canSelectSubscription({ client, subscriptions: db.subscriptions || [] }); return <Card key={client.id}><div className="font-bold text-sm">{client.nombre}</div>{!current ? <><div className="text-xs my-1" style={{ color: C.muted }}>{view.label}</div>{selectable.ok && (db.promotions || []).filter((item) => item.activo).map((promotion) => <button key={promotion.id} onClick={() => selectSubscription(client, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>{promotion.nombre}</button>)}</> : <><div className="text-xs" style={{ color: C.muted }}>{view.period} · {view.label} · {view.consumed}/{current.cantidadX20} entregados · quedan {view.remaining}</div>{current.estadoPago !== "pagada" && <div className="mt-1"><button className="text-xs mr-2" onClick={() => pay(current, "efectivo")} style={{ color: C.primary }}>Cobrar efectivo</button><button className="text-xs" onClick={() => pay(current, "mercadopago")} style={{ color: C.primary }}>Cobrar Mercado Pago</button></div>}</>}</Card>; })}
+  </div>;
+}
+
 /* ============================================================
    APP ADMINISTRADOR
    ============================================================ */
@@ -1120,6 +1197,7 @@ function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo, offline 
     { key: "historial", label: "Recorridos", icon: ClipboardList },
     { key: "stock", label: "Stock", icon: Boxes },
     { key: "gastos", label: "Gastos", icon: Receipt },
+    { key: "suscripciones", label: "Planes", icon: CreditCard },
     { key: "ajustes", label: "Ajustes", icon: Settings2 },
   ];
 
@@ -1147,6 +1225,7 @@ function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo, offline 
         {tab === "historial" && <AdminHistorial db={db} mutate={mutate} />}
         {tab === "stock" && <AdminStock db={db} mutate={mutate} />}
         {tab === "gastos" && <AdminGastos db={db} mutate={mutate} />}
+        {tab === "suscripciones" && <AdminSuscripciones db={db} mutate={mutate} />}
         {tab === "ajustes" && <AdminAjustes db={db} mutate={mutate} />}
       </div>
       <div className="flex-shrink-0 flex" style={{ background: C.surface, borderTop: `1px solid ${C.border}` }}>
@@ -5532,6 +5611,7 @@ const gruposDiasAnteriores =
           historialVisitas={db.visitas.filter(
             (v) => v.clienteId === clienteParaSheet.id
           )}
+          subscriptions={db.subscriptions || []}
           onClose={() => {
             setActivo(null);
             setVisitaEditando(null);
@@ -5764,6 +5844,7 @@ function VisitaSheet({
   stockActivo,
   stockRepartidor,
   historialVisitas = [],
+  subscriptions = [],
   onClose,
   onGuardar,
 }) {
@@ -6004,6 +6085,10 @@ useEffect(() => {
 }, [extrasPrestados, extrasRetirados]);
 
   const total = totalPedido(items);
+  const currentSubscription = subscriptions.find((subscription) => subscription.id === cliente.subscriptionSummary?.subscriptionId) || null;
+  const b20Quantity = Number(items.find((item) => item.tipo === "b20")?.cantidad) || 0;
+  const quotaPreview = splitX20Delivery({ quantity: b20Quantity, subscription: currentSubscription ? { ...currentSubscription, cantidadConsumida: Math.max(0, (Number(currentSubscription.cantidadConsumida) || 0) - (Number(visitaInicial?.subscriptionAttribution?.cantidadX20) || 0)) } : null, unitPrice: precios.b20 });
+  const quotaFeedback = deliveryQuotaFeedback({ quantity: b20Quantity, subscription: currentSubscription ? { ...currentSubscription, cantidadConsumida: Math.max(0, (Number(currentSubscription.cantidadConsumida) || 0) - (Number(visitaInicial?.subscriptionAttribution?.cantidadX20) || 0)) } : null, unitPrice: precios.b20, mutationError: errorStock });
 
   const pagadoFinal =
     montoPagado === null
@@ -6206,7 +6291,8 @@ const ajusteDeudaManual =
       fecha: hoyISO(),
       diaSemana: diaSemanaHoy(),
       vendio,
-      items: vendio ? items : [],
+      items: vendio ? items.map((item) => item.tipo === "b20" ? { ...item, cantidad: quotaPreview.excess } : item) : [],
+      subscriptionAttribution: quotaPreview.attribution,
       extrasPrestados: {
         b20: Number(extrasPrestados.b20) || 0,
         b12: Number(extrasPrestados.b12) || 0,
@@ -6222,7 +6308,7 @@ const ajusteDeudaManual =
         b12: Number(permanentesRetiradosSeparados.b12) || 0,
         sifon: Number(permanentesRetiradosSeparados.sifon) || 0,
       },
-      total: vendio ? total : 0,
+      total: vendio ? total - b20Quantity * (Number(precios.b20) || 0) + quotaPreview.ordinaryAmount : 0,
       metodoPago: vendio ? metodoPago : null,
       pagos:
         vendio && metodoPago !== "deuda"
@@ -6297,6 +6383,12 @@ deudaCobrada: deudaCobradaFinal,
         </>
       }
     >
+      {currentSubscription && (
+        <Card className="mb-3" style={{ background: C.accentSoft, border: "none" }}>
+          <div className="text-xs font-bold" style={{ color: C.primary }}>Plan {currentSubscription.periodo}: {currentSubscription.cantidadConsumida || 0}/{currentSubscription.cantidadX20} entregados</div>
+          <div className="text-xs mt-1">Esta visita cubre {quotaFeedback.covered} · Quedan {quotaFeedback.remaining} · Excedente a venta normal: {quotaFeedback.excess}</div>
+        </Card>
+      )}
       <div className="flex flex-wrap gap-2 mb-3">
         {cliente.direccion && (
           <a
@@ -7392,7 +7484,7 @@ deudaCobrada: deudaCobradaFinal,
    ============================================================ */
 export default function App() {
   const [loading, setLoading] = useState(true);
-  const [db, setDb] = useState({ clientes: [], visitas: [], gastos: [], stock: [], config: clone(DEFAULT_CONFIG) });
+  const [db, setDb] = useState({ clientes: [], visitas: [], gastos: [], stock: [], promotions: [], subscriptions: [], config: clone(DEFAULT_CONFIG) });
   const [profile, setProfile] = useState(null); // null(cargando) | 'picker' | {type:'admin'} | {type:'repartidor', id}
   const [adminUnlocked, setAdminUnlocked] = useState(() => {
   return sessionStorage.getItem("adminUnlocked") === "true";
@@ -7420,7 +7512,7 @@ export default function App() {
     const loaded = new Set();
     function markLoaded(key) {
       loaded.add(key);
-      if (loaded.size === 5) {
+       if (loaded.size === 7) {
         setProfile(getLocalProfile() || "picker");
         setLoading(false);
       }
@@ -7432,7 +7524,9 @@ export default function App() {
       subscribeCollection("clientes", (v) => { setDb((p) => ({ ...p, clientes: v })); markLoaded("clientes"); setConnError(null); }, setConnError),
       subscribeCollection("visitas", (v) => { setDb((p) => ({ ...p, visitas: v })); markLoaded("visitas"); setConnError(null); }, setConnError),
       subscribeCollection("gastos", (v) => { setDb((p) => ({ ...p, gastos: v })); markLoaded("gastos"); setConnError(null); }, setConnError),
-      subscribeCollection("stock", (v) => { setDb((p) => ({ ...p, stock: v })); markLoaded("stock"); setConnError(null); }, setConnError),
+       subscribeCollection("stock", (v) => { setDb((p) => ({ ...p, stock: v })); markLoaded("stock"); setConnError(null); }, setConnError),
+       subscribeCollection("promotions", (v) => { setDb((p) => ({ ...p, promotions: v })); markLoaded("promotions"); setConnError(null); }, setConnError),
+       subscribeCollection("subscriptions", (v) => { setDb((p) => ({ ...p, subscriptions: v })); markLoaded("subscriptions"); setConnError(null); }, setConnError),
       subscribeConfigDoc(clone(DEFAULT_CONFIG), (v) => {
         const normalizada = {
           ...clone(DEFAULT_CONFIG),
@@ -7468,6 +7562,16 @@ export default function App() {
       const { upserts, deletes } = diffArrayById(prevDb.stock || [], nextDb.stock || []);
       upserts.forEach((st) => upsertDoc("stock", st));
       deletes.forEach((id) => removeDoc("stock", id));
+    }
+    if (nextDb.subscriptions !== prevDb.subscriptions) {
+      const { upserts, deletes } = diffArrayById(prevDb.subscriptions || [], nextDb.subscriptions || []);
+      upserts.forEach((subscription) => upsertDoc("subscriptions", subscription));
+      deletes.forEach((id) => removeDoc("subscriptions", id));
+    }
+    if (nextDb.promotions !== prevDb.promotions) {
+      const { upserts, deletes } = diffArrayById(prevDb.promotions || [], nextDb.promotions || []);
+      upserts.forEach((promotion) => upsertDoc("promotions", promotion));
+      deletes.forEach((id) => removeDoc("promotions", id));
     }
     if (nextDb.config !== prevDb.config) setConfigDoc(nextDb.config);
   }
