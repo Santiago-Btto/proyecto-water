@@ -13,6 +13,7 @@ import {
 import { firestore, COLLECTION } from "./firebaseConfig";
 import { applyDeliveryVisitMutation, submitVisit, totalStreetDebt } from "./operationalIntegrity";
 import { applySubscriptionMigration, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, migrationPreview, recordSubscriptionPayment, splitX20Delivery, subscriptionMetrics, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
+import { isDashboardDateInRange } from "./dashboardCalendarFilters";
 
 /* ============================================================
    TOKENS DE DISEÑO
@@ -1417,30 +1418,18 @@ function AdminDashboard({ db }) {
   const [mostrarCalendario, setMostrarCalendario] = useState(false);
   const [mostrarVisitas, setMostrarVisitas] = useState(false);
 
-  function fechaLocal(iso) {
-    try {
-      const [y, m, d] = iso.split("-").map(Number);
-      return new Date(y, m - 1, d);
-    } catch {
-      return new Date(0);
-    }
-  }
-
   function perteneceAlRango(fecha) {
     if (!fecha) return false;
 
     if (rango === "dia") return fecha === fechaSeleccionada;
     if (rango === "hoy") return fecha === hoy;
 
-    if (rango === "semana") {
-      const fechaDato = fechaLocal(fecha);
-      const fechaHoy = fechaLocal(hoy);
-      const diferenciaDias = (fechaHoy - fechaDato) / 86400000;
-      return diferenciaDias >= 0 && diferenciaDias < 7;
-    }
-
-    if (rango === "mes") {
-      return fecha.slice(0, 7) === hoy.slice(0, 7);
+    if (rango === "semana" || rango === "mes") {
+      return isDashboardDateInRange({
+        date: fecha,
+        range: rango,
+        currentDate: hoy,
+      });
     }
 
     return true;
@@ -1551,7 +1540,7 @@ const totalBultosVendidos = PRODUCTOS.reduce(
     rango === "hoy"
       ? "Hoy"
       : rango === "semana"
-      ? "Últimos 7 días"
+      ? "Semana (domingo a sábado)"
       : rango === "mes"
       ? "Este mes"
       : rango === "todo"
