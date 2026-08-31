@@ -37,6 +37,9 @@ const C = {
   border: "#DEE9EB",
 };
 
+// Cambiá este número con cada publicación para identificar la versión instalada.
+const APP_VERSION = "0.9";
+
 const DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
 const DIAS_JS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
 const PRODUCTOS = [
@@ -1213,6 +1216,12 @@ function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo, offline 
             <span className="flex items-center gap-1 px-1.5 mr-1">
               <span className="w-1.5 h-1.5 rounded-full" style={{ background: offline ? C.warning : C.accent }} />
               <span className="text-[10px] font-bold" style={{ color: C.accentSoft }}>{offline ? "sin conexión" : "en vivo"}</span>
+            </span>
+            <span
+              className="text-[10px] font-semibold mr-1 whitespace-nowrap"
+              style={{ color: "#B8CBD1" }}
+            >
+              Versión {APP_VERSION}
             </span>
             <button onClick={undo} disabled={!canUndo} className="p-2 rounded-full active:bg-white/10 disabled:opacity-30"><Undo2 size={16} color="#fff" /></button>
             <button onClick={redo} disabled={!canRedo} className="p-2 rounded-full active:bg-white/10 disabled:opacity-30"><Redo2 size={16} color="#fff" /></button>
