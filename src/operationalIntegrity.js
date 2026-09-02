@@ -171,7 +171,11 @@ function applySubscriptionAttribution(subscriptions = [], attribution, direction
 }
 
 function subscriptionSummary(subscriptions, clientId) {
-  const subscription = subscriptions.find((item) => item.clienteId === clientId);
+  // Un cliente puede tener abonos de distintos meses. Al corregir una visita
+  // anterior, su tarjeta debe seguir apuntando al período más reciente.
+  const subscription = subscriptions
+    .filter((item) => item.clienteId === clientId)
+    .sort((a, b) => String(b.periodo || "").localeCompare(String(a.periodo || "")))[0];
   if (!subscription) return null;
   return {
     subscriptionId: subscription.id,

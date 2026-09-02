@@ -38,7 +38,7 @@ const C = {
 };
 
 // Cambiá este número con cada publicación para identificar la versión instalada.
-const APP_VERSION = "0.9.2";
+const APP_VERSION = "0.9.4";
 
 const DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
 const DIAS_JS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
@@ -1223,7 +1223,7 @@ function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo, offline 
         }
       />
       <div className="flex-1 overflow-y-auto px-4 py-4">
-        {tab === "inicio" && <AdminDashboard db={db} />}
+        {tab === "inicio" && <AdminDashboard db={db} mutate={mutate} />}
         {tab === "clientes" && <AdminClientes db={db} mutate={mutate} />}
         {tab === "historial" && <AdminHistorial db={db} mutate={mutate} />}
         {tab === "stock" && <AdminStock db={db} mutate={mutate} />}
@@ -1413,13 +1413,60 @@ function CalendarioAdmin({ fechaSeleccionada, onSeleccionar, visitas, gastos }) 
   );
 }
 
-function AdminDashboard({ db }) {
+function AdminDashboard({ db, mutate }) {
   const hoy = hoyISO();
   const [rango, setRango] = useState("hoy"); // hoy | semana | mes | todo | dia
   const [fechaSeleccionada, setFechaSeleccionada] = useState(hoy);
   const [mostrarCalendario, setMostrarCalendario] = useState(false);
   const [mostrarVisitas, setMostrarVisitas] = useState(false);
   const [mostrarAbonos, setMostrarAbonos] = useState(false);
+  const [visitaEditandoId, setVisitaEditandoId] = useState(null);
+
+  const visitaEditando = db.visitas.find((visit) => visit.id === visitaEditandoId) || null;
+  const clienteDeVisitaEditando = visitaEditando
+    ? db.clientes.find((client) => client.id === visitaEditando.clienteId) || null
+    : null;
+
+  function clienteAntesDeCorreccion(cliente, visita) {
+    if (!cliente || !visita) return cliente;
+
+    const copia = clone(cliente);
+    copia.deudaAcumulada = Math.max(
+      0,
+      (Number(copia.deudaAcumulada) || 0) -
+        (Number(visita.ajusteDeudaManual) || 0) -
+        (Number(visita.deudaGenerada) || 0) +
+        (Number(visita.deudaCobrada) || 0)
+    );
+    copia.envasesExtra = aplicarDeltaEnvases(
+      envasesExtraDe(copia),
+      calcularDeltaExtras(visita),
+      -1
+    );
+    copia.envasesPermanentes = aplicarRetiroPermanentes(
+      envasesPermanentesDe(copia),
+      visita.permanentesRetirados,
+      -1
+    );
+    return copia;
+  }
+
+  function stockAntesDeCorreccion(visita) {
+    const actual = stockDeRepartidor(db, visita.repartidorId);
+    const deltaAnterior = calcularDeltaStockEnvases(visita);
+    PRODUCTOS_RETORNABLES.forEach((producto) => {
+      actual[producto.key] =
+        (Number(actual[producto.key]) || 0) +
+        (Number(deltaAnterior[producto.key]) || 0);
+    });
+    return actual;
+  }
+
+  function guardarCorreccion(visita) {
+    const result = applyDeliveryVisitMutation({ state: db, visit, mutate });
+    if (result.ok) setVisitaEditandoId(null);
+    return result;
+  }
 
   function perteneceAlRango(fecha) {
     if (!fecha) return false;
@@ -2243,7 +2290,11 @@ const totalBultosVendidos = PRODUCTOS.reduce(
                     .join(", ");
 
                   return (
-                    <Card key={v.id}>
+                    <Card
+                      key={v.id}
+                      onClick={() => setVisitaEditandoId(v.id)}
+                      style={{ cursor: "pointer" }}
+                    >
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0 flex-1">
                           <div className="font-bold text-sm">
@@ -2265,6 +2316,12 @@ const totalBultosVendidos = PRODUCTOS.reduce(
                           <Badge tone="muted">No vendió</Badge>
                         )}
                       </div>
+
+                      {v.subscriptionAttribution && (
+                        <div className="text-xs mt-2" style={{ color: C.primary }}>
+                          Abono: {Number(v.subscriptionAttribution.cantidadX20) || 0}× Bidón 20 L
+                        </div>
+                      )}
 
                       {v.vendio && productos && (
                         <div className="text-xs mt-1">{productos}</div>
@@ -2340,6 +2397,7 @@ const totalBultosVendidos = PRODUCTOS.reduce(
                           {v.notas}
                         </div>
                       )}
+
                     </Card>
                   );
                 })}
@@ -2389,6 +2447,23 @@ const totalBultosVendidos = PRODUCTOS.reduce(
           Permanentes + extras actuales.
         </div>
       </Card>
+
+      {visitaEditando && clienteDeVisitaEditando && (
+        <VisitaSheet
+          cliente={clienteAntesDeCorreccion(clienteDeVisitaEditando, visitaEditando)}
+          visitaInicial={visitaEditando}
+          precios={db.config.precios}
+          stockActivo={db.config.stockActivo}
+          stockRepartidor={stockAntesDeCorreccion(visitaEditando)}
+          historialVisitas={db.visitas.filter(
+            (visit) => visit.clienteId === clienteDeVisitaEditando.id
+          )}
+          subscriptions={db.subscriptions || []}
+          modoCorreccionAdministrativa
+          onClose={() => setVisitaEditandoId(null)}
+          onGuardar={guardarCorreccion}
+        />
+      )}
     </div>
   );
 }
@@ -5855,7 +5930,7 @@ function ClienteVisitaCard({
             <span>{cliente.direccion}</span>
           </a>
 
-          {!tieneAbonoActivo && cliente.deudaAcumulada > 0 && (
+          {cliente.deudaAcumulada > 0 && (
             <div
               className="rounded-xl px-3 py-2 mt-2"
               style={{
@@ -5996,13 +6071,19 @@ function VisitaSheet({
   stockRepartidor,
   historialVisitas = [],
   subscriptions = [],
+  modoCorreccionAdministrativa = false,
   onClose,
   onGuardar,
 }) {
   const permanentes = envasesPermanentesDe(cliente);
   const saldoActual = envasesExtraDe(cliente);
+  // Al editar una venta existente, respetamos el tipo de esa venta. Un
+  // cliente puede tener un abono hoy y, aun así, una venta normal anterior.
+  const subscriptionIdParaVisita = visitaInicial
+    ? visitaInicial.subscriptionAttribution?.subscriptionId || null
+    : cliente.subscriptionSummary?.subscriptionId || null;
   const tieneAbonoActivo = subscriptions.some(
-    (subscription) => subscription.id === cliente.subscriptionSummary?.subscriptionId
+    (subscription) => subscription.id === subscriptionIdParaVisita
   );
   // Deuda que tenía el cliente ANTES de esta visita.
 const deudaBase = Number(cliente.deudaAcumulada) || 0;
@@ -6031,7 +6112,11 @@ const deudaBase = Number(cliente.deudaAcumulada) || 0;
         // En una visita de abono guardamos solo el excedente como venta.
         // El selector empieza en cero al editar: representa únicamente lo
         // que se agrega ahora, no los bidones ya registrados en el plan.
-        cantidad: anterior?.cantidad || 0,
+        cantidad:
+          (Number(anterior?.cantidad) || 0) +
+          (modoCorreccionAdministrativa && p.key === "b20"
+            ? Number(visitaInicial?.subscriptionAttribution?.cantidadX20) || 0
+            : 0),
         // Al editar conservamos el precio que tenía la visita original.
         precioUnitario:
           anterior?.precioUnitario ??
@@ -6250,19 +6335,36 @@ useEffect(() => {
 }, [extrasPrestados, extrasRetirados, tieneAbonoActivo]);
 
   const total = totalPedido(items);
-  const currentSubscription = subscriptions.find((subscription) => subscription.id === cliente.subscriptionSummary?.subscriptionId) || null;
+  const currentSubscription = subscriptions.find(
+    (subscription) => subscription.id === subscriptionIdParaVisita
+  ) || null;
   const modoAbono = tieneAbonoActivo;
   const b20Quantity = Number(items.find((item) => item.tipo === "b20")?.cantidad) || 0;
-  const quotaPreview = splitX20Delivery({ quantity: b20Quantity, subscription: currentSubscription, unitPrice: precios.b20 });
-  const quotaFeedback = deliveryQuotaFeedback({ quantity: b20Quantity, subscription: currentSubscription, unitPrice: precios.b20, mutationError: errorStock });
+  const cantidadAtribuidaOriginal =
+    Number(visitaInicial?.subscriptionAttribution?.cantidadX20) || 0;
+  const subscriptionParaCorreccion =
+    modoCorreccionAdministrativa && currentSubscription
+      ? {
+          ...currentSubscription,
+          cantidadConsumida: Math.max(
+            0,
+            (Number(currentSubscription.cantidadConsumida) || 0) - cantidadAtribuidaOriginal
+          ),
+        }
+      : currentSubscription;
+  const quotaPreview = splitX20Delivery({ quantity: b20Quantity, subscription: subscriptionParaCorreccion, unitPrice: precios.b20 });
+  const quotaFeedback = deliveryQuotaFeedback({ quantity: b20Quantity, subscription: subscriptionParaCorreccion, unitPrice: precios.b20, mutationError: errorStock });
   // Sin un abono activo ambos ids serían `undefined`. No hay que tratar eso
   // como una coincidencia: una visita normal no tiene atribución de abono.
   const attributedPreviously =
+    !modoCorreccionAdministrativa &&
     currentSubscription &&
     visitaInicial?.subscriptionAttribution?.subscriptionId === currentSubscription.id
       ? Number(visitaInicial.subscriptionAttribution.cantidadX20) || 0
       : 0;
-  const subscriptionAttributionFinal = currentSubscription && attributedPreviously + quotaPreview.covered > 0
+  const subscriptionAttributionFinal = modoCorreccionAdministrativa
+    ? quotaPreview.attribution
+    : currentSubscription && attributedPreviously + quotaPreview.covered > 0
     ? {
         subscriptionId: currentSubscription.id,
         periodo: currentSubscription.periodo,
@@ -6319,7 +6421,7 @@ useEffect(() => {
     Number(saldoPendienteManual) || 0
   );
 
-  const deudaCobradaPrevista = !modoAbono && cobrarDeuda
+  const deudaCobradaPrevista = cobrarDeuda
     ? Math.max(0, Number(montoDeuda) || 0)
     : 0;
 
@@ -6531,7 +6633,7 @@ const ajusteDeudaManual =
 
 deudaCobrada: deudaCobradaFinal,
 
-      metodoDeuda: !modoAbono && cobrarDeuda
+      metodoDeuda: cobrarDeuda
         ? metodoDeuda
         : null,
       notas,
@@ -6600,8 +6702,14 @@ deudaCobrada: deudaCobradaFinal,
     >
       {currentSubscription && (
         <Card className="mb-3" style={{ background: C.accentSoft, border: "none" }}>
-          <div className="text-xs font-bold" style={{ color: C.primary }}>Plan {currentSubscription.periodo}: {currentSubscription.cantidadConsumida || 0}/{currentSubscription.cantidadX20} entregados</div>
-          <div className="text-xs mt-1">Esta visita agrega: {quotaFeedback.covered} · Quedan {quotaFeedback.remaining} · Excedente a venta normal: {quotaFeedback.excess}</div>
+          <div className="text-xs font-bold" style={{ color: C.primary }}>
+            Plan {currentSubscription.periodo}: {modoCorreccionAdministrativa
+              ? subscriptionParaCorreccion.cantidadConsumida || 0
+              : currentSubscription.cantidadConsumida || 0}/{currentSubscription.cantidadX20} entregados
+          </div>
+          <div className="text-xs mt-1">
+            {modoCorreccionAdministrativa ? "Esta visita entrega" : "Esta visita agrega"}: {quotaFeedback.covered} · Quedan {quotaFeedback.remaining} · Excedente a venta normal: {quotaFeedback.excess}
+          </div>
         </Card>
       )}
       <div className="flex flex-wrap gap-2 mb-3">
@@ -7037,7 +7145,7 @@ deudaCobrada: deudaCobradaFinal,
   )}
 </div>}
 
-      {!modoAbono && Number(saldoPendienteManual) > 0 && (
+      {Number(saldoPendienteManual) > 0 && (
         <Card
           style={{
             background: C.dangerBg,
@@ -7293,7 +7401,7 @@ deudaCobrada: deudaCobradaFinal,
               }
             />
           </Field>}
-          {!modoAbono && <Field label="Próxima visita especial">
+          <Field label="Próxima visita especial">
             <button
               type="button"
               onClick={() => setVolverSabado(!volverSabado)}
@@ -7325,7 +7433,7 @@ deudaCobrada: deudaCobradaFinal,
                 {volverSabado && <Check size={13} color="#fff" />}
               </div>
             </button>
-          </Field>}
+          </Field>
         </>
       ) : (
         <>
@@ -7392,7 +7500,7 @@ deudaCobrada: deudaCobradaFinal,
           SALDO FINAL DE LA CUENTA
           Se actualiza en tiempo real antes de guardar.
           ===================================================== */}
-      {!modoAbono && <Card
+      <Card
         className="mb-3"
         style={{
           background:
@@ -7508,7 +7616,7 @@ deudaCobrada: deudaCobradaFinal,
             </div>
           )}
         </div>
-      </Card>}
+      </Card>
 
       {/* Esta sección aparece SIEMPRE, venda o no venda. */}
 {/* ENVASES EXTRA PLEGABLE */}

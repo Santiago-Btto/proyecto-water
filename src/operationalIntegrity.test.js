@@ -219,6 +219,44 @@ describe("applyDeliveryVisitMutation", () => {
     expect(mutate.mock.calls[0][0].subscriptions).toMatchObject([{ id: "julio", cantidadConsumida: 0 }, { id: "agosto", cantidadConsumida: 1 }]);
   });
 
+  it("keeps the newest subscription summary when correcting a delivery from an older period", () => {
+    const mutate = vi.fn();
+    const oldVisit = {
+      id: "visita-agosto",
+      clienteId: "cliente-1",
+      subscriptionAttribution: { subscriptionId: "agosto", cantidadX20: 2 },
+    };
+    const state = {
+      clientes: [{
+        id: "cliente-1",
+        deudaAcumulada: 0,
+        subscriptionSummary: { subscriptionId: "septiembre", periodo: "2026-09" },
+      }],
+      visitas: [oldVisit],
+      stock: [],
+      subscriptions: [
+        { id: "agosto", clienteId: "cliente-1", periodo: "2026-08", cantidadX20: 4, cantidadConsumida: 2 },
+        { id: "septiembre", clienteId: "cliente-1", periodo: "2026-09", cantidadX20: 6, cantidadConsumida: 1 },
+      ],
+      config: { stockActivo: false },
+    };
+
+    applyDeliveryVisitMutation({
+      state,
+      visit: { ...oldVisit, subscriptionAttribution: { subscriptionId: "agosto", cantidadX20: 1 } },
+      mutate,
+    });
+
+    const next = mutate.mock.calls[0][0];
+    expect(next.subscriptions[0]).toMatchObject({ cantidadConsumida: 1, cantidadRestante: 3 });
+    expect(next.clientes[0].subscriptionSummary).toMatchObject({
+      subscriptionId: "septiembre",
+      periodo: "2026-09",
+      cantidadConsumida: 1,
+      cantidadRestante: 5,
+    });
+  });
+
   it("deletes an attributed visit and restores only its consumed quota", () => {
     const mutate = vi.fn();
     const visit = { id: "visita-sub", clienteId: "cliente-1", subscriptionAttribution: { subscriptionId: "s", cantidadX20: 2 }, deudaGenerada: 500 };
