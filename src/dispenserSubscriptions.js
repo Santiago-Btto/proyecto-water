@@ -81,6 +81,27 @@ export function createSubscription({ client, promotion, subscriptions = [], now 
   };
 }
 
+export function changeSubscriptionPromotion({ subscription, promotion }) {
+  if (!subscription) throw new Error("No se encontró el abono a corregir.");
+  if (subscription.reciboPago) {
+    throw new Error("No se puede cambiar un abono que ya tiene un cobro registrado.");
+  }
+  if (Number(subscription.cantidadConsumida) > 0) {
+    throw new Error("No se puede cambiar un abono que ya tiene una entrega registrada.");
+  }
+  if (!promotion?.activo || !validatePromotion(promotion).ok) {
+    throw new Error("La promoción elegida no está disponible.");
+  }
+
+  return {
+    ...subscription,
+    ...createPromotionSnapshot(promotion),
+    cantidadConsumida: 0,
+    cantidadRestante: Number(promotion.cantidadX20),
+    estadoPago: "pendiente",
+  };
+}
+
 export function recordSubscriptionPayment(subscription, { metodo, now = new Date() }) {
   if (!metodo) throw new Error("Seleccioná un método de pago.");
   return {
@@ -149,49 +170,27 @@ export function subscriptionMetrics(subscriptions = []) {
   }, { total: 0, paidTotal: 0, pendingTotal: 0, overdueTotal: 0, overdueCount: 0, quotaTotal: 0, consumedTotal: 0, remainingTotal: 0 });
 }
 
-export function migrationPreview({ clients = [], subscriptions = [], period, promotion }) {
-  const eligible = clients.filter((client) => client.maquinaFrioCalor === true && !subscriptions.some((subscription) => subscription.clienteId === client.id && subscription.periodo === period));
-  return {
-    period,
-    promotion: {
-      id: promotion.id,
-      nombre: promotion.nombre,
-      cantidadX20: Number(promotion.cantidadX20),
-      precioMensual: Number(promotion.precioMensual),
+export function subscriptionPeriodMetrics({ payments = [], deliveries = [] } = {}) {
+  return payments.reduce(
+    (metrics, subscription) => {
+      const receipt = subscription.reciboPago || {};
+      const amount = Number(receipt.monto) || 0;
+      metrics.collectedTotal += amount;
+      metrics.paymentCount += 1;
+      if (receipt.metodo === "efectivo") metrics.cashTotal += amount;
+      if (receipt.metodo === "mercadopago") metrics.mercadoPagoTotal += amount;
+      return metrics;
     },
-    clients: eligible,
-  };
-}
-
-export function applySubscriptionMigration({ clients = [], subscriptions = [], selectedClientIds = [], period, promotion, confirmed = false, now = new Date() }) {
-  if (!confirmed) throw new Error("Confirmá la migración antes de aplicar el lote.");
-  const selected = new Set(selectedClientIds);
-  const preview = migrationPreview({ clients, subscriptions, period, promotion });
-  const additions = preview.clients.filter((client) => selected.has(client.id)).map((client) => ({
-    id: `${client.id}-${period}`,
-    clienteId: client.id,
-    periodo: period,
-    ...createPromotionSnapshot(promotion),
-    cantidadConsumida: 0,
-    cantidadRestante: Number(promotion.cantidadX20),
-    estadoPago: "pendiente",
-    fechaSeleccion: now.toISOString(),
-    migracion: { created: true, fecha: now.toISOString() },
-  }));
-  return { clients, subscriptions: [...subscriptions, ...additions] };
-}
-
-export function migrateSubscriptions({ clients = [], selectedClientIds = [], promotion, period, now = new Date(), subscriptions = [] }) {
-  const selected = new Set(selectedClientIds);
-  const created = clients.filter((client) => selected.has(client.id) && client.maquinaFrioCalor && !subscriptions.some((item) => item.clienteId === client.id && item.periodo === period)).map((client) => ({
-    ...createSubscription({ client, promotion, subscriptions: [], now: new Date(`${period}-05T12:00:00`) }),
-    migracion: { created: true, fecha: now.toISOString() },
-  }));
-  return { subscriptions: [...subscriptions, ...created] };
-}
-
-export function rollbackMigratedSubscription({ subscription }) {
-  if (!subscription?.migracion?.created) return { ok: false, error: "La suscripción no fue creada por migración." };
-  if (subscription.reciboPago || Number(subscription.cantidadConsumida) > 0) return { ok: false, error: "No se puede revertir una suscripción con cobro o entrega atribuida." };
-  return { ok: true };
+    {
+      collectedTotal: 0,
+      paymentCount: 0,
+      cashTotal: 0,
+      mercadoPagoTotal: 0,
+      deliveredB20: deliveries.reduce(
+        (total, visit) =>
+          total + (Number(visit.subscriptionAttribution?.cantidadX20) || 0),
+        0
+      ),
+    }
+  );
 }

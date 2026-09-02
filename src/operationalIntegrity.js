@@ -1,5 +1,7 @@
-export function isValidSale({ vendio, items = [], total }) {
+export function isValidSale({ vendio, items = [], total, subscriptionAttribution }) {
   if (!vendio) return true;
+
+  if (Number(subscriptionAttribution?.cantidadX20) > 0) return true;
 
   return (
     items.some((item) => Number(item.cantidad) > 0) &&

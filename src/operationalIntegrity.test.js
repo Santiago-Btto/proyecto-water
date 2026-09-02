@@ -40,6 +40,17 @@ describe("isValidSale", () => {
       })
     ).toBe(true);
   });
+
+  it("accepts a zero-price visit when it delivers bidons covered by a subscription", () => {
+    expect(
+      isValidSale({
+        vendio: true,
+        items: [{ tipo: "b20", cantidad: 0, precioUnitario: 5000 }],
+        total: 0,
+        subscriptionAttribution: { subscriptionId: "plan-1", cantidadX20: 2 },
+      })
+    ).toBe(true);
+  });
 });
 
 describe("deriveVisitEffects", () => {

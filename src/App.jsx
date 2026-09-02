@@ -12,7 +12,7 @@ import {
 } from "firebase/firestore";
 import { firestore, COLLECTION } from "./firebaseConfig";
 import { applyDeliveryVisitMutation, submitVisit, totalStreetDebt } from "./operationalIntegrity";
-import { applySubscriptionMigration, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, migrationPreview, recordSubscriptionPayment, splitX20Delivery, subscriptionMetrics, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
+import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, recordSubscriptionPayment, splitX20Delivery, subscriptionMetrics, subscriptionPeriodMetrics, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
 import { isDashboardDateInRange } from "./dashboardCalendarFilters";
 
 /* ============================================================
@@ -38,7 +38,7 @@ const C = {
 };
 
 // Cambiá este número con cada publicación para identificar la versión instalada.
-const APP_VERSION = "0.9";
+const APP_VERSION = "0.9.2";
 
 const DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
 const DIAS_JS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
@@ -1118,10 +1118,6 @@ function AdminSuscripciones({ db, mutate }) {
   const [cantidadX20, setCantidadX20] = useState("4");
   const [precioMensual, setPrecioMensual] = useState("");
   const [error, setError] = useState("");
-  const [migrationPeriod, setMigrationPeriod] = useState(hoyISO().slice(0, 7));
-  const [migrationPromotionId, setMigrationPromotionId] = useState("");
-  const [migrationSelectedIds, setMigrationSelectedIds] = useState([]);
-  const [migrationConfirmed, setMigrationConfirmed] = useState(false);
   const metrics = subscriptionMetrics(db.subscriptions || []);
 
   function savePromotion() {
@@ -1147,28 +1143,29 @@ function AdminSuscripciones({ db, mutate }) {
     mutate({ ...db, subscriptions, clientes });
   }
 
-  const migrationPromotion = (db.promotions || []).find((promotion) => promotion.id === migrationPromotionId && promotion.activo);
-  const migration = migrationPromotion
-    ? migrationPreview({ clients: db.clientes || [], subscriptions: db.subscriptions || [], period: migrationPeriod, promotion: migrationPromotion })
-    : null;
-
-  function toggleMigrationClient(clientId) {
-    setMigrationSelectedIds((ids) => ids.includes(clientId) ? ids.filter((id) => id !== clientId) : [...ids, clientId]);
-  }
-
-  function applyMigration() {
+  function changePlan(subscription, promotion) {
     try {
-      const result = applySubscriptionMigration({
-        clients: db.clientes,
-        subscriptions: db.subscriptions || [],
-        selectedClientIds: migrationSelectedIds,
-        period: migrationPeriod,
-        promotion: migrationPromotion,
-        confirmed: migrationConfirmed,
-      });
-      mutate({ ...db, subscriptions: result.subscriptions });
-      setMigrationSelectedIds([]);
-      setMigrationConfirmed(false);
+      const changed = changeSubscriptionPromotion({ subscription, promotion });
+      const subscriptions = (db.subscriptions || []).map((item) =>
+        item.id === subscription.id ? changed : item
+      );
+      const clientes = db.clientes.map((client) =>
+        client.subscriptionSummary?.subscriptionId === subscription.id
+          ? {
+              ...client,
+              subscriptionSummary: {
+                ...client.subscriptionSummary,
+                promocionId: changed.promocionId,
+                promocionNombre: changed.promocionNombre,
+                periodo: changed.periodo,
+                estadoPago: changed.estadoPago,
+                cantidadConsumida: 0,
+                cantidadRestante: changed.cantidadRestante,
+              },
+            }
+          : client
+      );
+      mutate({ ...db, clientes, subscriptions });
       setError("");
     } catch (cause) { setError(cause.message); }
   }
@@ -1181,11 +1178,7 @@ function AdminSuscripciones({ db, mutate }) {
       {(db.promotions || []).map((promotion) => <div key={promotion.id} className="flex justify-between text-xs mt-3"><span>{promotion.nombre}: {promotion.cantidadX20}×20L · {formatMoney(promotion.precioMensual)}</span><button onClick={() => mutate({ ...db, promotions: upsertPromotion(db.promotions, { ...promotion, activo: !promotion.activo }) })} style={{ color: C.primary }}>{promotion.activo ? "Desactivar" : "Activar"}</button></div>)}
     </Card>
     <Card><div className="font-bold text-sm mb-2">Resumen de suscripciones</div><div className="text-xs" style={{ color: C.muted }}>Pagado {formatMoney(metrics.paidTotal)} · Pendiente {formatMoney(metrics.pendingTotal)} · Vencido {formatMoney(metrics.overdueTotal)} · Cupo restante {metrics.remainingTotal}</div></Card>
-    <Card><div className="font-bold text-sm mb-1">Migración manual por lote</div><div className="text-xs mb-2" style={{ color: C.muted }}>Solo agrega suscripciones al período elegido. No modifica clientes, visitas, deuda ni stock.</div>
-      <div className="flex gap-2 mb-2"><Field label="Período"><Input type="month" value={migrationPeriod} onChange={(e) => setMigrationPeriod(e.target.value)} /></Field><Field label="Promoción"><select value={migrationPromotionId} onChange={(e) => { setMigrationPromotionId(e.target.value); setMigrationSelectedIds([]); }} className="rounded-xl px-2 py-2.5 text-sm" style={{ border: `1px solid ${C.border}` }}><option value="">Elegir</option>{(db.promotions || []).filter((promotion) => promotion.activo).map((promotion) => <option key={promotion.id} value={promotion.id}>{promotion.nombre}</option>)}</select></Field></div>
-      {migration && <><div className="text-xs font-semibold mb-1">Vista previa: {migration.clients.length} cliente(s) elegibles · {migration.promotion.nombre} · {migration.promotion.cantidadX20}×20L · {formatMoney(migration.promotion.precioMensual)}</div>{migration.clients.map((client) => <label key={client.id} className="flex gap-2 text-xs mb-1"><input type="checkbox" checked={migrationSelectedIds.includes(client.id)} onChange={() => toggleMigrationClient(client.id)} />{client.nombre}</label>)}{migration.clients.length === 0 && <div className="text-xs" style={{ color: C.muted }}>No hay clientes elegibles para este período.</div>}<label className="flex gap-2 text-xs font-semibold mt-2"><input type="checkbox" checked={migrationConfirmed} onChange={(e) => setMigrationConfirmed(e.target.checked)} />Confirmo crear solo {migrationSelectedIds.length} registro(s) de suscripción.</label><Btn size="sm" onClick={applyMigration} disabled={!migrationConfirmed || migrationSelectedIds.length === 0} className="mt-2" icon={Check}>Aplicar lote seleccionado</Btn></>}
-    </Card>
-    {(db.clientes || []).filter((client) => client.maquinaFrioCalor).map((client) => { const summary = client.subscriptionSummary; const current = (db.subscriptions || []).find((item) => item.id === summary?.subscriptionId); const view = clientSubscriptionSummaryView({ client, subscription: current }); const selectable = canSelectSubscription({ client, subscriptions: db.subscriptions || [] }); return <Card key={client.id}><div className="font-bold text-sm">{client.nombre}</div>{!current ? <><div className="text-xs my-1" style={{ color: C.muted }}>{view.label}</div>{selectable.ok && (db.promotions || []).filter((item) => item.activo).map((promotion) => <button key={promotion.id} onClick={() => selectSubscription(client, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>{promotion.nombre}</button>)}</> : <><div className="text-xs" style={{ color: C.muted }}>{view.period} · {view.label} · {view.consumed}/{current.cantidadX20} entregados · quedan {view.remaining}</div>{current.estadoPago !== "pagada" && <div className="mt-1"><button className="text-xs mr-2" onClick={() => pay(current, "efectivo")} style={{ color: C.primary }}>Cobrar efectivo</button><button className="text-xs" onClick={() => pay(current, "mercadopago")} style={{ color: C.primary }}>Cobrar Mercado Pago</button></div>}</>}</Card>; })}
+    {(db.clientes || []).filter((client) => client.maquinaFrioCalor).map((client) => { const summary = client.subscriptionSummary; const current = (db.subscriptions || []).find((item) => item.id === summary?.subscriptionId); const view = clientSubscriptionSummaryView({ client, subscription: current }); const selectable = canSelectSubscription({ client, subscriptions: db.subscriptions || [] }); const puedeCorregir = current && !current.reciboPago && Number(current.cantidadConsumida || 0) === 0; return <Card key={client.id}><div className="font-bold text-sm">{client.nombre}</div>{!current ? <><div className="text-xs my-1" style={{ color: C.muted }}>{view.label}</div>{selectable.ok && (db.promotions || []).filter((item) => item.activo).map((promotion) => <button key={promotion.id} onClick={() => selectSubscription(client, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>{promotion.nombre}</button>)}</> : <><div className="text-xs" style={{ color: C.muted }}>{view.period} · {view.label} · {view.consumed}/{current.cantidadX20} entregados · quedan {view.remaining}</div>{current.estadoPago !== "pagada" && <div className="mt-1"><button className="text-xs mr-2" onClick={() => pay(current, "efectivo")} style={{ color: C.primary }}>Cobrar efectivo</button><button className="text-xs" onClick={() => pay(current, "mercadopago")} style={{ color: C.primary }}>Cobrar Mercado Pago</button></div>}{puedeCorregir && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}><div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>¿Elegiste el plan equivocado?</div>{(db.promotions || []).filter((promotion) => promotion.activo && promotion.id !== current.promocionId).map((promotion) => <button key={promotion.id} onClick={() => changePlan(current, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>Cambiar a {promotion.nombre}</button>)}</div>}</>}</Card>; })}
   </div>;
 }
 
@@ -1426,6 +1419,7 @@ function AdminDashboard({ db }) {
   const [fechaSeleccionada, setFechaSeleccionada] = useState(hoy);
   const [mostrarCalendario, setMostrarCalendario] = useState(false);
   const [mostrarVisitas, setMostrarVisitas] = useState(false);
+  const [mostrarAbonos, setMostrarAbonos] = useState(false);
 
   function perteneceAlRango(fecha) {
     if (!fecha) return false;
@@ -1468,6 +1462,34 @@ function AdminDashboard({ db }) {
             (b.timestamp || 0) - (a.timestamp || 0)
         ),
     [db.gastos, rango, fechaSeleccionada, hoy]
+  );
+
+  const pagosAbonosFiltrados = useMemo(
+    () =>
+      (db.subscriptions || [])
+        .filter((subscription) => {
+          const fechaPago = subscription.reciboPago?.fecha?.slice(0, 10);
+          return perteneceAlRango(fechaPago);
+        })
+        .slice()
+        .sort((a, b) =>
+          (b.reciboPago?.fecha || "").localeCompare(a.reciboPago?.fecha || "")
+        ),
+    [db.subscriptions, rango, fechaSeleccionada, hoy]
+  );
+
+  const entregasAbonosFiltradas = useMemo(
+    () => visitasFiltradas.filter((visit) => visit.subscriptionAttribution),
+    [visitasFiltradas]
+  );
+
+  const resumenAbonos = useMemo(
+    () =>
+      subscriptionPeriodMetrics({
+        payments: pagosAbonosFiltrados,
+        deliveries: entregasAbonosFiltradas,
+      }),
+    [pagosAbonosFiltrados, entregasAbonosFiltradas]
   );
 
   const efectivo = visitasFiltradas.reduce(
@@ -1558,6 +1580,7 @@ const totalBultosVendidos = PRODUCTOS.reduce(
 
   useEffect(() => {
     setMostrarVisitas(false);
+    setMostrarAbonos(false);
   }, [rango, fechaSeleccionada]);
 
   function elegirRango(nuevoRango) {
@@ -1776,6 +1799,131 @@ const totalBultosVendidos = PRODUCTOS.reduce(
           </div>
         </div>
       </Card>
+
+      <Card
+        className="mb-4"
+        onClick={() => setMostrarAbonos((visible) => !visible)}
+        style={{
+          background: C.accentSoft,
+          border: "none",
+          cursor: "pointer",
+        }}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div
+              className="text-xs font-extrabold uppercase tracking-wide"
+              style={{ color: C.primary }}
+            >
+              Abonos
+            </div>
+            <div className="text-[10px] mt-1" style={{ color: C.muted }}>
+              Cobros y bidones entregados · {etiquetaRango}
+            </div>
+            <div className="text-[10px] mt-0.5" style={{ color: C.mutedLight }}>
+              No se suma a la rendición ni al balance general.
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="text-right">
+              <div className="text-[9px] font-bold uppercase" style={{ color: C.muted }}>
+                Cobrado
+              </div>
+              <div className="font-mono font-extrabold text-lg" style={{ color: C.primary }}>
+                {formatMoney(resumenAbonos.collectedTotal)}
+              </div>
+            </div>
+            <ChevronRight
+              size={18}
+              color={C.primary}
+              style={{
+                transform: mostrarAbonos ? "rotate(90deg)" : "rotate(0deg)",
+                transition: "transform 0.2s",
+              }}
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 mt-3">
+          <div className="rounded-xl p-2" style={{ background: C.surface }}>
+            <div className="text-[10px] font-bold uppercase" style={{ color: C.muted }}>
+              Pagos
+            </div>
+            <div className="font-mono font-bold text-sm">{resumenAbonos.paymentCount}</div>
+          </div>
+          <div className="rounded-xl p-2" style={{ background: C.surface }}>
+            <div className="text-[10px] font-bold uppercase" style={{ color: C.muted }}>
+              Bidones 20 L entregados
+            </div>
+            <div className="font-mono font-bold text-sm">{resumenAbonos.deliveredB20}</div>
+          </div>
+        </div>
+      </Card>
+
+      {mostrarAbonos && (
+        <div className="mb-4 space-y-2">
+          {pagosAbonosFiltrados.length === 0 && entregasAbonosFiltradas.length === 0 ? (
+            <Card>
+              <div className="text-xs text-center" style={{ color: C.mutedLight }}>
+                No hay cobros ni bidones de abono registrados para este período.
+              </div>
+            </Card>
+          ) : (
+            <>
+              {pagosAbonosFiltrados.length > 0 && (
+                <Card>
+                  <div className="text-xs font-extrabold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
+                    Cobros de abonos
+                  </div>
+                  <div className="space-y-2">
+                    {pagosAbonosFiltrados.map((subscription) => {
+                      const client = db.clientes.find((item) => item.id === subscription.clienteId);
+                      const receipt = subscription.reciboPago;
+                      return (
+                        <div key={subscription.id} className="flex items-center justify-between gap-3 text-xs">
+                          <div className="min-w-0">
+                            <div className="font-bold truncate">{client?.nombre || "Cliente eliminado"}</div>
+                            <div style={{ color: C.muted }}>
+                              {subscription.promocionNombre || `${subscription.cantidadX20} bidones`} · {receipt.metodo === "mercadopago" ? "Mercado Pago" : "Efectivo"}
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <div className="font-mono font-bold" style={{ color: C.primary }}>{formatMoney(receipt.monto)}</div>
+                            <div className="text-[10px]" style={{ color: C.mutedLight }}>{fechaLegible(receipt.fecha.slice(0, 10))}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              )}
+
+              {entregasAbonosFiltradas.length > 0 && (
+                <Card>
+                  <div className="text-xs font-extrabold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
+                    Bidones de abono entregados
+                  </div>
+                  <div className="space-y-2">
+                    {entregasAbonosFiltradas.map((visit) => {
+                      const client = db.clientes.find((item) => item.id === visit.clienteId);
+                      const quantity = Number(visit.subscriptionAttribution?.cantidadX20) || 0;
+                      return (
+                        <div key={visit.id} className="flex items-center justify-between gap-3 text-xs">
+                          <div className="min-w-0">
+                            <div className="font-bold truncate">{client?.nombre || visit.clienteNombre || "Cliente eliminado"}</div>
+                            <div style={{ color: C.muted }}>{fechaLegible(visit.fecha)}</div>
+                          </div>
+                          <Badge tone="accent">{quantity} × Bidón 20 L</Badge>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       {ajustesDeuda !== 0 && (
         <Card
@@ -5634,6 +5782,7 @@ function ClienteVisitaCard({
 }) {
   const permanentes = envasesPermanentesDe(cliente);
   const extras = envasesExtraDe(cliente);
+  const tieneAbonoActivo = !!cliente.subscriptionSummary?.subscriptionId;
 
   const tieneOrden =
     cliente.orden !== "" &&
@@ -5706,7 +5855,7 @@ function ClienteVisitaCard({
             <span>{cliente.direccion}</span>
           </a>
 
-          {cliente.deudaAcumulada > 0 && (
+          {!tieneAbonoActivo && cliente.deudaAcumulada > 0 && (
             <div
               className="rounded-xl px-3 py-2 mt-2"
               style={{
@@ -5764,6 +5913,10 @@ function ClienteVisitaCard({
 
             {cliente.maquinaFrioCalor && (
               <Badge tone="accent">Máquina F/C</Badge>
+            )}
+
+            {tieneAbonoActivo && (
+              <Badge tone="accent">Abono activo</Badge>
             )}
 
             {cliente.notas && <Badge tone="muted">Nota</Badge>}
@@ -5848,6 +6001,9 @@ function VisitaSheet({
 }) {
   const permanentes = envasesPermanentesDe(cliente);
   const saldoActual = envasesExtraDe(cliente);
+  const tieneAbonoActivo = subscriptions.some(
+    (subscription) => subscription.id === cliente.subscriptionSummary?.subscriptionId
+  );
   // Deuda que tenía el cliente ANTES de esta visita.
 const deudaBase = Number(cliente.deudaAcumulada) || 0;
 
@@ -5872,6 +6028,9 @@ const deudaBase = Number(cliente.deudaAcumulada) || 0;
 
       return {
         tipo: p.key,
+        // En una visita de abono guardamos solo el excedente como venta.
+        // El selector empieza en cero al editar: representa únicamente lo
+        // que se agrega ahora, no los bidones ya registrados en el plan.
         cantidad: anterior?.cantidad || 0,
         // Al editar conservamos el precio que tenía la visita original.
         precioUnitario:
@@ -6021,6 +6180,12 @@ const [montoDeuda, setMontoDeuda] = useState(
   // para no molestar durante el reparto y se consulta solo cuando hace falta.
   const [mostrarHistorialCompras, setMostrarHistorialCompras] =
     useState(false);
+  const [mostrarProductosAdicionales, setMostrarProductosAdicionales] =
+    useState(() =>
+      (visitaInicial?.items || []).some(
+        (item) => item.tipo !== "b20" && Number(item.cantidad) > 0
+      )
+    );
 
   // Al editar una visita, excluimos esa misma visita del historial porque
   // ya está abierta en el formulario actual. El resto queda ordenado de
@@ -6051,7 +6216,9 @@ const [montoDeuda, setMontoDeuda] = useState(
   const [mostrarExtras, setMostrarExtras] = useState(() => {
   // Si estamos editando una visita que ya tuvo
   // préstamos o retiros, abrir automáticamente.
-  if (!visitaInicial) return false;
+  // En abonos se mantiene cerrado: el repartidor lo abre solo si necesita
+  // registrar un movimiento de envases.
+  if (!visitaInicial || tieneAbonoActivo) return false;
 
   return PRODUCTOS_RETORNABLES.some((p) => {
     const prestados =
@@ -6077,23 +6244,60 @@ useEffect(() => {
       return prestados > 0 || retirados > 0;
     });
 
-  if (hayMovimientoExtra) {
+  if (hayMovimientoExtra && !tieneAbonoActivo) {
     setMostrarExtras(true);
   }
-}, [extrasPrestados, extrasRetirados]);
+}, [extrasPrestados, extrasRetirados, tieneAbonoActivo]);
 
   const total = totalPedido(items);
   const currentSubscription = subscriptions.find((subscription) => subscription.id === cliente.subscriptionSummary?.subscriptionId) || null;
+  const modoAbono = tieneAbonoActivo;
   const b20Quantity = Number(items.find((item) => item.tipo === "b20")?.cantidad) || 0;
-  const quotaPreview = splitX20Delivery({ quantity: b20Quantity, subscription: currentSubscription ? { ...currentSubscription, cantidadConsumida: Math.max(0, (Number(currentSubscription.cantidadConsumida) || 0) - (Number(visitaInicial?.subscriptionAttribution?.cantidadX20) || 0)) } : null, unitPrice: precios.b20 });
-  const quotaFeedback = deliveryQuotaFeedback({ quantity: b20Quantity, subscription: currentSubscription ? { ...currentSubscription, cantidadConsumida: Math.max(0, (Number(currentSubscription.cantidadConsumida) || 0) - (Number(visitaInicial?.subscriptionAttribution?.cantidadX20) || 0)) } : null, unitPrice: precios.b20, mutationError: errorStock });
+  const quotaPreview = splitX20Delivery({ quantity: b20Quantity, subscription: currentSubscription, unitPrice: precios.b20 });
+  const quotaFeedback = deliveryQuotaFeedback({ quantity: b20Quantity, subscription: currentSubscription, unitPrice: precios.b20, mutationError: errorStock });
+  // Sin un abono activo ambos ids serían `undefined`. No hay que tratar eso
+  // como una coincidencia: una visita normal no tiene atribución de abono.
+  const attributedPreviously =
+    currentSubscription &&
+    visitaInicial?.subscriptionAttribution?.subscriptionId === currentSubscription.id
+      ? Number(visitaInicial.subscriptionAttribution.cantidadX20) || 0
+      : 0;
+  const subscriptionAttributionFinal = currentSubscription && attributedPreviously + quotaPreview.covered > 0
+    ? {
+        subscriptionId: currentSubscription.id,
+        periodo: currentSubscription.periodo,
+        cantidadX20: attributedPreviously + quotaPreview.covered,
+      }
+    : quotaPreview.attribution;
+  const totalVentaNormal = Math.max(
+    0,
+    total - b20Quantity * (Number(precios.b20) || 0) + quotaPreview.ordinaryAmount
+  );
+  const tieneOtrosProductos = items.some(
+    (item) => item.tipo !== "b20" && Number(item.cantidad) > 0
+  );
+  const tieneVentaNormalEnAbono = quotaPreview.excess > 0 || tieneOtrosProductos;
+  const registraVenta = modoAbono
+    ? b20Quantity > 0 || tieneOtrosProductos
+    : vendio;
+  const metodoPagoFinal = modoAbono
+    ? ["mercadopago", "deuda"].includes(metodoPago)
+      ? metodoPago
+      : "efectivo"
+    : metodoPago;
 
   const pagadoFinal =
-    montoPagado === null
+    modoAbono
+      ? metodoPagoFinal === "deuda"
+        ? 0
+        : montoPagado === null
+          ? totalVentaNormal
+          : Math.max(0, Number(montoPagado) || 0)
+      : montoPagado === null
       ? total
       : Math.max(0, Number(montoPagado) || 0);
 
-  const restante = Math.max(0, total - pagadoFinal);
+  const restante = Math.max(0, (modoAbono ? totalVentaNormal : total) - pagadoFinal);
 
   // ==========================================================
   // DEUDA / FIADO DE ESTA VISITA
@@ -6108,16 +6312,24 @@ useEffect(() => {
   // Esta MISMA cuenta se usa luego al guardar, para evitar que
   // la pantalla muestre una cosa y Firebase guarde otra.
   // ==========================================================
-  const saldoBaseEditado = Math.max(
+  const saldoBaseEditado = modoAbono
+    ? deudaBase
+    : Math.max(
     0,
     Number(saldoPendienteManual) || 0
   );
 
-  const deudaCobradaPrevista = cobrarDeuda
+  const deudaCobradaPrevista = !modoAbono && cobrarDeuda
     ? Math.max(0, Number(montoDeuda) || 0)
     : 0;
 
-  const deudaGeneradaPrevista = vendio
+  const deudaGeneradaPrevista = modoAbono
+    ? tieneVentaNormalEnAbono
+      ? metodoPagoFinal === "deuda"
+        ? totalVentaNormal
+        : restante
+      : 0
+    : vendio
     ? metodoPago === "deuda"
       ? total
       : restante
@@ -6288,9 +6500,9 @@ const ajusteDeudaManual =
       repartidorId: cliente.repartidorId,
       fecha: hoyISO(),
       diaSemana: diaSemanaHoy(),
-      vendio,
-      items: vendio ? items.map((item) => item.tipo === "b20" ? { ...item, cantidad: quotaPreview.excess } : item) : [],
-      subscriptionAttribution: quotaPreview.attribution,
+      vendio: registraVenta,
+      items: registraVenta ? items.map((item) => item.tipo === "b20" ? { ...item, cantidad: quotaPreview.excess } : item) : [],
+      subscriptionAttribution: subscriptionAttributionFinal,
       extrasPrestados: {
         b20: Number(extrasPrestados.b20) || 0,
         b12: Number(extrasPrestados.b12) || 0,
@@ -6306,11 +6518,11 @@ const ajusteDeudaManual =
         b12: Number(permanentesRetiradosSeparados.b12) || 0,
         sifon: Number(permanentesRetiradosSeparados.sifon) || 0,
       },
-      total: vendio ? total - b20Quantity * (Number(precios.b20) || 0) + quotaPreview.ordinaryAmount : 0,
-      metodoPago: vendio ? metodoPago : null,
+      total: registraVenta ? totalVentaNormal : 0,
+      metodoPago: registraVenta && totalVentaNormal > 0 ? metodoPagoFinal : null,
       pagos:
-        vendio && metodoPago !== "deuda"
-          ? { [metodoPago]: pagadoFinal }
+        registraVenta && totalVentaNormal > 0 && metodoPagoFinal !== "deuda"
+          ? { [metodoPagoFinal]: pagadoFinal }
           : {},
       // Deuda NUEVA generada por esta venta.
       // Ej.: 7 sifones × $1.200 fiados = $8.400.
@@ -6319,7 +6531,7 @@ const ajusteDeudaManual =
 
 deudaCobrada: deudaCobradaFinal,
 
-      metodoDeuda: cobrarDeuda
+      metodoDeuda: !modoAbono && cobrarDeuda
         ? metodoDeuda
         : null,
       notas,
@@ -6342,7 +6554,12 @@ deudaCobrada: deudaCobradaFinal,
     }
 
     const result = await submitVisit({
-      sale: { vendio, items: visita.items, total: visita.total },
+      sale: {
+        vendio: registraVenta,
+        items: visita.items,
+        total: visita.total,
+        subscriptionAttribution: visita.subscriptionAttribution,
+      },
       save: () => onGuardar(visita),
       setPending: setGuardando,
     });
@@ -6384,7 +6601,7 @@ deudaCobrada: deudaCobradaFinal,
       {currentSubscription && (
         <Card className="mb-3" style={{ background: C.accentSoft, border: "none" }}>
           <div className="text-xs font-bold" style={{ color: C.primary }}>Plan {currentSubscription.periodo}: {currentSubscription.cantidadConsumida || 0}/{currentSubscription.cantidadX20} entregados</div>
-          <div className="text-xs mt-1">Esta visita cubre {quotaFeedback.covered} · Quedan {quotaFeedback.remaining} · Excedente a venta normal: {quotaFeedback.excess}</div>
+          <div className="text-xs mt-1">Esta visita agrega: {quotaFeedback.covered} · Quedan {quotaFeedback.remaining} · Excedente a venta normal: {quotaFeedback.excess}</div>
         </Card>
       )}
       <div className="flex flex-wrap gap-2 mb-3">
@@ -6443,7 +6660,7 @@ deudaCobrada: deudaCobradaFinal,
         </Card>
       )}
 
-      {stockActivo && (
+      {!modoAbono && stockActivo && (
         <Card
           style={{
             background: C.accentSoft,
@@ -6474,7 +6691,7 @@ deudaCobrada: deudaCobradaFinal,
           HISTORIAL RÁPIDO DEL CLIENTE DURANTE EL REPARTO
           Cerrado por defecto. No permite editar visitas viejas.
           ===================================================== */}
-      <div className="mb-3">
+      {!modoAbono && <div className="mb-3">
         <button
           type="button"
           onClick={() =>
@@ -6692,9 +6909,9 @@ deudaCobrada: deudaCobradaFinal,
             )}
           </div>
         )}
-      </div>
+      </div>}
 
-      <div className="mb-3">
+      {!modoAbono && <div className="mb-3">
   <button
     type="button"
     onClick={() =>
@@ -6818,9 +7035,9 @@ deudaCobrada: deudaCobradaFinal,
       )}
     </Card>
   )}
-</div>
+</div>}
 
-      {Number(saldoPendienteManual) > 0 && (
+      {!modoAbono && Number(saldoPendienteManual) > 0 && (
         <Card
           style={{
             background: C.dangerBg,
@@ -6892,7 +7109,7 @@ deudaCobrada: deudaCobradaFinal,
         </Card>
       )}
 
-      <div className="flex gap-2 mb-4">
+      {!modoAbono && <div className="flex gap-2 mb-4">
         <button
           onClick={() => setVendio(true)}
           className="flex-1 py-3 rounded-xl font-bold text-sm"
@@ -6922,13 +7139,25 @@ deudaCobrada: deudaCobradaFinal,
         >
           No vendió
         </button>
-      </div>
+      </div>}
 
-      {vendio ? (
+      {(modoAbono || vendio) ? (
         <>
-          {/* La venta muestra solamente lo vendido. */}
+          {modoAbono && !mostrarProductosAdicionales && (
+            <button
+              type="button"
+              onClick={() => setMostrarProductosAdicionales(true)}
+              className="text-xs font-bold mb-3"
+              style={{ color: C.primary }}
+            >
+              + Agregar jugo, sifón u otro producto
+            </button>
+          )}
           <div className="flex flex-col gap-2 mb-3">
-            {PRODUCTOS.map((p, idx) => {
+            {PRODUCTOS.filter(
+              (p) => !modoAbono || p.key === "b20" || mostrarProductosAdicionales
+            ).map((p) => {
+              const idx = PRODUCTOS.findIndex((item) => item.key === p.key);
               const cant = items[idx].cantidad;
 
               return (
@@ -6936,10 +7165,12 @@ deudaCobrada: deudaCobradaFinal,
                   <div className="flex items-center justify-between">
                     <div>
                       <div className="text-sm font-semibold">
-                        {p.label}
+                        {modoAbono && p.key === "b20"
+                          ? "Bidón 20 L · entrega de abono"
+                          : p.label}
                       </div>
 
-                      <div
+                      {(!modoAbono || p.key !== "b20") && <div
                         className="text-xs font-mono"
                         style={{
                           color: C.mutedLight,
@@ -6949,7 +7180,7 @@ deudaCobrada: deudaCobradaFinal,
                           precios[p.key] || 0
                         )}{" "}
                         c/u
-                      </div>
+                      </div>}
                     </div>
 
                     <Stepper
@@ -6964,7 +7195,7 @@ deudaCobrada: deudaCobradaFinal,
             })}
           </div>
 
-          <div
+          {(!modoAbono || tieneVentaNormalEnAbono) && <div
             className="flex items-center justify-between mb-3 pt-2"
             style={{
               borderTop: `1px dashed ${C.border}`,
@@ -6974,11 +7205,11 @@ deudaCobrada: deudaCobradaFinal,
               Total
             </span>
             <span className="font-mono font-extrabold text-lg">
-              {formatMoney(total)}
+              {formatMoney(modoAbono ? totalVentaNormal : total)}
             </span>
-          </div>
+          </div>}
 
-          <Field label="Forma de pago">
+          {(!modoAbono || tieneVentaNormalEnAbono) && <Field label={modoAbono ? "Cobrar excedente y productos extra" : "Forma de pago"}>
             <div className="flex gap-2">
               {[
                 [
@@ -7005,11 +7236,11 @@ deudaCobrada: deudaCobradaFinal,
                   className="flex-1 flex flex-col items-center gap-1 py-2 rounded-xl"
                   style={{
                     background:
-                      metodoPago === k
+                      (modoAbono ? metodoPagoFinal : metodoPago) === k
                         ? C.primary
                         : C.bg,
                     color:
-                      metodoPago === k
+                      (modoAbono ? metodoPagoFinal : metodoPago) === k
                         ? "#fff"
                         : C.muted,
                   }}
@@ -7021,9 +7252,9 @@ deudaCobrada: deudaCobradaFinal,
                 </button>
               ))}
             </div>
-          </Field>
+          </Field>}
 
-          {metodoPago !== "deuda" && (
+          {(!modoAbono || tieneVentaNormalEnAbono) && metodoPagoFinal !== "deuda" && (
             <Field
               label="Monto pagado ahora"
               hint={
@@ -7039,7 +7270,9 @@ deudaCobrada: deudaCobradaFinal,
                 inputMode="decimal"
                 value={
                   montoPagado === null
-                    ? total
+                    ? modoAbono
+                      ? totalVentaNormal
+                      : total
                     : montoPagado
                 }
                 onChange={(e) =>
@@ -7051,7 +7284,7 @@ deudaCobrada: deudaCobradaFinal,
             </Field>
           )}
 
-          <Field label="Notas de la visita">
+          {!modoAbono && <Field label="Notas de la visita">
             <Textarea
               rows={2}
               value={notas}
@@ -7059,8 +7292,8 @@ deudaCobrada: deudaCobradaFinal,
                 setNotas(e.target.value)
               }
             />
-          </Field>
-          <Field label="Próxima visita especial">
+          </Field>}
+          {!modoAbono && <Field label="Próxima visita especial">
             <button
               type="button"
               onClick={() => setVolverSabado(!volverSabado)}
@@ -7092,7 +7325,7 @@ deudaCobrada: deudaCobradaFinal,
                 {volverSabado && <Check size={13} color="#fff" />}
               </div>
             </button>
-          </Field>
+          </Field>}
         </>
       ) : (
         <>
@@ -7159,7 +7392,7 @@ deudaCobrada: deudaCobradaFinal,
           SALDO FINAL DE LA CUENTA
           Se actualiza en tiempo real antes de guardar.
           ===================================================== */}
-      <Card
+      {!modoAbono && <Card
         className="mb-3"
         style={{
           background:
@@ -7275,7 +7508,7 @@ deudaCobrada: deudaCobradaFinal,
             </div>
           )}
         </div>
-      </Card>
+      </Card>}
 
       {/* Esta sección aparece SIEMPRE, venda o no venda. */}
 {/* ENVASES EXTRA PLEGABLE */}

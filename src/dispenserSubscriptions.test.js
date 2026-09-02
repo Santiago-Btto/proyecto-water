@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  changeSubscriptionPromotion,
   canSelectSubscription,
   clientSubscriptionSummaryView,
   createSubscription,
@@ -10,11 +11,8 @@ import {
   recordSubscriptionPayment,
   splitX20Delivery,
   subscriptionMetrics,
-  migrateSubscriptions,
-  migrationPreview,
-  applySubscriptionMigration,
+  subscriptionPeriodMetrics,
   upsertPromotion,
-  rollbackMigratedSubscription,
   validatePromotion,
 } from "./dispenserSubscriptions";
 
@@ -82,9 +80,41 @@ describe("payment, delivery, and reporting stay isolated from ordinary debt", ()
   it("reports subscription aggregates separately", () => {
     expect(subscriptionMetrics([pending, { ...pending, id: "s-2", estadoPago: "pagada", reciboPago: { monto: 4000 } }, { ...pending, id: "s-3", estadoPago: "vencida" }])).toEqual({ total: 3, paidTotal: 4000, pendingTotal: 4000, overdueTotal: 4000, overdueCount: 1, quotaTotal: 12, consumedTotal: 3, remainingTotal: 9 });
   });
+
+  it("keeps subscription collections and included deliveries separate for a selected period", () => {
+    expect(subscriptionPeriodMetrics({
+      payments: [
+        { reciboPago: { monto: 4000, metodo: "efectivo" } },
+        { reciboPago: { monto: 6000, metodo: "mercadopago" } },
+      ],
+      deliveries: [
+        { subscriptionAttribution: { cantidadX20: 2 } },
+        { subscriptionAttribution: { cantidadX20: 3 } },
+        { subscriptionAttribution: null },
+      ],
+    })).toEqual({ collectedTotal: 10000, paymentCount: 2, cashTotal: 4000, mercadoPagoTotal: 6000, deliveredB20: 5 });
+  });
 });
 
-describe("durable records and explicit migration", () => {
+describe("subscription corrections", () => {
+  const plan4 = { id: "p4", nombre: "Plan 4", cantidadX20: 4, precioMensual: 4000, activo: true };
+  const plan6 = { id: "p6", nombre: "Plan 6", cantidadX20: 6, precioMensual: 6000, activo: true };
+  const subscription = { id: "s1", clienteId: "c1", ...createPromotionSnapshot(plan4), cantidadConsumida: 0, cantidadRestante: 4, estadoPago: "pendiente" };
+
+  it("replaces a mistaken plan before there is payment or delivery", () => {
+    expect(changeSubscriptionPromotion({ subscription, promotion: plan6 })).toMatchObject({
+      id: "s1", promocionId: "p6", promocionNombre: "Plan 6", cantidadX20: 6,
+      precioMensual: 6000, cantidadConsumida: 0, cantidadRestante: 6, estadoPago: "pendiente",
+    });
+  });
+
+  it("refuses corrections once payment or delivery gives the record accounting history", () => {
+    expect(() => changeSubscriptionPromotion({ subscription: { ...subscription, cantidadConsumida: 1 }, promotion: plan6 })).toThrow(/entrega/i);
+    expect(() => changeSubscriptionPromotion({ subscription: { ...subscription, reciboPago: { monto: 4000 } }, promotion: plan6 })).toThrow(/cobro/i);
+  });
+});
+
+describe("durable subscription records", () => {
   const promotion = { id: "promo-4", nombre: "Cuatro", cantidadX20: 4, precioMensual: 4000, activo: true };
   const client = { id: "cliente-1", maquinaFrioCalor: true };
 
@@ -92,45 +122,6 @@ describe("durable records and explicit migration", () => {
     const subscription = createSubscription({ client, promotion, now: new Date("2026-08-05T12:00:00") });
     expect(subscription).toMatchObject({ id: "cliente-1-2026-08", periodo: "2026-08", cantidadX20: 4, cantidadConsumida: 0, estadoPago: "pendiente" });
     expect(() => createSubscription({ client, promotion, now: new Date("2026-08-05T12:00:00"), subscriptions: [subscription] })).toThrow(/ya tiene/i);
-  });
-
-  it("previews and creates only selected legacy clients, and refuses unsafe rollback", () => {
-    const result = migrateSubscriptions({ clients: [client, { id: "otro", maquinaFrioCalor: false }], selectedClientIds: ["cliente-1"], promotion, period: "2026-08", now: new Date("2026-08-05T12:00:00") });
-    expect(result.subscriptions).toHaveLength(1);
-    expect(result.subscriptions[0].migracion).toMatchObject({ created: true });
-    expect(rollbackMigratedSubscription({ subscription: result.subscriptions[0] }).ok).toBe(true);
-    expect(rollbackMigratedSubscription({ subscription: { ...result.subscriptions[0], reciboPago: { monto: 4000 } } }).ok).toBe(false);
-  });
-});
-
-describe("explicit migration safety", () => {
-  const promotion = { id: "promo-4", nombre: "Cuatro", cantidadX20: 4, precioMensual: 4000, activo: true };
-  const protectedClient = {
-    id: "eligible", maquinaFrioCalor: true, deudaAcumulada: 1234,
-    envasesPermanentes: { b20: 2 }, envasesExtra: { b20: 1 }, envasesPrestados: { b20: 3 },
-    historial: [{ id: "h1" }], notas: "No cambiar",
-  };
-
-  it("previews only eligible clients that lack the selected period record", () => {
-    const preview = migrationPreview({ clients: [protectedClient, { id: "no-machine", maquinaFrioCalor: false }, { id: "already", maquinaFrioCalor: true }], subscriptions: [{ id: "already-2026-08", clienteId: "already", periodo: "2026-08" }], period: "2026-08", promotion });
-    expect(preview).toEqual({ period: "2026-08", promotion: { id: "promo-4", nombre: "Cuatro", cantidadX20: 4, precioMensual: 4000 }, clients: [protectedClient] });
-  });
-
-  it("adds only selected subscription records and preserves every protected client field byte-for-byte", () => {
-    const clients = [protectedClient];
-    const before = JSON.stringify(clients);
-    const result = applySubscriptionMigration({ clients, subscriptions: [], selectedClientIds: ["eligible"], period: "2026-08", promotion, confirmed: true, now: new Date("2026-08-05T12:00:00") });
-    expect(result.clients).toBe(clients);
-    expect(JSON.stringify(result.clients)).toBe(before);
-    expect(result.subscriptions).toHaveLength(1);
-    expect(result.subscriptions[0]).toMatchObject({ clienteId: "eligible", periodo: "2026-08", migracion: { created: true } });
-  });
-
-  it("is idempotent when the explicit apply action is retried", () => {
-    const once = applySubscriptionMigration({ clients: [protectedClient], subscriptions: [], selectedClientIds: ["eligible"], period: "2026-08", promotion, confirmed: true, now: new Date("2026-08-05T12:00:00") });
-    const twice = applySubscriptionMigration({ clients: once.clients, subscriptions: once.subscriptions, selectedClientIds: ["eligible"], period: "2026-08", promotion, confirmed: true, now: new Date("2026-08-05T12:00:00") });
-    expect(twice.subscriptions).toEqual(once.subscriptions);
-    expect(twice.clients).toBe(once.clients);
   });
 });
 
