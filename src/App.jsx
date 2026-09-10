@@ -38,7 +38,7 @@ const C = {
 };
 
 // Cambiá este número con cada publicación para identificar la versión instalada.
-const APP_VERSION = "0.9.4";
+const APP_VERSION = "0.9.5";
 
 const DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
 const DIAS_JS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
@@ -1194,7 +1194,7 @@ function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo, offline 
     { key: "historial", label: "Recorridos", icon: ClipboardList },
     { key: "stock", label: "Stock", icon: Boxes },
     { key: "gastos", label: "Gastos", icon: Receipt },
-    { key: "suscripciones", label: "Planes", icon: CreditCard },
+    { key: "suscripciones", label: "Abono", icon: CreditCard },
     { key: "ajustes", label: "Ajustes", icon: Settings2 },
   ];
 
@@ -6899,6 +6899,8 @@ deudaCobrada: deudaCobradaFinal,
                               }`;
                             })
                             .join(", ");
+                          const bidonesDeAbono =
+                            Number(v.subscriptionAttribution?.cantidadX20) || 0;
 
                           const metodo = {
                             efectivo: "Efectivo",
@@ -6924,9 +6926,25 @@ deudaCobrada: deudaCobradaFinal,
                                     {v.fecha ? fechaLegible(v.fecha) : "Sin fecha"}
                                   </div>
 
-                                  {v.vendio && productos && (
-                                    <div className="text-xs font-semibold mt-0.5">
-                                      {productos}
+                                  {(productos || bidonesDeAbono > 0) && (
+                                    <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                                      {v.vendio && productos && (
+                                        <span className="text-xs font-semibold">
+                                          {productos}
+                                        </span>
+                                      )}
+
+                                      {bidonesDeAbono > 0 && (
+                                        <>
+                                          {productos && (
+                                            <span className="text-xs" style={{ color: C.mutedLight }}>·</span>
+                                          )}
+                                          <span className="text-xs font-semibold">
+                                            {bidonesDeAbono}× 20L
+                                          </span>
+                                          <Badge tone="accent">Abono</Badge>
+                                        </>
+                                      )}
                                     </div>
                                   )}
                                 </div>
