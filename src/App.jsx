@@ -38,7 +38,7 @@ const C = {
 };
 
 // Cambiá este número con cada publicación para identificar la versión instalada.
-const APP_VERSION = "0.9.5";
+const APP_VERSION = "0.9.6";
 
 const DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
 const DIAS_JS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
@@ -3882,6 +3882,7 @@ function AdminGastos({ db, mutate }) {
   const [concepto, setConcepto] = useState("");
   const [monto, setMonto] = useState("");
   const [confirmDel, setConfirmDel] = useState(null);
+  const [rango, setRango] = useState("hoy");
 
   function guardar() {
     if (!concepto.trim() || !monto) return;
@@ -3906,14 +3907,38 @@ function AdminGastos({ db, mutate }) {
     setConfirmDel(null);
   }
 
-  const total = db.gastos.reduce((s, g) => s + (Number(g.monto) || 0), 0);
+  const fechaActual = hoyISO();
+  const gastosFiltrados = useMemo(
+    () =>
+      db.gastos.filter((gasto) => {
+        if (rango === "todo") return true;
+        if (!gasto.fecha) return false;
+        if (rango === "hoy") return gasto.fecha === fechaActual;
+        return isDashboardDateInRange({
+          date: gasto.fecha,
+          range: rango,
+          currentDate: fechaActual,
+        });
+      }),
+    [db.gastos, rango, fechaActual]
+  );
+  const etiquetaRango = {
+    hoy: "Hoy",
+    semana: "Esta semana",
+    mes: "Este mes",
+    todo: "Todo el historial",
+  }[rango];
+  const total = gastosFiltrados.reduce(
+    (s, gasto) => s + (Number(gasto.monto) || 0),
+    0
+  );
 
   // Agrupamos por FECHA, no solamente por mes.
   // Así se ve rápido cuánto se gastó cada día y qué gastos formaron ese total.
   const gruposFecha = useMemo(() => {
     const grupos = {};
 
-    db.gastos.forEach((g) => {
+    gastosFiltrados.forEach((g) => {
       if (!g.fecha) return;
       if (!grupos[g.fecha]) grupos[g.fecha] = [];
       grupos[g.fecha].push(g);
@@ -3928,7 +3953,7 @@ function AdminGastos({ db, mutate }) {
           .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)),
         subtotal: items.reduce((s, g) => s + (Number(g.monto) || 0), 0),
       }));
-  }, [db.gastos]);
+  }, [gastosFiltrados]);
 
   return (
     <div>
@@ -3942,7 +3967,7 @@ function AdminGastos({ db, mutate }) {
               className="text-xs font-bold uppercase tracking-wide"
               style={{ color: C.accentSoft, opacity: 0.8 }}
             >
-              Total gastado
+              Gastos · {etiquetaRango}
             </div>
             <div
               className="font-mono font-extrabold text-2xl mt-0.5"
@@ -3951,7 +3976,7 @@ function AdminGastos({ db, mutate }) {
               {formatMoney(total)}
             </div>
             <div className="text-[10px] mt-1" style={{ color: C.accentSoft, opacity: 0.7 }}>
-              {db.gastos.length} gasto{db.gastos.length !== 1 ? "s" : ""} registrado{db.gastos.length !== 1 ? "s" : ""}
+              {gastosFiltrados.length} gasto{gastosFiltrados.length !== 1 ? "s" : ""} registrado{gastosFiltrados.length !== 1 ? "s" : ""}
             </div>
           </div>
 
@@ -3961,11 +3986,34 @@ function AdminGastos({ db, mutate }) {
         </div>
       </Card>
 
+      <div className="flex gap-2 mb-4">
+        {[
+          ["hoy", "Hoy"],
+          ["semana", "Semana"],
+          ["mes", "Mes"],
+          ["todo", "Todo"],
+        ].map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setRango(key)}
+            className="flex-1 rounded-xl py-2 text-xs font-bold"
+            style={{
+              background: rango === key ? C.primary : C.surface,
+              color: rango === key ? "#fff" : C.muted,
+              border: `1px solid ${rango === key ? C.primary : C.border}`,
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {gruposFecha.length === 0 ? (
         <EmptyState
           icon={Receipt}
-          title="Sin gastos cargados"
-          text="Registrá combustible, mantenimiento u otros gastos del negocio."
+          title="Sin gastos para este período"
+          text="Probá otro período o registrá combustible, mantenimiento y otros gastos del negocio."
         />
       ) : (
         <div className="flex flex-col gap-4">
