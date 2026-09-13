@@ -92,6 +92,7 @@ const CATEGORIAS_GASTO = [
   { key: "compras", label: "Compras", tone: "accent" },
   { key: "sueldos", label: "Sueldos", tone: "success" },
   { key: "servicios", label: "Servicios", tone: "muted" },
+  { key: "seguros", label: "Seguros", tone: "accent" },
   { key: "otros", label: "Otros", tone: "muted" },
 ];
 const DEFAULT_CONFIG = {
