@@ -14,6 +14,11 @@ import { firestore, COLLECTION } from "./firebaseConfig";
 import { applyDeliveryVisitMutation, submitVisit, totalStreetDebt } from "./operationalIntegrity";
 import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, recordSubscriptionPayment, splitX20Delivery, subscriptionMetrics, subscriptionPeriodMetrics, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
 import { isDashboardDateInRange } from "./dashboardCalendarFilters";
+import {
+  CLIENTES_POR_BLOQUE,
+  clientesVisiblesEnRecorrido,
+  siguienteLimiteVisible,
+} from "./routeListPagination";
 
 /* ============================================================
    TOKENS DE DISEÑO
@@ -38,7 +43,7 @@ const C = {
 };
 
 // Cambiá este número con cada publicación para identificar la versión instalada.
-const APP_VERSION = "0.9.6";
+const APP_VERSION = "0.9.7";
 
 const DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
 const DIAS_JS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
@@ -81,6 +86,14 @@ const PRODUCTOS = [
   },
 ];
 const PRODUCTOS_RETORNABLES = PRODUCTOS.filter((p) => p.retornable);
+const CATEGORIAS_GASTO = [
+  { key: "combustible", label: "Combustible", tone: "warning" },
+  { key: "mantenimiento", label: "Mantenimiento", tone: "danger" },
+  { key: "compras", label: "Compras", tone: "accent" },
+  { key: "sueldos", label: "Sueldos", tone: "success" },
+  { key: "servicios", label: "Servicios", tone: "muted" },
+  { key: "otros", label: "Otros", tone: "muted" },
+];
 const DEFAULT_CONFIG = {
   adminPin: "",
   repartidores: [],
@@ -109,6 +122,10 @@ const DEFAULT_CONFIG = {
 function uid() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
   return "id-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+function categoriaDeGasto(categoria) {
+  return CATEGORIAS_GASTO.find((item) => item.key === categoria) ||
+    CATEGORIAS_GASTO.find((item) => item.key === "otros");
 }
 function hoyISO() {
   const d = new Date();
@@ -3507,6 +3524,12 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
 function AdminHistorial({ db, mutate }) {
   const [filtroRep, setFiltroRep] = useState("todos");
   const [confirmDel, setConfirmDel] = useState(null);
+  const [limiteRecorridoHoy, setLimiteRecorridoHoy] = useState(
+    CLIENTES_POR_BLOQUE
+  );
+  const [limiteHistorial, setLimiteHistorial] = useState(
+    CLIENTES_POR_BLOQUE
+  );
 
   const hoy = diaSemanaHoy();
   const fechaHoy = hoyISO();
@@ -3552,6 +3575,21 @@ function AdminHistorial({ db, mutate }) {
 
   const movimientosExtrasHoy = resumenExtrasVisitas(visitasHoyResumen);
 
+  const clientesHoyVisibles = clientesVisiblesEnRecorrido(
+    clientesHoy,
+    limiteRecorridoHoy
+  );
+  const visitasVisibles = clientesVisiblesEnRecorrido(
+    visitas,
+    limiteHistorial
+  );
+
+  function cambiarFiltroRepartidor(nuevoFiltro) {
+    setFiltroRep(nuevoFiltro);
+    setLimiteRecorridoHoy(CLIENTES_POR_BLOQUE);
+    setLimiteHistorial(CLIENTES_POR_BLOQUE);
+  }
+
   function borrarVisita(v) {
     const next = clone(db);
     const deltaExtras = calcularDeltaExtras(v);
@@ -3594,9 +3632,9 @@ function AdminHistorial({ db, mutate }) {
   return (
     <div>
       <div className="flex gap-2 mb-3 overflow-x-auto">
-        <button onClick={() => setFiltroRep("todos")} className="px-3 py-1.5 rounded-lg text-xs font-bold flex-shrink-0" style={{ background: filtroRep === "todos" ? C.primary : C.surface, color: filtroRep === "todos" ? "#fff" : C.muted, border: `1px solid ${filtroRep === "todos" ? C.primary : C.border}` }}>Todos</button>
+        <button onClick={() => cambiarFiltroRepartidor("todos")} className="px-3 py-1.5 rounded-lg text-xs font-bold flex-shrink-0" style={{ background: filtroRep === "todos" ? C.primary : C.surface, color: filtroRep === "todos" ? "#fff" : C.muted, border: `1px solid ${filtroRep === "todos" ? C.primary : C.border}` }}>Todos</button>
         {db.config.repartidores.map((r) => (
-          <button key={r.id} onClick={() => setFiltroRep(r.id)} className="px-3 py-1.5 rounded-lg text-xs font-bold flex-shrink-0" style={{ background: filtroRep === r.id ? C.primary : C.surface, color: filtroRep === r.id ? "#fff" : C.muted, border: `1px solid ${filtroRep === r.id ? C.primary : C.border}` }}>{r.nombre}</button>
+          <button key={r.id} onClick={() => cambiarFiltroRepartidor(r.id)} className="px-3 py-1.5 rounded-lg text-xs font-bold flex-shrink-0" style={{ background: filtroRep === r.id ? C.primary : C.surface, color: filtroRep === r.id ? "#fff" : C.muted, border: `1px solid ${filtroRep === r.id ? C.primary : C.border}` }}>{r.nombre}</button>
         ))}
       </div>
 
@@ -3657,36 +3695,48 @@ function AdminHistorial({ db, mutate }) {
           <div className="text-xs text-center" style={{ color: C.mutedLight }}>No hay clientes programados para hoy.</div>
         </Card>
       ) : (
-        <div className="flex flex-col gap-2 mb-5">
-          {clientesHoy.map((c) => {
-            const rep = db.config.repartidores.find((r) => r.id === c.repartidorId);
-            const visitado = idsVisitadosHoy.has(c.id);
-            return (
-              <Card key={c.id}>
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="font-bold text-sm">{c.nombre}</div>
-                    <div className="text-xs" style={{ color: C.muted }}>{c.direccion}</div>
-                    <div className="flex gap-1 mt-1.5 flex-wrap">
-                      {rep && <Badge tone="muted">{rep.nombre}</Badge>}
-                      {c.orden && <Badge tone="accent">Orden {c.orden}</Badge>}
-                      {c.citaSabado && <Badge tone="warning">Volver sábado</Badge>}
+        <>
+          <div className="flex flex-col gap-2 mb-4">
+            {clientesHoyVisibles.map((c) => {
+              const rep = db.config.repartidores.find((r) => r.id === c.repartidorId);
+              const visitado = idsVisitadosHoy.has(c.id);
+              return (
+                <Card key={c.id}>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="font-bold text-sm">{c.nombre}</div>
+                      <div className="text-xs" style={{ color: C.muted }}>{c.direccion}</div>
+                      <div className="flex gap-1 mt-1.5 flex-wrap">
+                        {rep && <Badge tone="muted">{rep.nombre}</Badge>}
+                        {c.orden && <Badge tone="accent">Orden {c.orden}</Badge>}
+                        {c.citaSabado && <Badge tone="warning">Volver sábado</Badge>}
+                      </div>
                     </div>
+                    <Badge tone={visitado ? "success" : "warning"}>{visitado ? "Visitado" : "Pendiente"}</Badge>
                   </div>
-                  <Badge tone={visitado ? "success" : "warning"}>{visitado ? "Visitado" : "Pendiente"}</Badge>
-                </div>
-              </Card>
-            );
-          })}
-        </div>
+                </Card>
+              );
+            })}
+          </div>
+          <MostrarMasClientes
+            mostrados={clientesHoyVisibles.length}
+            total={clientesHoy.length}
+            onClick={() =>
+              setLimiteRecorridoHoy((limiteActual) =>
+                siguienteLimiteVisible(limiteActual, clientesHoy.length)
+              )
+            }
+          />
+        </>
       )}
 
       <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Historial</div>
       {visitas.length === 0 ? (
         <EmptyState icon={ClipboardList} title="Sin visitas registradas" text="Cuando los repartidores registren visitas, van a aparecer acá." />
       ) : (
-        <div className="flex flex-col gap-2">
-          {visitas.map((v) => {
+        <>
+          <div className="flex flex-col gap-2 mb-4">
+          {visitasVisibles.map((v) => {
             const cliente = db.clientes.find((c) => c.id === v.clienteId);
             const rep = db.config.repartidores.find((r) => r.id === v.repartidorId);
             return (
@@ -3735,7 +3785,17 @@ function AdminHistorial({ db, mutate }) {
               </Card>
             );
           })}
-        </div>
+          </div>
+          <MostrarMasClientes
+            mostrados={visitasVisibles.length}
+            total={visitas.length}
+            onClick={() =>
+              setLimiteHistorial((limiteActual) =>
+                siguienteLimiteVisible(limiteActual, visitas.length)
+              )
+            }
+          />
+        </>
       )}
 
       {confirmDel && (
@@ -3881,6 +3941,7 @@ function AdminGastos({ db, mutate }) {
   const [sheet, setSheet] = useState(false);
   const [concepto, setConcepto] = useState("");
   const [monto, setMonto] = useState("");
+  const [categoria, setCategoria] = useState("otros");
   const [confirmDel, setConfirmDel] = useState(null);
   const [rango, setRango] = useState("hoy");
 
@@ -3891,12 +3952,14 @@ function AdminGastos({ db, mutate }) {
       id: uid(),
       concepto: concepto.trim(),
       monto: Number(monto),
+      categoria,
       fecha: hoyISO(),
       timestamp: Date.now(),
     });
     mutate(next);
     setConcepto("");
     setMonto("");
+    setCategoria("otros");
     setSheet(false);
   }
 
@@ -3931,6 +3994,22 @@ function AdminGastos({ db, mutate }) {
   const total = gastosFiltrados.reduce(
     (s, gasto) => s + (Number(gasto.monto) || 0),
     0
+  );
+  const resumenPorCategoria = useMemo(
+    () =>
+      CATEGORIAS_GASTO.map((categoriaActual) => ({
+        ...categoriaActual,
+        total: gastosFiltrados
+          .filter(
+            (gasto) =>
+              categoriaDeGasto(gasto.categoria).key === categoriaActual.key
+          )
+          .reduce(
+            (suma, gasto) => suma + (Number(gasto.monto) || 0),
+            0
+          ),
+      })).filter((categoriaActual) => categoriaActual.total > 0),
+    [gastosFiltrados]
   );
 
   // Agrupamos por FECHA, no solamente por mes.
@@ -4009,6 +4088,32 @@ function AdminGastos({ db, mutate }) {
         ))}
       </div>
 
+      {resumenPorCategoria.length > 0 && (
+        <Card className="mb-4">
+          <div
+            className="text-xs font-extrabold uppercase tracking-wide mb-2"
+            style={{ color: C.muted }}
+          >
+            Por categoría · {etiquetaRango}
+          </div>
+          <div className="flex flex-col gap-2">
+            {resumenPorCategoria.map((categoriaActual) => (
+              <div
+                key={categoriaActual.key}
+                className="flex items-center justify-between gap-3 text-xs"
+              >
+                <Badge tone={categoriaActual.tone}>
+                  {categoriaActual.label}
+                </Badge>
+                <div className="font-mono font-bold" style={{ color: C.danger }}>
+                  -{formatMoney(categoriaActual.total)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
       {gruposFecha.length === 0 ? (
         <EmptyState
           icon={Receipt}
@@ -4072,7 +4177,12 @@ function AdminGastos({ db, mutate }) {
                       }}
                     >
                       <div className="min-w-0 flex-1">
-                        <div className="font-bold text-sm truncate">{g.concepto}</div>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <div className="font-bold text-sm truncate">{g.concepto}</div>
+                          <Badge tone={categoriaDeGasto(g.categoria).tone}>
+                            {categoriaDeGasto(g.categoria).label}
+                          </Badge>
+                        </div>
                         <div className="text-[10px] mt-0.5" style={{ color: C.mutedLight }}>
                           Gasto registrado el {fechaLegible(g.fecha)}
                         </div>
@@ -4113,6 +4223,23 @@ function AdminGastos({ db, mutate }) {
               placeholder="Ej: Nafta, agua, repuesto..."
               autoFocus
             />
+          </Field>
+          <Field label="Categoría">
+            <select
+              value={categoria}
+              onChange={(e) => setCategoria(e.target.value)}
+              className="w-full rounded-xl px-3 py-2.5 text-sm outline-none"
+              style={{
+                background: C.surface,
+                border: `1px solid ${C.border}`,
+              }}
+            >
+              {CATEGORIAS_GASTO.map((categoriaActual) => (
+                <option key={categoriaActual.key} value={categoriaActual.key}>
+                  {categoriaActual.label}
+                </option>
+              ))}
+            </select>
           </Field>
           <Field label="Monto">
             <Input
@@ -4908,19 +5035,32 @@ function RepartidorRecorrido({
   const [visitaEditando, setVisitaEditando] = useState(null);
   const [mostrarVisitados, setMostrarVisitados] = useState(false);
   const [busca, setBusca] = useState("");
+  const [limitesVisibles, setLimitesVisibles] = useState({
+    pendientes: CLIENTES_POR_BLOQUE,
+    pendientesAnteriores: CLIENTES_POR_BLOQUE,
+    citasSabado: CLIENTES_POR_BLOQUE,
+    volverMasTarde: CLIENTES_POR_BLOQUE,
+    diasAnteriores: CLIENTES_POR_BLOQUE,
+    visitados: CLIENTES_POR_BLOQUE,
+  });
   // Clientes cuyo día normal ya pasó durante esta semana.
 // Empieza cerrado.
 const [mostrarDiasAnteriores, setMostrarDiasAnteriores] =
   useState(false);
 
   // Si hubiese más de una visita del mismo cliente hoy, tomamos la más reciente.
-  const visitaPorCliente = new Map();
-  visitasHoy
-    .slice()
-    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
-    .forEach((v) => {
-      visitaPorCliente.set(v.clienteId, v);
-    });
+  const visitaPorCliente = useMemo(() => {
+    const visitas = new Map();
+
+    (visitasHoy || [])
+      .slice()
+      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+      .forEach((v) => {
+        visitas.set(v.clienteId, v);
+      });
+
+    return visitas;
+  }, [visitasHoy]);
 
   const textoBusqueda = busca.trim().toLowerCase();
 
@@ -4935,8 +5075,10 @@ const [mostrarDiasAnteriores, setMostrarDiasAnteriores] =
   // permitimos registrar una visita extraordinaria sin cambiar
   // sus días habituales.
   // ==========================================================
-  const resultadosBusqueda = textoBusqueda
-    ? todosLosClientes
+  const resultadosBusqueda = useMemo(() => {
+    if (!textoBusqueda) return [];
+
+    return todosLosClientes
         .filter((c) => {
           const nombre = (c.nombre || "").toLowerCase();
           const direccion = (c.direccion || "").toLowerCase();
@@ -4949,8 +5091,8 @@ const [mostrarDiasAnteriores, setMostrarDiasAnteriores] =
         .slice()
         .sort((a, b) =>
           (a.nombre || "").localeCompare(b.nombre || "")
-        )
-    : [];
+        );
+  }, [textoBusqueda, todosLosClientes]);
 
   // Las listas normales del recorrido ya no dependen del buscador.
   // Cuando hay texto de búsqueda se ocultan visualmente y mostramos
@@ -5181,6 +5323,52 @@ const gruposDiasAnteriores =
     ...visitadosFinalizados,
     ...visitadosExtraHoy,
   ];
+
+  const pendientesVisibles = clientesVisiblesEnRecorrido(
+    pendientes,
+    limitesVisibles.pendientes
+  );
+  const pendientesAnterioresVisibles = clientesVisiblesEnRecorrido(
+    pendientesAnteriores,
+    limitesVisibles.pendientesAnteriores
+  );
+  const citasSabadoVisibles = clientesVisiblesEnRecorrido(
+    citasSabado,
+    limitesVisibles.citasSabado
+  );
+  const volverMasTardeVisibles = clientesVisiblesEnRecorrido(
+    volverMasTarde,
+    limitesVisibles.volverMasTarde
+  );
+  const clientesDiasAnterioresVisibles = clientesVisiblesEnRecorrido(
+    clientesDiasAnteriores,
+    limitesVisibles.diasAnteriores
+  );
+  const idsDiasAnterioresVisibles = new Set(
+    clientesDiasAnterioresVisibles.map((c) => c.id)
+  );
+  const gruposDiasAnterioresVisibles = gruposDiasAnteriores
+    .map(({ dia, clientes: clientesGrupo }) => ({
+      dia,
+      clientes: clientesGrupo.filter((c) =>
+        idsDiasAnterioresVisibles.has(c.id)
+      ),
+    }))
+    .filter((grupo) => grupo.clientes.length > 0);
+  const visitadosVisibles = clientesVisiblesEnRecorrido(
+    visitadosParaMostrar,
+    limitesVisibles.visitados
+  );
+
+  function mostrarMasClientes(seccion, totalClientes) {
+    setLimitesVisibles((limitesActuales) => ({
+      ...limitesActuales,
+      [seccion]: siguienteLimiteVisible(
+        limitesActuales[seccion],
+        totalClientes
+      ),
+    }));
+  }
 
   function abrirNuevaVisita(cliente) {
     setActivo(cliente);
@@ -5539,7 +5727,7 @@ const gruposDiasAnteriores =
             Pendientes ({pendientes.length})
           </div>
           <div className="flex flex-col gap-2 mb-4">
-            {pendientes.map((c) => (
+            {pendientesVisibles.map((c) => (
               <ClienteVisitaCard
                 key={c.id}
                 cliente={c}
@@ -5547,6 +5735,13 @@ const gruposDiasAnteriores =
               />
             ))}
           </div>
+          <MostrarMasClientes
+            mostrados={pendientesVisibles.length}
+            total={pendientes.length}
+            onClick={() =>
+              mostrarMasClientes("pendientes", pendientes.length)
+            }
+          />
         </>
       )}
 
@@ -5560,7 +5755,7 @@ const gruposDiasAnteriores =
             Pendientes de días anteriores ({pendientesAnteriores.length})
           </div>
           <div className="flex flex-col gap-2 mb-4">
-            {pendientesAnteriores.map((c) => (
+            {pendientesAnterioresVisibles.map((c) => (
               <ClienteVisitaCard
                 key={c.id}
                 cliente={c}
@@ -5570,6 +5765,16 @@ const gruposDiasAnteriores =
               />
             ))}
           </div>
+          <MostrarMasClientes
+            mostrados={pendientesAnterioresVisibles.length}
+            total={pendientesAnteriores.length}
+            onClick={() =>
+              mostrarMasClientes(
+                "pendientesAnteriores",
+                pendientesAnteriores.length
+              )
+            }
+          />
         </>
       )}
 
@@ -5583,7 +5788,7 @@ const gruposDiasAnteriores =
             Volver el sábado ({citasSabado.length})
           </div>
           <div className="flex flex-col gap-2 mb-4">
-            {citasSabado.map((c) => (
+            {citasSabadoVisibles.map((c) => (
               <ClienteVisitaCard
                 key={c.id}
                 cliente={c}
@@ -5592,6 +5797,13 @@ const gruposDiasAnteriores =
               />
             ))}
           </div>
+          <MostrarMasClientes
+            mostrados={citasSabadoVisibles.length}
+            total={citasSabado.length}
+            onClick={() =>
+              mostrarMasClientes("citasSabado", citasSabado.length)
+            }
+          />
         </>
       )}
 
@@ -5605,7 +5817,7 @@ const gruposDiasAnteriores =
             Volver más tarde hoy ({volverMasTarde.length})
           </div>
           <div className="flex flex-col gap-2 mb-4">
-            {volverMasTarde.map((c) => {
+            {volverMasTardeVisibles.map((c) => {
               const visita = visitaPorCliente.get(c.id);
               return (
                 <ClienteVisitaCard
@@ -5619,6 +5831,13 @@ const gruposDiasAnteriores =
               );
             })}
           </div>
+          <MostrarMasClientes
+            mostrados={volverMasTardeVisibles.length}
+            total={volverMasTarde.length}
+            onClick={() =>
+              mostrarMasClientes("volverMasTarde", volverMasTarde.length)
+            }
+          />
         </>
       )}
 
@@ -5701,7 +5920,7 @@ const gruposDiasAnteriores =
           </Card>
         ) : (
           <div className="flex flex-col gap-4">
-            {gruposDiasAnteriores.map(
+            {gruposDiasAnterioresVisibles.map(
               ({ dia, clientes: clientesGrupo }) => (
                 <div key={dia}>
                   <div
@@ -5794,6 +6013,16 @@ const gruposDiasAnteriores =
             )}
           </div>
         )}
+        <MostrarMasClientes
+          mostrados={clientesDiasAnterioresVisibles.length}
+          total={clientesDiasAnteriores.length}
+          onClick={() =>
+            mostrarMasClientes(
+              "diasAnteriores",
+              clientesDiasAnteriores.length
+            )
+          }
+        />
       </div>
     )}
   </div>
@@ -5832,23 +6061,35 @@ const gruposDiasAnteriores =
           </button>
 
           {(mostrarVisitados || busca.trim()) && (
-            <div className="flex flex-col gap-2 mt-2">
-              {visitadosParaMostrar.map((c) => {
-                const visita = visitaPorCliente.get(c.id);
-                const fueVenta = visita?.vendio === true;
+            <>
+              <div className="flex flex-col gap-2 mt-2">
+                {visitadosVisibles.map((c) => {
+                  const visita = visitaPorCliente.get(c.id);
+                  const fueVenta = visita?.vendio === true;
 
-                return (
-                  <ClienteVisitaCard
-                    key={c.id}
-                    cliente={c}
-                    hecho={fueVenta}
-                    noVendido={!fueVenta}
-                    visita={visita}
-                    onClick={() => abrirVisitaExistente(c)}
-                  />
-                );
-              })}
-            </div>
+                  return (
+                    <ClienteVisitaCard
+                      key={c.id}
+                      cliente={c}
+                      hecho={fueVenta}
+                      noVendido={!fueVenta}
+                      visita={visita}
+                      onClick={() => abrirVisitaExistente(c)}
+                    />
+                  );
+                })}
+              </div>
+              <MostrarMasClientes
+                mostrados={visitadosVisibles.length}
+                total={visitadosParaMostrar.length}
+                onClick={() =>
+                  mostrarMasClientes(
+                    "visitados",
+                    visitadosParaMostrar.length
+                  )
+                }
+              />
+            </>
           )}
         </div>
       )}
@@ -5889,6 +6130,34 @@ const gruposDiasAnteriores =
         />
       )}
     </div>
+  );
+}
+
+function MostrarMasClientes({ mostrados, total, onClick }) {
+  const restantes = Math.max(0, total - mostrados);
+
+  if (restantes === 0) return null;
+
+  const cantidadAMostrar = Math.min(CLIENTES_POR_BLOQUE, restantes);
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="w-full mb-4 rounded-xl px-3 py-2.5 text-xs font-bold flex items-center justify-center gap-2"
+      style={{
+        color: C.primary,
+        background: C.accentSoft,
+        border: `1px solid ${C.border}`,
+      }}
+    >
+      <Plus size={15} />
+      Mostrar {cantidadAMostrar} cliente
+      {cantidadAMostrar !== 1 ? "s" : ""} más
+      <span style={{ color: C.muted }}>
+        ({restantes} restante{restantes !== 1 ? "s" : ""})
+      </span>
+    </button>
   );
 }
 
