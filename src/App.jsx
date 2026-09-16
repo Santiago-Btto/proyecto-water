@@ -7117,7 +7117,7 @@ deudaCobrada: deudaCobradaFinal,
           HISTORIAL RÁPIDO DEL CLIENTE DURANTE EL REPARTO
           Cerrado por defecto. No permite editar visitas viejas.
           ===================================================== */}
-      {!modoAbono && <div className="mb-3">
+      <div className="mb-3">
         <button
           type="button"
           onClick={() =>
@@ -7139,7 +7139,9 @@ deudaCobrada: deudaCobradaFinal,
 
             <div className="text-left min-w-0">
               <div className="text-xs font-extrabold" style={{ color: C.ink }}>
-                Historial de compras
+                {modoAbono
+                  ? "Historial de entregas y compras"
+                  : "Historial de compras"}
               </div>
               <div className="text-[10px] truncate" style={{ color: C.muted }}>
                 {visitasHistorialCliente.length === 0
@@ -7353,7 +7355,7 @@ deudaCobrada: deudaCobradaFinal,
             )}
           </div>
         )}
-      </div>}
+      </div>
 
       {!modoAbono && <div className="mb-3">
   <button
