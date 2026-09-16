@@ -19,6 +19,11 @@ import {
   clientesVisiblesEnRecorrido,
   siguienteLimiteVisible,
 } from "./routeListPagination";
+import {
+  ordenarClientesPorDia,
+  ordenClienteEnDia,
+  ubicarClienteEnDia,
+} from "./dayRouteOrdering";
 
 /* ============================================================
    TOKENS DE DISEÑO
@@ -2487,7 +2492,14 @@ const totalBultosVendidos = PRODUCTOS.reduce(
 }
 
 /* ---------- Clientes (admin) ---------- */
-function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
+function ClienteForm({
+  initial,
+  repartidores,
+  clientes = [],
+  onSave,
+  onCancel,
+  isAdmin,
+}) {
   const [f, setF] = useState(() => {
     if (initial) {
       return {
@@ -2505,6 +2517,7 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
     };
   });
   const [error, setError] = useState("");
+  const [ubicacionesPorDia, setUbicacionesPorDia] = useState({});
   const [mostrarSaldoPendiente, setMostrarSaldoPendiente] =
   useState(() => Number(initial?.deudaAcumulada || 0) > 0);
     const [extrasEditadosManualmente, setExtrasEditadosManualmente] =
@@ -2515,28 +2528,90 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
     if (!f.direccion.trim()) return setError("Ingresá la dirección.");
     if (f.diasVisita.length === 0) return setError("Elegí al menos un día de visita.");
     if (isAdmin && !f.repartidorId) return setError("Asigná un repartidor.");
-    onSave(
-  isAdmin
-    ? {
-        ...f,
-        _extrasEditadosManualmente:
-          extrasEditadosManualmente,
-      }
-    : f
-);
-}
+    onSave({
+      ...f,
+      _ubicacionesPorDia: f.diasVisita.map((dia) => ({
+        dia,
+        ubicacion:
+          ubicacionesPorDia[dia] || (initial ? "mantener" : "final"),
+      })),
+      ...(isAdmin && {
+        _extrasEditadosManualmente: extrasEditadosManualmente,
+      }),
+    });
+  }
+
+  function clientesParaUbicarEnDia(dia) {
+    return ordenarClientesPorDia(
+      clientes.filter(
+        (cliente) =>
+          cliente.repartidorId === f.repartidorId &&
+          cliente.id !== initial?.id &&
+          (cliente.diasVisita || []).includes(dia)
+      ),
+      dia
+    );
+  }
 
   return (
     <div>
       <Field label="Nombre *"><Input value={f.nombre} onChange={(e) => setF({ ...f, nombre: e.target.value })} placeholder="Ej: Familia Gómez" /></Field>
       <Field label="Dirección *"><Input value={f.direccion} onChange={(e) => setF({ ...f, direccion: e.target.value })} placeholder="Calle 123" /></Field>
       <Field label="Teléfono"><Input value={f.telefono} onChange={(e) => setF({ ...f, telefono: e.target.value })} placeholder="Ej: 261 555 5555" inputMode="tel" /></Field>
-      <Field label="Día(s) de visita *"><DayPills value={f.diasVisita} onChange={(v) => setF({ ...f, diasVisita: v })} /></Field>
+      <Field label="Día(s) de visita *">
+        <DayPills
+          value={f.diasVisita}
+          onChange={(v) => setF({ ...f, diasVisita: v })}
+        />
+      </Field>
+      {f.diasVisita.map((dia) => {
+        const clientesDelDia = clientesParaUbicarEnDia(dia);
+        const ubicacion =
+          ubicacionesPorDia[dia] || (initial ? "mantener" : "final");
+
+        return (
+          <Field
+            key={dia}
+            label={`Ubicación del ${dia}`}
+            hint={`Solo aparecen clientes que se visitan los ${dia.toLowerCase()}.`}
+          >
+            <select
+              value={ubicacion}
+              onChange={(e) =>
+                setUbicacionesPorDia((actuales) => ({
+                  ...actuales,
+                  [dia]: e.target.value,
+                }))
+              }
+              className="w-full rounded-xl px-3 py-2.5 text-sm outline-none"
+              style={{
+                background: C.surface,
+                border: `1px solid ${C.border}`,
+                color: C.ink,
+              }}
+            >
+              {initial && (
+                <option value="mantener">Mantener ubicación actual</option>
+              )}
+              <option value="final">Al final del recorrido</option>
+              {clientesDelDia.map((cliente, indice) => (
+                <option key={cliente.id} value={`despues:${cliente.id}`}>
+                  Después de {indice + 1} · {cliente.nombre}
+                </option>
+              ))}
+            </select>
+          </Field>
+        );
+      })}
       {isAdmin && (
         <Field label="Repartidor asignado *">
           <select
             value={f.repartidorId}
-            onChange={(e) => setF({ ...f, repartidorId: e.target.value })}
+            onChange={(e) => {
+              const repartidorId = e.target.value;
+              setF({ ...f, repartidorId });
+
+            }}
             className="w-full rounded-xl px-3 py-2.5 text-sm outline-none"
             style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}
           >
@@ -2744,9 +2819,6 @@ function ClienteForm({ initial, repartidores, onSave, onCancel, isAdmin }) {
           <div className="text-xs mt-1" style={{ color: C.muted }}>{textoEnvasesPrestados(f.envasesExtra)}</div>
         </Card>
       )}
-      <Field label="Orden en el recorrido (opcional)" hint="Número más bajo = se visita antes.">
-        <Input type="number" inputMode="numeric" value={f.orden} onChange={(e) => setF({ ...f, orden: e.target.value })} placeholder="Ej: 1" />
-      </Field>
       <Field label="Dato extra / notas"><Textarea rows={2} value={f.notas} onChange={(e) => setF({ ...f, notas: e.target.value })} placeholder="Ej: dejar en portón, perro suelto, etc." /></Field>
       {error && <div className="text-xs font-semibold mb-2" style={{ color: C.danger }}>{error}</div>}
       <div className="flex gap-2 mt-2">
@@ -2782,28 +2854,21 @@ function AdminClientes({ db, mutate }) {
         (c.nombre || "").toLowerCase().includes(busca.toLowerCase()) ||
         (c.direccion || "").toLowerCase().includes(busca.toLowerCase())
     )
-    .sort((a, b) => {
-      if (ordenLista === "nombre") {
-        return a.nombre.localeCompare(b.nombre);
-      }
+    .sort((a, b) => a.nombre.localeCompare(b.nombre));
 
-      const ordenA =
-        a.orden === "" || a.orden === null || a.orden === undefined
-          ? Infinity
-          : Number(a.orden);
-      const ordenB =
-        b.orden === "" || b.orden === null || b.orden === undefined
-          ? Infinity
-          : Number(b.orden);
+  const clientesPorDia = DIAS.map((dia) => {
+    const clientesDelDia = lista.filter((c) =>
+      (c.diasVisita || []).includes(dia)
+    );
 
-      if (ordenA !== ordenB) return ordenA - ordenB;
-      return a.nombre.localeCompare(b.nombre);
-    });
-
-  const clientesPorDia = DIAS.map((dia) => ({
-    dia,
-    clientes: lista.filter((c) => (c.diasVisita || []).includes(dia)),
-  }));
+    return {
+      dia,
+      clientes:
+        ordenLista === "recorrido"
+          ? ordenarClientesPorDia(clientesDelDia, dia)
+          : clientesDelDia,
+    };
+  });
 
   const clientesSinDia = lista.filter(
     (c) => !c.diasVisita || c.diasVisita.length === 0
@@ -2818,11 +2883,13 @@ function guardarCliente(f) {
 
   const extrasEditadosManualmente =
     !!f._extrasEditadosManualmente;
+  const ubicacionesPorDia = f._ubicacionesPorDia || [];
 
   // Sacamos este dato auxiliar para que
   // NO se guarde dentro de Firebase.
   const {
     _extrasEditadosManualmente,
+    _ubicacionesPorDia,
     ...datosCliente
   } = f;
 
@@ -2949,6 +3016,25 @@ function guardarCliente(f) {
     next.clientes.push(nuevo);
   }
 
+  ubicacionesPorDia
+    .filter(
+      ({ dia, ubicacion }) => dia && ubicacion && ubicacion !== "mantener"
+    )
+    .forEach(({ dia, ubicacion }) => {
+      const clienteReordenado = next.clientes.find((c) => c.id === f.id) ||
+        next.clientes[next.clientes.length - 1];
+      const despuesDeId = ubicacion.startsWith("despues:")
+        ? ubicacion.slice("despues:".length)
+        : null;
+
+      next.clientes = ubicarClienteEnDia({
+        clientes: next.clientes,
+        cliente: clienteReordenado,
+        dia,
+        despuesDeId,
+      });
+    });
+
   mutate(next);
   setSheet(null);
 }
@@ -2980,6 +3066,7 @@ function guardarCliente(f) {
             <ClienteForm
               initial={sheet === "nuevo" ? null : sheet}
               repartidores={db.config.repartidores}
+              clientes={db.clientes}
               isAdmin
               onSave={guardarCliente}
               onCancel={() => setSheet(null)}
@@ -3122,6 +3209,7 @@ function guardarCliente(f) {
                       const rep = db.config.repartidores.find(
                         (r) => r.id === c.repartidorId
                       );
+                      const ordenDelDia = ordenClienteEnDia(c, dia);
 
                       return (
                         <Card key={`${dia}-${c.id}`}>
@@ -3135,9 +3223,7 @@ function guardarCliente(f) {
                                   {c.nombre}
                                 </div>
 
-                                {c.orden !== "" &&
-                                  c.orden !== null &&
-                                  c.orden !== undefined && (
+                                {Number.isFinite(ordenDelDia) && (
                                     <span
                                       className="px-2 py-0.5 rounded-md text-[10px] font-bold flex-shrink-0"
                                       style={{
@@ -3145,7 +3231,7 @@ function guardarCliente(f) {
                                         color: "#fff",
                                       }}
                                     >
-                                      Orden {c.orden}
+                                      Orden {ordenDelDia}
                                     </span>
                                   )}
                               </div>
@@ -3287,6 +3373,7 @@ function guardarCliente(f) {
           <ClienteForm
             initial={sheet === "nuevo" ? null : sheet}
             repartidores={db.config.repartidores}
+            clientes={db.clientes}
             isAdmin
             onSave={guardarCliente}
             onCancel={() => setSheet(null)}
@@ -3554,7 +3641,11 @@ function AdminHistorial({ db, mutate }) {
       ...c,
       citaSabado: idsVolverSabadoHoy.has(c.id),
     }))
-    .sort((a, b) => (Number(a.orden) || 999) - (Number(b.orden) || 999) || a.nombre.localeCompare(b.nombre));
+    .sort(
+      (a, b) =>
+        ordenClienteEnDia(a, hoy) - ordenClienteEnDia(b, hoy) ||
+        a.nombre.localeCompare(b.nombre)
+    );
 
   const idsVisitadosHoy = new Set(
     db.visitas.filter((v) => v.fecha === fechaHoy).map((v) => v.clienteId)
@@ -3709,7 +3800,11 @@ function AdminHistorial({ db, mutate }) {
                       <div className="text-xs" style={{ color: C.muted }}>{c.direccion}</div>
                       <div className="flex gap-1 mt-1.5 flex-wrap">
                         {rep && <Badge tone="muted">{rep.nombre}</Badge>}
-                        {c.orden && <Badge tone="accent">Orden {c.orden}</Badge>}
+                        {Number.isFinite(ordenClienteEnDia(c, hoy)) && (
+                          <Badge tone="accent">
+                            Orden {ordenClienteEnDia(c, hoy)}
+                          </Badge>
+                        )}
                         {c.citaSabado && <Badge tone="warning">Volver sábado</Badge>}
                       </div>
                     </div>
@@ -4425,19 +4520,11 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
 
   const deHoy = misClientes
     .filter((c) => c.diasVisita.includes(hoy))
-    .sort((a, b) => {
-      const ordenA =
-        a.orden === "" || a.orden === null || a.orden === undefined
-          ? Infinity
-          : Number(a.orden);
-      const ordenB =
-        b.orden === "" || b.orden === null || b.orden === undefined
-          ? Infinity
-          : Number(b.orden);
-
-      if (ordenA !== ordenB) return ordenA - ordenB;
-      return a.nombre.localeCompare(b.nombre);
-    });
+    .sort(
+      (a, b) =>
+        ordenClienteEnDia(a, hoy) - ordenClienteEnDia(b, hoy) ||
+        a.nombre.localeCompare(b.nombre)
+    );
 
   const visitasHoy = db.visitas.filter(
     (v) => v.repartidorId === repartidor.id && v.fecha === fechaHoy
@@ -4524,19 +4611,11 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
         !idsYaIncluidos.has(c.id)
     )
     .map((c) => ({ ...c, citaSabado: true }))
-    .sort((a, b) => {
-      const ordenA =
-        a.orden === "" || a.orden === null || a.orden === undefined
-          ? Infinity
-          : Number(a.orden);
-      const ordenB =
-        b.orden === "" || b.orden === null || b.orden === undefined
-          ? Infinity
-          : Number(b.orden);
-
-      if (ordenA !== ordenB) return ordenA - ordenB;
-      return (a.nombre || "").localeCompare(b.nombre || "");
-    });
+    .sort(
+      (a, b) =>
+        ordenClienteEnDia(a, hoy) - ordenClienteEnDia(b, hoy) ||
+        (a.nombre || "").localeCompare(b.nombre || "")
+    );
 
   const clientesRecorrido = [
     ...clientesHoyConPendientes,
@@ -4794,6 +4873,8 @@ function RepartidorClientes({ db, mutate, repartidor }) {
 
   function guardar(f) {
     const next = clone(db);
+    const ubicacionesPorDia = f._ubicacionesPorDia || [];
+    const { _ubicacionesPorDia, ...datosCliente } = f;
 
     if (f.id) {
       const i = next.clientes.findIndex((c) => c.id === f.id);
@@ -4805,7 +4886,7 @@ function RepartidorClientes({ db, mutate, repartidor }) {
 
       const actualizado = {
         ...next.clientes[i],
-        ...f,
+        ...datosCliente,
         repartidorId: repartidor.id,
         envasesPermanentes: envasesPermanentesDe(next.clientes[i]),
         envasesExtra: envasesExtraDe(next.clientes[i]),
@@ -4815,7 +4896,7 @@ function RepartidorClientes({ db, mutate, repartidor }) {
       next.clientes[i] = actualizado;
     } else {
       const nuevo = {
-        ...f,
+        ...datosCliente,
         id: uid(),
         repartidorId: repartidor.id,
         deudaAcumulada: Math.max(0, Number(f.deudaAcumulada) || 0),
@@ -4827,6 +4908,25 @@ function RepartidorClientes({ db, mutate, repartidor }) {
       delete nuevo.envasesPrestados;
       next.clientes.push(nuevo);
     }
+
+    ubicacionesPorDia
+      .filter(
+        ({ dia, ubicacion }) => dia && ubicacion && ubicacion !== "mantener"
+      )
+      .forEach(({ dia, ubicacion }) => {
+        const clienteReordenado = next.clientes.find((c) => c.id === f.id) ||
+          next.clientes[next.clientes.length - 1];
+        const despuesDeId = ubicacion.startsWith("despues:")
+          ? ubicacion.slice("despues:".length)
+          : null;
+
+        next.clientes = ubicarClienteEnDia({
+          clientes: next.clientes,
+          cliente: clienteReordenado,
+          dia,
+          despuesDeId,
+        });
+      });
 
     mutate(next);
     setSheet(null);
@@ -4853,6 +4953,7 @@ function RepartidorClientes({ db, mutate, repartidor }) {
             <ClienteForm
               initial={sheet === "nuevo" ? null : sheet}
               repartidores={db.config.repartidores}
+              clientes={clientesDelRepartidor}
               isAdmin={false}
               onSave={guardar}
               onCancel={() => setSheet(null)}
@@ -5012,6 +5113,7 @@ function RepartidorClientes({ db, mutate, repartidor }) {
           <ClienteForm
             initial={sheet === "nuevo" ? null : sheet}
             repartidores={db.config.repartidores}
+            clientes={clientesDelRepartidor}
             isAdmin={false}
             onSave={guardar}
             onCancel={() => setSheet(null)}
@@ -5046,8 +5148,9 @@ function RepartidorRecorrido({
   });
   // Clientes cuyo día normal ya pasó durante esta semana.
 // Empieza cerrado.
-const [mostrarDiasAnteriores, setMostrarDiasAnteriores] =
+  const [mostrarDiasAnteriores, setMostrarDiasAnteriores] =
   useState(false);
+  const diaActual = diaSemanaHoy();
 
   // Si hubiese más de una visita del mismo cliente hoy, tomamos la más reciente.
   const visitaPorCliente = useMemo(() => {
@@ -5116,7 +5219,7 @@ const [mostrarDiasAnteriores, setMostrarDiasAnteriores] =
 // Si un cliente tiene más de un día asignado, tomamos
 // como referencia el día anterior más cercano a hoy.
 // ==========================================================
-const indiceHoy = DIAS.indexOf(diaSemanaHoy());
+const indiceHoy = DIAS.indexOf(diaActual);
 
 const diasAnterioresSemana =
   indiceHoy > 0
@@ -5174,19 +5277,8 @@ const clientesDiasAnteriores = todosLosClientes
 
     if (ia !== ib) return ia - ib;
 
-    const ordenA =
-      a.orden === "" ||
-      a.orden === null ||
-      a.orden === undefined
-        ? Infinity
-        : Number(a.orden);
-
-    const ordenB =
-      b.orden === "" ||
-      b.orden === null ||
-      b.orden === undefined
-        ? Infinity
-        : Number(b.orden);
+    const ordenA = ordenClienteEnDia(a, a.diaAnteriorReferencia);
+    const ordenB = ordenClienteEnDia(b, b.diaAnteriorReferencia);
 
     if (ordenA !== ordenB) {
       return ordenA - ordenB;
@@ -5255,14 +5347,8 @@ const gruposDiasAnteriores =
   const citasSabado = clientesFiltrados
     .filter((c) => !visitaPorCliente.has(c.id) && !!c.citaSabado)
     .sort((a, b) => {
-      const ordenA =
-        a.orden === "" || a.orden === null || a.orden === undefined
-          ? Infinity
-          : Number(a.orden);
-      const ordenB =
-        b.orden === "" || b.orden === null || b.orden === undefined
-          ? Infinity
-          : Number(b.orden);
+      const ordenA = ordenClienteEnDia(a, diaActual);
+      const ordenB = ordenClienteEnDia(b, diaActual);
 
       if (ordenA !== ordenB) return ordenA - ordenB;
       return (a.nombre || "").localeCompare(b.nombre || "");
@@ -5519,7 +5605,8 @@ const gruposDiasAnteriores =
                   esVolverMasTarde(visitaHoy);
                 const diasHabituales = c.diasVisita || [];
                 const correspondeHoy =
-                  diasHabituales.includes(diaSemanaHoy());
+                  diasHabituales.includes(diaActual);
+                const ordenDeHoy = ordenClienteEnDia(c, diaActual);
 
                 return (
                   <Card
@@ -5543,10 +5630,8 @@ const gruposDiasAnteriores =
                             : C.primary,
                         }}
                       >
-                        {c.orden !== "" &&
-                        c.orden !== null &&
-                        c.orden !== undefined ? (
-                          c.orden
+                        {correspondeHoy && Number.isFinite(ordenDeHoy) ? (
+                          ordenDeHoy
                         ) : yaVisitadoHoy ? (
                           <Check size={15} />
                         ) : (
@@ -5616,12 +5701,12 @@ const gruposDiasAnteriores =
                                 <Badge
                                   key={`${c.id}-${dia}`}
                                   tone={
-                                    dia === diaSemanaHoy()
+                                    dia === diaActual
                                       ? "success"
                                       : "accent"
                                   }
                                 >
-                                  {dia === diaSemanaHoy()
+                                  {dia === diaActual
                                     ? `${dia} · Hoy`
                                     : dia}
                                 </Badge>
@@ -6164,6 +6249,7 @@ function MostrarMasClientes({ mostrados, total, onClick }) {
 
 function ClienteVisitaCard({
   cliente,
+  diaOrden = diaSemanaHoy(),
   hecho,
   noVendido,
   volverMasTarde = false,
@@ -6177,10 +6263,8 @@ function ClienteVisitaCard({
   const extras = envasesExtraDe(cliente);
   const tieneAbonoActivo = !!cliente.subscriptionSummary?.subscriptionId;
 
-  const tieneOrden =
-    cliente.orden !== "" &&
-    cliente.orden !== null &&
-    cliente.orden !== undefined;
+  const ordenDelDia = ordenClienteEnDia(cliente, diaOrden);
+  const tieneOrden = Number.isFinite(ordenDelDia);
 
   return (
     <Card
@@ -6207,7 +6291,7 @@ function ClienteVisitaCard({
           }}
         >
           {tieneOrden ? (
-            cliente.orden
+            ordenDelDia
           ) : hecho ? (
             <Check size={15} />
           ) : (
