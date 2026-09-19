@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import {
   Droplet, Truck, Users, Receipt, Plus, Check, X,
-  ChevronRight, Undo2, Redo2, LogOut, CreditCard, Banknote,
+  ChevronRight, LogOut, CreditCard, Banknote,
   HandCoins, AlertCircle, Search, Edit2, Trash2,
   ArrowLeft, Lock, ClipboardList, CheckCircle2, Circle, BarChart3,
   UserCog, MessageCircle, MapPin, Save, Minus, Settings2,
@@ -1208,7 +1208,7 @@ function AdminSuscripciones({ db, mutate }) {
 /* ============================================================
    APP ADMINISTRADOR
    ============================================================ */
-function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo, offline }) {
+function AdminApp({ db, mutate, onLogout, offline }) {
   const [tab, setTab] = useState("inicio");
 
   const tabs = [
@@ -1239,8 +1239,6 @@ function AdminApp({ db, mutate, onLogout, canUndo, canRedo, undo, redo, offline 
             >
               Versión {APP_VERSION}
             </span>
-            <button onClick={undo} disabled={!canUndo} className="p-2 rounded-full active:bg-white/10 disabled:opacity-30"><Undo2 size={16} color="#fff" /></button>
-            <button onClick={redo} disabled={!canRedo} className="p-2 rounded-full active:bg-white/10 disabled:opacity-30"><Redo2 size={16} color="#fff" /></button>
             <button onClick={onLogout} className="p-2 rounded-full active:bg-white/10"><LogOut size={16} color="#fff" /></button>
           </div>
         }
@@ -8253,11 +8251,6 @@ export default function App() {
   const [connError, setConnError] = useState(null);
   const [offline, setOffline] = useState(typeof navigator !== "undefined" ? !navigator.onLine : false);
 
-  const pastRef = useRef([]);
-  const futureRef = useRef([]);
-  const [canUndo, setCanUndo] = useState(false);
-  const [canRedo, setCanRedo] = useState(false);
-
   useEffect(() => {
     const onOnline = () => setOffline(false);
     const onOffline = () => setOffline(true);
@@ -8337,43 +8330,12 @@ export default function App() {
     if (nextDb.config !== prevDb.config) setConfigDoc(nextDb.config);
   }
 
-  const mutate = useCallback((nextDb, opts = { history: true }) => {
+  const mutate = useCallback((nextDb) => {
     setDb((prevDb) => {
-      if (opts.history) {
-        pastRef.current = [...pastRef.current.slice(-29), prevDb];
-        futureRef.current = [];
-        setCanUndo(true);
-        setCanRedo(false);
-      }
       persistChanged(prevDb, nextDb);
       return nextDb;
     });
   }, []);
-
-  function undo() {
-    if (!pastRef.current.length) return;
-    setDb((current) => {
-      const prev = pastRef.current[pastRef.current.length - 1];
-      pastRef.current = pastRef.current.slice(0, -1);
-      futureRef.current = [current, ...futureRef.current].slice(0, 30);
-      persistChanged(current, prev);
-      setCanUndo(pastRef.current.length > 0);
-      setCanRedo(true);
-      return prev;
-    });
-  }
-  function redo() {
-    if (!futureRef.current.length) return;
-    setDb((current) => {
-      const next = futureRef.current[0];
-      futureRef.current = futureRef.current.slice(1);
-      pastRef.current = [...pastRef.current, current].slice(-30);
-      persistChanged(current, next);
-      setCanRedo(futureRef.current.length > 0);
-      setCanUndo(true);
-      return next;
-    });
-  }
 
   function elegirAdmin() {
   const p = { type: "admin" };
@@ -8450,10 +8412,6 @@ export default function App() {
         db={db}
         mutate={mutate}
         onLogout={desloguear}
-        canUndo={canUndo}
-        canRedo={canRedo}
-        undo={undo}
-        redo={redo}
         offline={offline}
       />
     );
