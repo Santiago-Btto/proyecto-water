@@ -24,6 +24,13 @@ import {
   ordenClienteEnDia,
   ubicarClienteEnDia,
 } from "./dayRouteOrdering";
+import {
+  ARTICULOS_STOCK,
+  calcularStockEnCamionetas,
+  calcularStockEnGalpon,
+  stockInventarioDeRepartidor,
+  stockInventarioVacio,
+} from "./stockInventory";
 
 /* ============================================================
    TOKENS DE DISEÑO
@@ -119,6 +126,7 @@ const DEFAULT_CONFIG = {
     b20: 0,
     b12: 0,
     sifon: 0,
+    esqueletos: 0,
   },
 };
 
@@ -3907,10 +3915,10 @@ function AdminHistorial({ db, mutate }) {
 
 /* ---------- Stock general (admin) ---------- */
 function AdminStock({ db, mutate }) {
-  const [total, setTotal] = useState(() => ({ ...stockVacio(), ...(db.config.stockTotal || {}) }));
+  const [total, setTotal] = useState(() => ({ ...stockInventarioVacio(), ...(db.config.stockTotal || {}) }));
   const [porRepartidor, setPorRepartidor] = useState(() => {
     const resultado = {};
-    db.config.repartidores.forEach((r) => { resultado[r.id] = stockDeRepartidor(db, r.id); });
+    db.config.repartidores.forEach((r) => { resultado[r.id] = stockInventarioDeRepartidor((db.stock || []).find((s) => s.id === r.id)); });
     return resultado;
   });
   const [mensaje, setMensaje] = useState("");
@@ -3918,31 +3926,28 @@ function AdminStock({ db, mutate }) {
   // Si cambian los repartidores o llega stock nuevo desde Firestore,
   // mantenemos la pantalla sincronizada.
   useEffect(() => {
-    setTotal({ ...stockVacio(), ...(db.config.stockTotal || {}) });
+    setTotal({ ...stockInventarioVacio(), ...(db.config.stockTotal || {}) });
     const resultado = {};
-    db.config.repartidores.forEach((r) => { resultado[r.id] = stockDeRepartidor(db, r.id); });
+    db.config.repartidores.forEach((r) => { resultado[r.id] = stockInventarioDeRepartidor((db.stock || []).find((s) => s.id === r.id)); });
     setPorRepartidor(resultado);
   }, [db.config.stockTotal, db.config.repartidores, db.stock]);
 
   const permanentes = stockPermanenteClientes(db.clientes);
   const extras = stockExtraClientes(db.clientes);
   const enClientes = stockPrestadoClientes(db.clientes);
-  const trabajando = stockTrabajando(porRepartidor);
-  const galpon = stockVacio();
-  PRODUCTOS_RETORNABLES.forEach((p) => {
-    galpon[p.key] = (Number(total[p.key]) || 0) - (trabajando[p.key] || 0) - (enClientes[p.key] || 0);
-  });
+  const trabajando = calcularStockEnCamionetas(porRepartidor);
+  const galpon = calcularStockEnGalpon({ total, porRepartidor, enClientes });
 
   function cambiarStockRep(repId, tipo, valor) {
     setMensaje("");
     setPorRepartidor((prev) => ({
       ...prev,
-      [repId]: { ...stockVacio(), ...(prev[repId] || {}), [tipo]: Math.max(0, Number(valor) || 0) },
+      [repId]: { ...stockInventarioVacio(), ...(prev[repId] || {}), [tipo]: Math.max(0, Number(valor) || 0) },
     }));
   }
 
   function guardarStock() {
-    const productoConError = PRODUCTOS_RETORNABLES.find((p) => galpon[p.key] < 0);
+    const productoConError = ARTICULOS_STOCK.find((p) => galpon[p.key] < 0);
     if (productoConError) {
       setMensaje(`Error: asignaste más ${productoConError.label} de los que posee la empresa.`);
       return;
@@ -3951,14 +3956,12 @@ function AdminStock({ db, mutate }) {
     const next = clone(db);
     next.config.stockActivo = true;
     delete next.config.stockRepartidores;
-    next.config.stockTotal = {
-      b20: Number(total.b20) || 0,
-      b12: Number(total.b12) || 0,
-      sifon: Number(total.sifon) || 0,
-    };
+    next.config.stockTotal = Object.fromEntries(
+      ARTICULOS_STOCK.map((p) => [p.key, Number(total[p.key]) || 0])
+    );
     next.stock = db.config.repartidores.map((r) => ({
       id: r.id,
-      ...stockVacio(),
+      ...stockInventarioVacio(),
       ...(porRepartidor[r.id] || {}),
     }));
 
@@ -3979,7 +3982,7 @@ function AdminStock({ db, mutate }) {
       <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Stock general</div>
       <Card className="mb-4">
         <div className="text-xs mb-3" style={{ color: C.muted }}>
-          Total propiedad = Galpón + Camionetas + Permanentes en clientes + Extras en clientes.
+          Total propiedad = Galpón + Camionetas + envases en clientes. Los esqueletos solo se controlan entre galpón y camionetas.
         </div>
 
         <div className="overflow-x-auto">
@@ -3997,7 +4000,7 @@ function AdminStock({ db, mutate }) {
               </tr>
             </thead>
             <tbody>
-              {PRODUCTOS_RETORNABLES.map((p) => (
+              {ARTICULOS_STOCK.map((p) => (
                 <tr key={p.key} style={{ borderTop: `1px solid ${C.border}` }}>
                   <td className="py-2 pr-2 font-bold whitespace-nowrap">{p.label}</td>
                   <td className="p-1">
@@ -4009,9 +4012,9 @@ function AdminStock({ db, mutate }) {
                       <Input type="number" inputMode="numeric" value={porRepartidor[r.id]?.[p.key] || 0} onChange={(e) => cambiarStockRep(r.id, p.key, e.target.value)} style={{ width: 65, textAlign: "center" }} />
                     </td>
                   ))}
-                  <td className="text-center font-bold" style={{ color: C.primary }}>{permanentes[p.key]}</td>
-                  <td className="text-center font-bold" style={{ color: C.warning }}>{extras[p.key]}</td>
-                  <td className="text-center font-bold" style={{ color: C.danger }}>{enClientes[p.key]}</td>
+                  <td className="text-center font-bold" style={{ color: C.primary }}>{p.seEntregaAClientes ? permanentes[p.key] : "—"}</td>
+                  <td className="text-center font-bold" style={{ color: C.warning }}>{p.seEntregaAClientes ? extras[p.key] : "—"}</td>
+                  <td className="text-center font-bold" style={{ color: C.danger }}>{p.seEntregaAClientes ? enClientes[p.key] : "—"}</td>
                   <td className="text-center font-bold" style={{ color: C.primary }}>{trabajando[p.key]}</td>
                 </tr>
               ))}
@@ -4020,7 +4023,7 @@ function AdminStock({ db, mutate }) {
         </div>
 
         <div className="text-[11px] mt-3" style={{ color: C.mutedLight }}>
-          Galpón se calcula solo. Para pasar envases del galpón a una camioneta, aumentá la cantidad de ese repartidor y guardá.
+          Galpón se calcula solo. Para pasar stock del galpón a una camioneta, aumentá la cantidad de ese repartidor y guardá.
         </div>
 
         {mensaje && <div className="text-xs font-bold mt-3" style={{ color: mensaje.includes("✓") ? C.success : C.danger }}>{mensaje}</div>}
