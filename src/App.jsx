@@ -24,6 +24,7 @@ import {
   ordenClienteEnDia,
   ubicarClienteEnDia,
 } from "./dayRouteOrdering";
+import { buscarClientesParaRepartidor } from "./routeSearch";
 import {
   ARTICULOS_STOCK,
   calcularStockEnCamionetas,
@@ -4722,6 +4723,7 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
             repartidor={repartidor}
             clientes={clientesRecorrido}
             todosLosClientes={misClientes}
+            clientesParaBusqueda={db.clientes}
             visitasHoy={visitasHoy}
             onSalir={() => setVista("inicio")}
           />
@@ -5132,6 +5134,7 @@ function RepartidorRecorrido({
   repartidor,
   clientes,
   todosLosClientes = [],
+  clientesParaBusqueda = [],
   visitasHoy,
   onSalir,
 }) {
@@ -5172,32 +5175,24 @@ function RepartidorRecorrido({
   // ==========================================================
   // BUSCADOR GLOBAL DEL REPARTIDOR
   //
-  // Busca entre TODOS los clientes asignados a este repartidor,
-  // sin importar el día habitual de visita.
+  // Busca entre TODOS los clientes, sin importar el repartidor
+  // ni el día habitual de visita. Los clientes de otro recorrido
+  // se muestran solo como referencia y con su responsable visible.
   //
-  // Si el cliente ya fue visitado hoy, al tocarlo abrimos esa
-  // visita para editarla. Si todavía no fue visitado hoy,
-  // permitimos registrar una visita extraordinaria sin cambiar
-  // sus días habituales.
+  // Para clientes propios, si ya fue visitado hoy al tocarlo abrimos
+  // esa visita; si no, permitimos una visita extraordinaria. Los de
+  // otro repartidor se consultan sin permitir modificar su recorrido.
   // ==========================================================
   const resultadosBusqueda = useMemo(() => {
     if (!textoBusqueda) return [];
 
-    return todosLosClientes
-        .filter((c) => {
-          const nombre = (c.nombre || "").toLowerCase();
-          const direccion = (c.direccion || "").toLowerCase();
-
-          return (
-            nombre.includes(textoBusqueda) ||
-            direccion.includes(textoBusqueda)
-          );
-        })
-        .slice()
-        .sort((a, b) =>
-          (a.nombre || "").localeCompare(b.nombre || "")
-        );
-  }, [textoBusqueda, todosLosClientes]);
+    return buscarClientesParaRepartidor({
+      clientes: clientesParaBusqueda,
+      repartidores: db.config.repartidores,
+      repartidorId: repartidor.id,
+      textoBusqueda,
+    });
+  }, [textoBusqueda, clientesParaBusqueda, db.config.repartidores, repartidor.id]);
 
   // Las listas normales del recorrido ya no dependen del buscador.
   // Cuando hay texto de búsqueda se ocultan visualmente y mostramos
@@ -5608,16 +5603,20 @@ const gruposDiasAnteriores =
                 const correspondeHoy =
                   diasHabituales.includes(diaActual);
                 const ordenDeHoy = ordenClienteEnDia(c, diaActual);
+                const esDeOtroRepartidor = c.esDeOtroRepartidor;
 
                 return (
                   <Card
                     key={`busqueda-global-${c.id}`}
-                    onClick={() =>
-                      yaVisitadoHoy
-                        ? abrirVisitaExistente(c)
-                        : abrirNuevaVisita(c)
+                    onClick={
+                      esDeOtroRepartidor
+                        ? undefined
+                        : () =>
+                            yaVisitadoHoy
+                              ? abrirVisitaExistente(c)
+                              : abrirNuevaVisita(c)
                     }
-                    style={{ cursor: "pointer" }}
+                    style={{ cursor: esDeOtroRepartidor ? "default" : "pointer" }}
                   >
                     <div className="flex items-start gap-2">
                       <div
@@ -5631,7 +5630,9 @@ const gruposDiasAnteriores =
                             : C.primary,
                         }}
                       >
-                        {correspondeHoy && Number.isFinite(ordenDeHoy) ? (
+                        {esDeOtroRepartidor ? (
+                          <Users size={14} />
+                        ) : correspondeHoy && Number.isFinite(ordenDeHoy) ? (
                           ordenDeHoy
                         ) : yaVisitadoHoy ? (
                           <Check size={15} />
@@ -5645,6 +5646,12 @@ const gruposDiasAnteriores =
                           <div className="font-bold text-sm">
                             {c.nombre}
                           </div>
+
+                          {esDeOtroRepartidor && (
+                            <Badge tone="warning">
+                              Recorrido de {c.nombreRepartidor}
+                            </Badge>
+                          )}
 
                           {yaVisitadoHoy && (
                             <Badge
@@ -5660,7 +5667,7 @@ const gruposDiasAnteriores =
                             </Badge>
                           )}
 
-                          {!yaVisitadoHoy && correspondeHoy && (
+                          {!yaVisitadoHoy && correspondeHoy && !esDeOtroRepartidor && (
                             <Badge tone="success">
                               Corresponde hoy
                             </Badge>
@@ -5716,7 +5723,14 @@ const gruposDiasAnteriores =
                           </div>
                         </div>
 
-                        {!correspondeHoy && !yaVisitadoHoy && (
+                        {esDeOtroRepartidor ? (
+                          <div
+                            className="text-[10px] mt-1.5 font-semibold"
+                            style={{ color: C.warning }}
+                          >
+                            Cliente asignado al recorrido de {c.nombreRepartidor}.
+                          </div>
+                        ) : !correspondeHoy && !yaVisitadoHoy && (
                           <div
                             className="text-[10px] mt-1.5 font-semibold"
                             style={{ color: C.warning }}
