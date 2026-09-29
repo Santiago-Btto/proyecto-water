@@ -4,6 +4,7 @@
 // funcionando sin conexión y sincronice cuando vuelva la señal.
 // ============================================================
 import { initializeApp } from "firebase/app";
+import { getAuth } from "firebase/auth";
 import {
   initializeFirestore,
   persistentLocalCache,
@@ -21,6 +22,7 @@ export const firebaseConfig = {
 };
 
 export const firebaseApp = initializeApp(firebaseConfig);
+export const firebaseAuth = getAuth(firebaseApp);
 
 export const firestore = initializeFirestore(firebaseApp, {
   localCache: persistentLocalCache({

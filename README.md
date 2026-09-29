@@ -57,6 +57,8 @@ El resultado se genera en `dist/`.
 3. Registrá una aplicación web desde **Configuración del proyecto → Tus apps → Web**.
 4. Copiá la configuración de Firebase en [`src/firebaseConfig.js`](src/firebaseConfig.js).
 5. Confirmá que Firestore esté habilitado antes de abrir la app.
+6. En **Authentication → Sign-in method**, habilitá **Correo electrónico/Contraseña**.
+7. En **Authentication → Users**, creá una sola cuenta compartida para el negocio. La app pedirá ese correo y contraseña antes de mostrar los perfiles.
 
 La app usa estas colecciones principales:
 
@@ -70,9 +72,14 @@ La app usa estas colecciones principales:
 
 ## Seguridad de Firestore
 
-No publiques reglas que permitan lectura y escritura libremente, como `allow read, write: if true`. Esas reglas exponen los datos del negocio a cualquier persona que acceda a la aplicación.
+La app exige iniciar sesión por correo y contraseña antes de cargar datos. Después del acceso se muestran los perfiles de Administrador y repartidores; el PIN de administrador sigue siendo una segunda protección dentro de la aplicación.
 
-Antes de usar la app en producción, implementá Firebase Authentication y definí reglas que permitan acceso únicamente a usuarios autorizados. La estructura exacta de las reglas depende de cómo se asignen los roles de administrador y repartidor; conviene validar esa política antes de cargar datos reales.
+Para que la protección también exista en la base de datos, publicá las reglas incluidas en [`firestore.rules`](firestore.rules):
+
+1. Abrí **Firestore Database → Rules** en Firebase Console.
+2. Reemplazá el contenido por el de `firestore.rules` y elegí **Publish**.
+
+Esas reglas bloquean toda lectura y escritura de las colecciones de reparto si no hay una sesión iniciada. No publiques reglas como `allow read, write: if true`.
 
 También es recomendable restringir la clave de API desde Google Cloud Console a los dominios donde se publique la aplicación.
 

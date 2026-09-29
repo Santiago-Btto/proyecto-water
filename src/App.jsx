@@ -10,7 +10,14 @@ import {
 import {
   collection, doc, onSnapshot, setDoc, deleteDoc, getDoc, getDocs, increment
 } from "firebase/firestore";
-import { firestore, COLLECTION } from "./firebaseConfig";
+import {
+  browserSessionPersistence,
+  onAuthStateChanged,
+  setPersistence,
+  signInWithEmailAndPassword,
+  signOut,
+} from "firebase/auth";
+import { firebaseAuth, firestore, COLLECTION } from "./firebaseConfig";
 import { applyDeliveryVisitMutation, submitVisit, totalStreetDebt } from "./operationalIntegrity";
 import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, recordSubscriptionPayment, splitX20Delivery, subscriptionMetrics, subscriptionPeriodMetrics, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
 import { isDashboardDateInRange } from "./dashboardCalendarFilters";
@@ -25,6 +32,8 @@ import {
   ubicarClienteEnDia,
 } from "./dayRouteOrdering";
 import { buscarClientesParaRepartidor } from "./routeSearch";
+import { esSesionAutenticada, perfilInicialParaSesion } from "./authAccess";
+import { APP_VERSION } from "./appVersion";
 import {
   ARTICULOS_STOCK,
   calcularStockEnCamionetas,
@@ -54,9 +63,6 @@ const C = {
   dangerBg: "#FBEAEA",
   border: "#DEE9EB",
 };
-
-// Cambiá este número con cada publicación para identificar la versión instalada.
-const APP_VERSION = "0.9.7";
 
 const DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
 const DIAS_JS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
@@ -761,24 +767,6 @@ async function migrarEnvasesClientesSiHaceFalta() {
   }
 }
 
-/* Perfil recordado en ESTE dispositivo (no se comparte entre celulares) */
-function getLocalProfile() {
-  try {
-    const raw = localStorage.getItem("miPerfilReparto");
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-function setLocalProfile(p) {
-  try {
-    if (p === null) localStorage.removeItem("miPerfilReparto");
-    else localStorage.setItem("miPerfilReparto", JSON.stringify(p));
-  } catch {
-    /* ignorar si el navegador bloquea localStorage */
-  }
-}
-
 /* ============================================================
    PRIMITIVOS DE UI
    ============================================================ */
@@ -1024,7 +1012,7 @@ function BrandMark({ size = 22, color = C.accent }) {
 /* ============================================================
    PANTALLA: SELECCIÓN DE PERFIL
    ============================================================ */
-function ProfileSelect({ config, onPickAdmin, onPickRepartidor }) {
+function ProfileSelect({ config, onPickAdmin, onPickRepartidor, onSignOut }) {
   return (
     <Screen>
       <div className="flex-1 flex flex-col justify-center px-6">
@@ -1076,6 +1064,102 @@ function ProfileSelect({ config, onPickAdmin, onPickRepartidor }) {
             </button>
           ))
         )}
+
+        <button
+          type="button"
+          onClick={onSignOut}
+          className="w-full mt-4 py-2 text-xs font-bold"
+          style={{ color: C.muted }}
+        >
+          Cerrar sesión
+        </button>
+      </div>
+    </Screen>
+  );
+}
+
+function mensajeDeErrorDeAcceso(error) {
+  switch (error?.code) {
+    case "auth/invalid-email":
+      return "Revisá el correo electrónico.";
+    case "auth/invalid-credential":
+    case "auth/user-not-found":
+    case "auth/wrong-password":
+      return "Correo o contraseña incorrectos.";
+    case "auth/too-many-requests":
+      return "Hubo muchos intentos. Esperá un momento antes de volver a probar.";
+    case "auth/network-request-failed":
+      return "Necesitás conexión para iniciar sesión.";
+    case "auth/operation-not-allowed":
+      return "El acceso por correo todavía no está habilitado en Firebase.";
+    default:
+      return "No se pudo iniciar sesión. Probá nuevamente.";
+  }
+}
+
+/* ============================================================
+   PANTALLA: ACCESO GENERAL
+   ============================================================ */
+function LoginGate({ onLogin }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [cargando, setCargando] = useState(false);
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!email.trim() || !password) {
+      setError("Ingresá el correo y la contraseña.");
+      return;
+    }
+
+    setCargando(true);
+    setError("");
+    const resultado = await onLogin(email.trim(), password);
+    if (!resultado.ok) setError(resultado.error);
+    setCargando(false);
+  }
+
+  return (
+    <Screen>
+      <div className="flex-1 flex flex-col justify-center px-6">
+        <div className="flex flex-col items-center mb-8">
+          <div className="w-16 h-16 rounded-3xl flex items-center justify-center mb-3" style={{ background: C.primaryDark }}>
+            <BrandMark size={30} />
+          </div>
+          <div className="font-extrabold text-2xl tracking-tight">Reparto de Agua</div>
+          <div className="text-xs text-center mt-1" style={{ color: C.muted }}>
+            Ingresá con la cuenta del negocio para elegir un perfil.
+          </div>
+        </div>
+
+        <Card>
+          <form onSubmit={submit}>
+            <Field label="Correo electrónico">
+              <Input
+                type="email"
+                value={email}
+                onChange={(event) => { setEmail(event.target.value); setError(""); }}
+                autoComplete="username"
+                placeholder="correo@ejemplo.com"
+                autoFocus
+              />
+            </Field>
+            <Field label="Contraseña">
+              <Input
+                type="password"
+                value={password}
+                onChange={(event) => { setPassword(event.target.value); setError(""); }}
+                autoComplete="current-password"
+                placeholder="••••••••"
+              />
+            </Field>
+            {error && <div className="text-xs font-semibold mb-3" style={{ color: C.danger }}>{error}</div>}
+            <Btn full size="lg" type="submit" disabled={cargando} icon={Lock}>
+              {cargando ? "Ingresando…" : "Ingresar"}
+            </Btn>
+          </form>
+        </Card>
       </div>
     </Screen>
   );
@@ -8262,6 +8346,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [db, setDb] = useState({ clientes: [], visitas: [], gastos: [], stock: [], promotions: [], subscriptions: [], config: clone(DEFAULT_CONFIG) });
   const [profile, setProfile] = useState(null); // null(cargando) | 'picker' | {type:'admin'} | {type:'repartidor', id}
+  const [authReady, setAuthReady] = useState(false);
+  const [authUser, setAuthUser] = useState(null);
   const [adminUnlocked, setAdminUnlocked] = useState(() => {
   return sessionStorage.getItem("adminUnlocked") === "true";
 });
@@ -8280,11 +8366,46 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let activo = true;
+    let unsubscribe = () => {};
+
+    async function observarSesion() {
+      try {
+        await setPersistence(firebaseAuth, browserSessionPersistence);
+      } catch (error) {
+        console.error("No se pudo configurar la sesión del navegador", error);
+      }
+
+      if (!activo) return;
+      unsubscribe = onAuthStateChanged(firebaseAuth, (usuario) => {
+        if (!activo) return;
+        setAuthUser(usuario);
+        setProfile(perfilInicialParaSesion(usuario));
+        setAdminUnlocked(false);
+        sessionStorage.removeItem("adminUnlocked");
+        setConnError(null);
+        setAuthReady(true);
+      });
+    }
+
+    observarSesion();
+    return () => {
+      activo = false;
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!esSesionAutenticada(authUser)) {
+      setLoading(false);
+      return undefined;
+    }
+
+    setLoading(true);
     const loaded = new Set();
     function markLoaded(key) {
       loaded.add(key);
        if (loaded.size === 7) {
-        setProfile(getLocalProfile() || "picker");
         setLoading(false);
       }
     }
@@ -8311,7 +8432,7 @@ export default function App() {
       }, setConnError),
     ];
     return () => unsubs.forEach((u) => u());
-  }, []);
+  }, [authUser?.uid]);
 
   function persistChanged(prevDb, nextDb) {
     if (nextDb.clientes !== prevDb.clientes) {
@@ -8354,25 +8475,66 @@ export default function App() {
     });
   }, []);
 
-  function elegirAdmin() {
-  const p = { type: "admin" };
-
-  setProfile(p);
-  setLocalProfile(p);
-  setAdminUnlocked(false);
-}
-  function elegirRepartidor(r) {
-    const p = { type: "repartidor", id: r.id };
-    setProfile(p);
-    setLocalProfile(p);
+  async function iniciarSesion(email, password) {
+    try {
+      await signInWithEmailAndPassword(firebaseAuth, email, password);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: mensajeDeErrorDeAcceso(error) };
+    }
   }
-  function desloguear() {
-  setProfile("picker");
-  setAdminUnlocked(false);
-  setLocalProfile(null);
-  sessionStorage.removeItem("adminUnlocked");
-}
+
+  async function cerrarSesion() {
+    try {
+      await signOut(firebaseAuth);
+    } catch (error) {
+      console.error("No se pudo cerrar la sesión", error);
+    }
+  }
+
+  function elegirAdmin() {
+    setProfile({ type: "admin" });
+    setAdminUnlocked(false);
+  }
+  function elegirRepartidor(r) {
+    setProfile({ type: "repartidor", id: r.id });
+  }
+  function salirDelPerfil() {
+    setProfile("picker");
+    setAdminUnlocked(false);
+    sessionStorage.removeItem("adminUnlocked");
+  }
   function volverAlPicker() { setProfile("picker"); }
+
+  if (!authReady) {
+    return (
+      <Screen>
+        <div className="flex-1 flex flex-col items-center justify-center">
+          <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-3 animate-pulse" style={{ background: C.primaryDark }}>
+            <BrandMark size={26} />
+          </div>
+          <div className="text-xs" style={{ color: C.muted }}>Cargando…</div>
+        </div>
+      </Screen>
+    );
+  }
+
+  if (!esSesionAutenticada(authUser)) {
+    return <LoginGate onLogin={iniciarSesion} />;
+  }
+
+  if (loading || profile === null) {
+    return (
+      <Screen>
+        <div className="flex-1 flex flex-col items-center justify-center">
+          <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-3 animate-pulse" style={{ background: C.primaryDark }}>
+            <BrandMark size={26} />
+          </div>
+          <div className="text-xs" style={{ color: C.muted }}>Cargando…</div>
+        </div>
+      </Screen>
+    );
+  }
 
   if (connError) {
     return (
@@ -8389,21 +8551,8 @@ export default function App() {
     );
   }
 
-  if (loading || profile === null) {
-    return (
-      <Screen>
-        <div className="flex-1 flex flex-col items-center justify-center">
-          <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-3 animate-pulse" style={{ background: C.primaryDark }}>
-            <BrandMark size={26} />
-          </div>
-          <div className="text-xs" style={{ color: C.muted }}>Cargando…</div>
-        </div>
-      </Screen>
-    );
-  }
-
   if (profile === "picker") {
-    return <ProfileSelect config={db.config} onPickAdmin={elegirAdmin} onPickRepartidor={elegirRepartidor} />;
+    return <ProfileSelect config={db.config} onPickAdmin={elegirAdmin} onPickRepartidor={elegirRepartidor} onSignOut={cerrarSesion} />;
   }
 
   if (profile.type === "admin") {
@@ -8428,7 +8577,7 @@ export default function App() {
       <AdminApp
         db={db}
         mutate={mutate}
-        onLogout={desloguear}
+        onLogout={salirDelPerfil}
         offline={offline}
       />
     );
@@ -8443,12 +8592,12 @@ export default function App() {
             <AlertCircle size={28} color={C.danger} />
             <div className="text-sm font-bold mt-2">Tu perfil ya no existe</div>
             <div className="text-xs mb-4" style={{ color: C.muted }}>Puede que el administrador lo haya eliminado.</div>
-            <Btn onClick={desloguear}>Volver a elegir perfil</Btn>
+            <Btn onClick={salirDelPerfil}>Volver a elegir perfil</Btn>
           </div>
         </Screen>
       );
     }
-    return <RepartidorApp db={db} mutate={mutate} repartidor={rep} onLogout={desloguear} offline={offline} />;
+    return <RepartidorApp db={db} mutate={mutate} repartidor={rep} onLogout={salirDelPerfil} offline={offline} />;
   }
 
   return null;

@@ -1,0 +1,33 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function sesionIniciada() {
+      return request.auth != null;
+    }
+
+    // Datos de esta aplicación. Sin una sesión válida no se puede
+    // leer ni modificar ningún registro, aunque se conozca la URL.
+    match /repartoAgua/{document} {
+      allow read, write: if sesionIniciada();
+    }
+    match /repartoAgua_clientes/{document} {
+      allow read, write: if sesionIniciada();
+    }
+    match /repartoAgua_visitas/{document} {
+      allow read, write: if sesionIniciada();
+    }
+    match /repartoAgua_gastos/{document} {
+      allow read, write: if sesionIniciada();
+    }
+    match /repartoAgua_stock/{document} {
+      allow read, write: if sesionIniciada();
+    }
+    match /repartoAgua_promotions/{document} {
+      allow read, write: if sesionIniciada();
+    }
+    match /repartoAgua_subscriptions/{document} {
+      allow read, write: if sesionIniciada();
+    }
+  }
+}
