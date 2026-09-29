@@ -11,7 +11,6 @@ import {
   collection, doc, onSnapshot, setDoc, deleteDoc, getDoc, getDocs, increment
 } from "firebase/firestore";
 import {
-  browserSessionPersistence,
   onAuthStateChanged,
   setPersistence,
   signInWithEmailAndPassword,
@@ -33,6 +32,7 @@ import {
 } from "./dayRouteOrdering";
 import { buscarClientesParaRepartidor } from "./routeSearch";
 import { esSesionAutenticada, perfilInicialParaSesion } from "./authAccess";
+import { PERSISTENCIA_SESION } from "./authSessionPersistence";
 import { APP_VERSION } from "./appVersion";
 import {
   ARTICULOS_STOCK,
@@ -8371,7 +8371,7 @@ export default function App() {
 
     async function observarSesion() {
       try {
-        await setPersistence(firebaseAuth, browserSessionPersistence);
+        await setPersistence(firebaseAuth, PERSISTENCIA_SESION);
       } catch (error) {
         console.error("No se pudo configurar la sesión del navegador", error);
       }
