@@ -35,6 +35,11 @@ import { esSesionAutenticada, perfilInicialParaSesion } from "./authAccess";
 import { PERSISTENCIA_SESION } from "./authSessionPersistence";
 import { APP_VERSION } from "./appVersion";
 import {
+  ENVASES_FILTRABLES,
+  PERIODOS_MOVIMIENTOS_ENVASES,
+  movimientosDeEnvases,
+} from "./containerMovementHistory";
+import {
   ARTICULOS_STOCK,
   calcularStockEnCamionetas,
   calcularStockEnGalpon,
@@ -3703,10 +3708,19 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
 function AdminHistorial({ db, mutate }) {
   const [filtroRep, setFiltroRep] = useState("todos");
   const [confirmDel, setConfirmDel] = useState(null);
+  const [filtroEnvases, setFiltroEnvases] = useState({
+    periodo: "hoy",
+    tipo: "todos",
+    movimiento: "todos",
+    fechaEspecifica: hoyISO(),
+  });
   const [limiteRecorridoHoy, setLimiteRecorridoHoy] = useState(
     CLIENTES_POR_BLOQUE
   );
   const [limiteHistorial, setLimiteHistorial] = useState(
+    CLIENTES_POR_BLOQUE
+  );
+  const [limiteMovimientosEnvases, setLimiteMovimientosEnvases] = useState(
     CLIENTES_POR_BLOQUE
   );
 
@@ -3758,6 +3772,34 @@ function AdminHistorial({ db, mutate }) {
 
   const movimientosExtrasHoy = resumenExtrasVisitas(visitasHoyResumen);
 
+  const movimientosEnvases = useMemo(
+    () =>
+      movimientosDeEnvases({
+        visitas: db.visitas.filter(
+          (v) => filtroRep === "todos" || v.repartidorId === filtroRep
+        ),
+        clientes: db.clientes,
+        repartidores: db.config.repartidores,
+        filtros: { ...filtroEnvases, fechaActual: fechaHoy },
+      }),
+    [
+      db.visitas,
+      db.clientes,
+      db.config.repartidores,
+      filtroRep,
+      filtroEnvases,
+      fechaHoy,
+    ]
+  );
+
+  const resumenMovimientosEnvases = movimientosEnvases.reduce(
+    (resumen, movimiento) => {
+      resumen[movimiento.movimiento] += movimiento.cantidad;
+      return resumen;
+    },
+    { prestado: 0, retirado: 0 }
+  );
+
   const clientesHoyVisibles = clientesVisiblesEnRecorrido(
     clientesHoy,
     limiteRecorridoHoy
@@ -3766,11 +3808,21 @@ function AdminHistorial({ db, mutate }) {
     visitas,
     limiteHistorial
   );
+  const movimientosEnvasesVisibles = clientesVisiblesEnRecorrido(
+    movimientosEnvases,
+    limiteMovimientosEnvases
+  );
 
   function cambiarFiltroRepartidor(nuevoFiltro) {
     setFiltroRep(nuevoFiltro);
     setLimiteRecorridoHoy(CLIENTES_POR_BLOQUE);
     setLimiteHistorial(CLIENTES_POR_BLOQUE);
+    setLimiteMovimientosEnvases(CLIENTES_POR_BLOQUE);
+  }
+
+  function cambiarFiltroEnvases(cambios) {
+    setFiltroEnvases((actual) => ({ ...actual, ...cambios }));
+    setLimiteMovimientosEnvases(CLIENTES_POR_BLOQUE);
   }
 
   function borrarVisita(v) {
@@ -3820,6 +3872,112 @@ function AdminHistorial({ db, mutate }) {
           <button key={r.id} onClick={() => cambiarFiltroRepartidor(r.id)} className="px-3 py-1.5 rounded-lg text-xs font-bold flex-shrink-0" style={{ background: filtroRep === r.id ? C.primary : C.surface, color: filtroRep === r.id ? "#fff" : C.muted, border: `1px solid ${filtroRep === r.id ? C.primary : C.border}` }}>{r.nombre}</button>
         ))}
       </div>
+
+      <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
+        Movimientos de envases
+      </div>
+      <Card className="mb-5">
+        <div className="text-xs mb-3" style={{ color: C.muted }}>
+          Encontrá préstamos y retiros sin buscar cliente por cliente.
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <select
+            value={filtroEnvases.periodo}
+            onChange={(e) => cambiarFiltroEnvases({ periodo: e.target.value })}
+            className="rounded-lg px-3 py-2 text-xs font-semibold"
+            style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}
+          >
+            {PERIODOS_MOVIMIENTOS_ENVASES.map((periodo) => (
+              <option key={periodo.key} value={periodo.key}>{periodo.label}</option>
+            ))}
+          </select>
+          <select
+            value={filtroEnvases.tipo}
+            onChange={(e) => cambiarFiltroEnvases({ tipo: e.target.value })}
+            className="rounded-lg px-3 py-2 text-xs font-semibold"
+            style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}
+          >
+            <option value="todos">Todos los envases</option>
+            {ENVASES_FILTRABLES.map((envase) => (
+              <option key={envase.key} value={envase.key}>{envase.label}</option>
+            ))}
+          </select>
+          <select
+            value={filtroEnvases.movimiento}
+            onChange={(e) => cambiarFiltroEnvases({ movimiento: e.target.value })}
+            className="rounded-lg px-3 py-2 text-xs font-semibold"
+            style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}
+          >
+            <option value="todos">Préstamos y retiros</option>
+            <option value="prestado">Solo préstamos</option>
+            <option value="retirado">Solo retiros</option>
+          </select>
+          {filtroEnvases.periodo === "fecha" ? (
+            <Input
+              type="date"
+              value={filtroEnvases.fechaEspecifica}
+              onChange={(e) => cambiarFiltroEnvases({ fechaEspecifica: e.target.value })}
+              className="text-xs"
+            />
+          ) : (
+            <div className="flex items-center justify-center rounded-lg text-xs font-semibold" style={{ background: C.accentSoft, color: C.primary }}>
+              {movimientosEnvases.length} movimiento{movimientosEnvases.length === 1 ? "" : "s"}
+            </div>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 mt-3">
+          <div className="rounded-lg px-3 py-2" style={{ background: C.warningBg }}>
+            <div className="text-[10px] font-bold uppercase" style={{ color: C.warning }}>Prestados</div>
+            <div className="font-mono font-bold" style={{ color: C.warning }}>{resumenMovimientosEnvases.prestado}</div>
+          </div>
+          <div className="rounded-lg px-3 py-2" style={{ background: C.successBg }}>
+            <div className="text-[10px] font-bold uppercase" style={{ color: C.success }}>Retirados</div>
+            <div className="font-mono font-bold" style={{ color: C.success }}>{resumenMovimientosEnvases.retirado}</div>
+          </div>
+        </div>
+
+        {movimientosEnvases.length === 0 ? (
+          <div className="text-xs text-center py-5" style={{ color: C.mutedLight }}>
+            No hay movimientos de envases con estos filtros.
+          </div>
+        ) : (
+          <>
+            <div className="flex flex-col gap-2 mt-3">
+              {movimientosEnvasesVisibles.map((movimiento) => (
+                <div key={movimiento.id} className="rounded-xl px-3 py-2.5" style={{ background: C.bg, border: `1px solid ${C.border}` }}>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-sm font-bold">{movimiento.clienteNombre}</div>
+                      <div className="text-xs mt-0.5" style={{ color: C.muted }}>
+                        {fechaLegible(movimiento.fecha)} · {movimiento.repartidorNombre}
+                      </div>
+                      <div className="text-[10px] mt-1" style={{ color: C.mutedLight }}>{movimiento.origen}</div>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <Badge tone={movimiento.movimiento === "retirado" ? "success" : "warning"}>
+                        {movimiento.movimiento === "retirado" ? "Retiró" : "Prestó"}
+                      </Badge>
+                      <div className="font-mono text-sm font-bold mt-1" style={{ color: movimiento.movimiento === "retirado" ? C.success : C.warning }}>
+                        {movimiento.cantidad}× {movimiento.producto}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <MostrarMasClientes
+              mostrados={movimientosEnvasesVisibles.length}
+              total={movimientosEnvases.length}
+              onClick={() =>
+                setLimiteMovimientosEnvases((limiteActual) =>
+                  siguienteLimiteVisible(limiteActual, movimientosEnvases.length)
+                )
+              }
+            />
+          </>
+        )}
+      </Card>
 
       <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
         Movimiento de envases extra hoy
