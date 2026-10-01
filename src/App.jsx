@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   Droplet, Truck, Users, Receipt, Plus, Check, X,
   ChevronRight, LogOut, CreditCard, Banknote,
@@ -18,7 +18,7 @@ import {
 } from "firebase/auth";
 import { firebaseAuth, firestore, COLLECTION } from "./firebaseConfig";
 import { applyDeliveryVisitMutation, submitVisit, totalStreetDebt } from "./operationalIntegrity";
-import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, recordSubscriptionPayment, splitX20Delivery, subscriptionMetrics, subscriptionPeriodMetrics, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
+import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, getPeriod, recordSubscriptionPayment, renewMonthlySubscriptions, splitX20Delivery, subscriptionMetrics, subscriptionPeriodMetrics, subscriptionUsageHistory, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
 import { isDashboardDateInRange } from "./dashboardCalendarFilters";
 import {
   CLIENTES_POR_BLOQUE,
@@ -1239,7 +1239,9 @@ function AdminSuscripciones({ db, mutate }) {
   const [cantidadX20, setCantidadX20] = useState("4");
   const [precioMensual, setPrecioMensual] = useState("");
   const [error, setError] = useState("");
-  const metrics = subscriptionMetrics(db.subscriptions || []);
+  const [historialAbierto, setHistorialAbierto] = useState(null);
+  const periodoActual = getPeriod();
+  const metrics = subscriptionMetrics((db.subscriptions || []).filter((subscription) => subscription.periodo === periodoActual));
 
   function savePromotion() {
     const promotion = { id: uid(), nombre: nombre || `${cantidadX20} bidones 20L`, cantidadX20: Number(cantidadX20), precioMensual: Number(precioMensual), activo: true };
@@ -1298,8 +1300,31 @@ function AdminSuscripciones({ db, mutate }) {
       {error && <div className="text-xs mb-2" style={{ color: C.danger }}>{error}</div>}<Btn size="sm" onClick={savePromotion} icon={Save}>Guardar promoción</Btn>
       {(db.promotions || []).map((promotion) => <div key={promotion.id} className="flex justify-between text-xs mt-3"><span>{promotion.nombre}: {promotion.cantidadX20}×20L · {formatMoney(promotion.precioMensual)}</span><button onClick={() => mutate({ ...db, promotions: upsertPromotion(db.promotions, { ...promotion, activo: !promotion.activo }) })} style={{ color: C.primary }}>{promotion.activo ? "Desactivar" : "Activar"}</button></div>)}
     </Card>
-    <Card><div className="font-bold text-sm mb-2">Resumen de suscripciones</div><div className="text-xs" style={{ color: C.muted }}>Pagado {formatMoney(metrics.paidTotal)} · Pendiente {formatMoney(metrics.pendingTotal)} · Vencido {formatMoney(metrics.overdueTotal)} · Cupo restante {metrics.remainingTotal}</div></Card>
-    {(db.clientes || []).filter((client) => client.maquinaFrioCalor).map((client) => { const summary = client.subscriptionSummary; const current = (db.subscriptions || []).find((item) => item.id === summary?.subscriptionId); const view = clientSubscriptionSummaryView({ client, subscription: current }); const selectable = canSelectSubscription({ client, subscriptions: db.subscriptions || [] }); const puedeCorregir = current && !current.reciboPago && Number(current.cantidadConsumida || 0) === 0; return <Card key={client.id}><div className="font-bold text-sm">{client.nombre}</div>{!current ? <><div className="text-xs my-1" style={{ color: C.muted }}>{view.label}</div>{selectable.ok && (db.promotions || []).filter((item) => item.activo).map((promotion) => <button key={promotion.id} onClick={() => selectSubscription(client, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>{promotion.nombre}</button>)}</> : <><div className="text-xs" style={{ color: C.muted }}>{view.period} · {view.label} · {view.consumed}/{current.cantidadX20} entregados · quedan {view.remaining}</div>{current.estadoPago !== "pagada" && <div className="mt-1"><button className="text-xs mr-2" onClick={() => pay(current, "efectivo")} style={{ color: C.primary }}>Cobrar efectivo</button><button className="text-xs" onClick={() => pay(current, "mercadopago")} style={{ color: C.primary }}>Cobrar Mercado Pago</button></div>}{puedeCorregir && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}><div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>¿Elegiste el plan equivocado?</div>{(db.promotions || []).filter((promotion) => promotion.activo && promotion.id !== current.promocionId).map((promotion) => <button key={promotion.id} onClick={() => changePlan(current, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>Cambiar a {promotion.nombre}</button>)}</div>}</>}</Card>; })}
+    <Card><div className="font-bold text-sm mb-2">Resumen de suscripciones · {periodoActual}</div><div className="text-xs" style={{ color: C.muted }}>Pagado {formatMoney(metrics.paidTotal)} · Pendiente {formatMoney(metrics.pendingTotal)} · Vencido {formatMoney(metrics.overdueTotal)} · Cupo restante {metrics.remainingTotal}</div><div className="text-[10px] mt-2" style={{ color: C.muted }}>Los abonos se renuevan automáticamente al comenzar cada mes.</div></Card>
+    {(db.clientes || []).filter((client) => client.maquinaFrioCalor).map((client) => {
+      const summary = client.subscriptionSummary;
+      const current = (db.subscriptions || []).find((item) => item.id === summary?.subscriptionId);
+      const view = clientSubscriptionSummaryView({ client, subscription: current });
+      const selectable = canSelectSubscription({ client, subscriptions: db.subscriptions || [] });
+      const puedeCorregir = current && !current.reciboPago && Number(current.cantidadConsumida || 0) === 0;
+      const history = subscriptionUsageHistory({ clientId: client.id, subscriptions: db.subscriptions || [], visits: db.visitas || [] });
+      const open = historialAbierto === client.id;
+      return <Card key={client.id}>
+        <div className="font-bold text-sm">{client.nombre}</div>
+        {!current ? <>
+          <div className="text-xs my-1" style={{ color: C.muted }}>{view.label}</div>
+          {selectable.ok && (db.promotions || []).filter((item) => item.activo).map((promotion) => <button key={promotion.id} onClick={() => selectSubscription(client, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>{promotion.nombre}</button>)}
+        </> : <>
+          <div className="text-xs" style={{ color: C.muted }}>{view.period} · {view.label} · {view.consumed}/{current.cantidadX20} entregados · quedan {view.remaining}</div>
+          {current.estadoPago !== "pagada" && <div className="mt-1"><button className="text-xs mr-2" onClick={() => pay(current, "efectivo")} style={{ color: C.primary }}>Cobrar efectivo</button><button className="text-xs" onClick={() => pay(current, "mercadopago")} style={{ color: C.primary }}>Cobrar Mercado Pago</button></div>}
+          {puedeCorregir && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}><div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>¿Elegiste el plan equivocado?</div>{(db.promotions || []).filter((promotion) => promotion.activo && promotion.id !== current.promocionId).map((promotion) => <button key={promotion.id} onClick={() => changePlan(current, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>Cambiar a {promotion.nombre}</button>)}</div>}
+        </>}
+        {history.length > 0 && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
+          <button className="w-full flex items-center justify-between text-xs font-bold" onClick={() => setHistorialAbierto(open ? null : client.id)} style={{ color: C.primary }}><span>Historial de consumo</span><ChevronRight size={15} style={{ transform: open ? "rotate(90deg)" : "none" }} /></button>
+          {open && <div className="mt-2 space-y-2">{history.map((subscription) => <div key={subscription.id} className="rounded-lg p-2 text-xs" style={{ background: C.soft }}><div className="font-bold">{subscription.periodo} · {subscription.promocionNombre || `${subscription.cantidadX20} bidones`}</div><div style={{ color: C.muted }}>{subscription.cantidadConsumida}/{subscription.cantidadX20} entregados · quedan {Math.max(0, Number(subscription.cantidadX20) - Number(subscription.cantidadConsumida || 0))} · {subscription.estadoPago === "pagada" ? "Pagado" : subscription.estadoPago === "vencida" ? "Vencido" : "Pendiente"}</div>{subscription.deliveries.length > 0 ? <div className="mt-1" style={{ color: C.muted }}>{subscription.deliveries.map((delivery, index) => <div key={`${delivery.fecha}-${index}`}>{String(delivery.fecha || "").split("T")[0]} · {delivery.cantidadX20} bidón{delivery.cantidadX20 === 1 ? "" : "es"}</div>)}</div> : <div className="mt-1" style={{ color: C.muted }}>Sin entregas registradas.</div>}</div>)}</div>}
+        </div>}
+      </Card>;
+    })}
   </div>;
 }
 
@@ -8511,6 +8536,7 @@ export default function App() {
 });
   const [connError, setConnError] = useState(null);
   const [offline, setOffline] = useState(typeof navigator !== "undefined" ? !navigator.onLine : false);
+  const renovacionesMensualesEnCurso = useRef(new Set());
 
   useEffect(() => {
     const onOnline = () => setOffline(false);
@@ -8632,6 +8658,19 @@ export default function App() {
       return nextDb;
     });
   }, []);
+
+  useEffect(() => {
+    if (!esSesionAutenticada(authUser) || loading) return;
+    const renewal = renewMonthlySubscriptions({
+      clients: db.clientes,
+      subscriptions: db.subscriptions,
+    });
+    const pendientes = renewal.renewed.filter((clientId) => !renovacionesMensualesEnCurso.current.has(`${renewal.period}-${clientId}`));
+    if (!pendientes.length) return;
+
+    pendientes.forEach((clientId) => renovacionesMensualesEnCurso.current.add(`${renewal.period}-${clientId}`));
+    mutate({ ...db, clientes: renewal.clients, subscriptions: renewal.subscriptions });
+  }, [authUser?.uid, loading, db, mutate]);
 
   async function iniciarSesion(email, password) {
     try {

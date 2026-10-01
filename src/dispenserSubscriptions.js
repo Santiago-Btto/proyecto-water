@@ -81,6 +81,99 @@ export function createSubscription({ client, promotion, subscriptions = [], now 
   };
 }
 
+export function subscriptionSummaryFrom(subscription) {
+  return {
+    subscriptionId: subscription.id,
+    periodo: subscription.periodo,
+    estadoPago: subscription.estadoPago,
+    promocionId: subscription.promocionId,
+    promocionNombre: subscription.promocionNombre,
+    cantidadConsumida: Number(subscription.cantidadConsumida) || 0,
+    cantidadRestante: Math.max(0, Number(subscription.cantidadX20) - (Number(subscription.cantidadConsumida) || 0)),
+  };
+}
+
+function createMonthlyRenewal(subscription, period, now) {
+  const {
+    id,
+    periodo,
+    cantidadConsumida,
+    cantidadRestante,
+    estadoPago,
+    reciboPago,
+    fechaSeleccion,
+    fechaRenovacionAutomatica,
+    suscripcionAnteriorId,
+    renovadaAutomaticamente,
+    ...planSnapshot
+  } = subscription;
+  const quota = Number(subscription.cantidadX20) || 0;
+  return {
+    ...planSnapshot,
+    id: `${subscription.clienteId}-${period}`,
+    periodo: period,
+    cantidadConsumida: 0,
+    cantidadRestante: quota,
+    estadoPago: "pendiente",
+    fechaSeleccion: now.toISOString(),
+    fechaRenovacionAutomatica: now.toISOString(),
+    renovadaAutomaticamente: true,
+    suscripcionAnteriorId: subscription.id,
+  };
+}
+
+// El reinicio es deliberadamente local: se ejecuta al abrir o sincronizar la app
+// desde el día 1 y Firestore conserva tanto el mes anterior como sus entregas.
+export function renewMonthlySubscriptions({ clients = [], subscriptions = [], now = new Date() } = {}) {
+  const period = getPeriod(now);
+  const subscriptionsByClient = new Map();
+  subscriptions.forEach((subscription) => {
+    const current = subscriptionsByClient.get(subscription.clienteId) || [];
+    current.push(subscription);
+    subscriptionsByClient.set(subscription.clienteId, current);
+  });
+
+  const renewed = [];
+  const nextSubscriptions = subscriptions.slice();
+  const nextClients = clients.map((client) => {
+    if (!client?.maquinaFrioCalor || !client.subscriptionSummary?.subscriptionId) return client;
+    const clientSubscriptions = subscriptionsByClient.get(client.id) || [];
+    const current = clientSubscriptions.find((subscription) => subscription.periodo === period);
+    if (current) {
+      const summary = subscriptionSummaryFrom(current);
+      return client.subscriptionSummary?.subscriptionId === summary.subscriptionId ? client : { ...client, subscriptionSummary: summary };
+    }
+
+    const selected = clientSubscriptions.find((subscription) => subscription.id === client.subscriptionSummary.subscriptionId);
+    const latest = selected || clientSubscriptions.slice().sort((a, b) => String(b.periodo).localeCompare(String(a.periodo)))[0];
+    if (!latest || String(latest.periodo) >= period) return client;
+
+    const renewal = createMonthlyRenewal(latest, period, now);
+    nextSubscriptions.push(renewal);
+    renewed.push(client.id);
+    return { ...client, subscriptionSummary: subscriptionSummaryFrom(renewal) };
+  });
+
+  return { period, clients: nextClients, subscriptions: nextSubscriptions, renewed };
+}
+
+export function subscriptionUsageHistory({ clientId, subscriptions = [], visits = [] } = {}) {
+  return subscriptions
+    .filter((subscription) => subscription.clienteId === clientId)
+    .sort((a, b) => String(b.periodo).localeCompare(String(a.periodo)))
+    .map((subscription) => {
+      const deliveries = visits
+        .filter((visit) => visit.subscriptionAttribution?.subscriptionId === subscription.id)
+        .map((visit) => ({ fecha: visit.fecha, cantidadX20: Number(visit.subscriptionAttribution?.cantidadX20) || 0 }))
+        .sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
+      return {
+        ...subscription,
+        deliveredTotal: deliveries.reduce((total, delivery) => total + delivery.cantidadX20, 0),
+        deliveries,
+      };
+    });
+}
+
 export function changeSubscriptionPromotion({ subscription, promotion }) {
   if (!subscription) throw new Error("No se encontró el abono a corregir.");
   if (subscription.reciboPago) {

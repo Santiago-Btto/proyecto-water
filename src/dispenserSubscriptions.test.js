@@ -9,9 +9,11 @@ import {
   getPeriod,
   getSubscriptionStatus,
   recordSubscriptionPayment,
+  renewMonthlySubscriptions,
   splitX20Delivery,
   subscriptionMetrics,
   subscriptionPeriodMetrics,
+  subscriptionUsageHistory,
   upsertPromotion,
   validatePromotion,
 } from "./dispenserSubscriptions";
@@ -140,6 +142,64 @@ describe("monthly subscription selection", () => {
     expect(canSelectSubscription({ client: eligible, subscriptions: [], now: new Date("2026-08-11T12:00:00") }).ok).toBe(false);
     expect(canSelectSubscription({ client: eligible, subscriptions: [{ id: "cliente-1-2026-08", clienteId: "cliente-1", periodo: "2026-08" }], now: clock }).ok).toBe(false);
     expect(canSelectSubscription({ client: eligible, subscriptions: [{ id: "cliente-1-2026-07", clienteId: "cliente-1", periodo: "2026-07", estadoPago: "vencida" }], now: clock }).ok).toBe(false);
+  });
+});
+
+describe("monthly subscription renewal and history", () => {
+  const client = {
+    id: "cliente-1",
+    nombre: "Dani",
+    maquinaFrioCalor: true,
+    subscriptionSummary: { subscriptionId: "cliente-1-2026-09", periodo: "2026-09" },
+  };
+  const september = {
+    id: "cliente-1-2026-09",
+    clienteId: "cliente-1",
+    periodo: "2026-09",
+    promocionId: "p4",
+    promocionNombre: "Plan 4",
+    cantidadX20: 4,
+    cantidadConsumida: 3,
+    cantidadRestante: 1,
+    precioMensual: 4000,
+    estadoPago: "pagada",
+    reciboPago: { monto: 4000, metodo: "efectivo" },
+  };
+
+  it("opens a fresh period from day 1 without rewriting the previous subscription", () => {
+    const renewed = renewMonthlySubscriptions({ clients: [client], subscriptions: [september], now: new Date("2026-10-01T09:00:00") });
+
+    expect(renewed.renewed).toEqual(["cliente-1"]);
+    expect(renewed.subscriptions).toHaveLength(2);
+    expect(renewed.subscriptions[0]).toEqual(september);
+    expect(renewed.subscriptions[1]).toMatchObject({
+      id: "cliente-1-2026-10", periodo: "2026-10", cantidadX20: 4,
+      cantidadConsumida: 0, cantidadRestante: 4, estadoPago: "pendiente",
+      renovadaAutomaticamente: true, suscripcionAnteriorId: "cliente-1-2026-09",
+    });
+    expect(renewed.subscriptions[1].reciboPago).toBeUndefined();
+    expect(renewed.clients[0].subscriptionSummary).toMatchObject({ subscriptionId: "cliente-1-2026-10", periodo: "2026-10", cantidadRestante: 4 });
+  });
+
+  it("does not duplicate the current month and gives each period its own delivered history", () => {
+    const october = { ...september, id: "cliente-1-2026-10", periodo: "2026-10", cantidadConsumida: 1, cantidadRestante: 3, estadoPago: "pendiente" };
+    const result = renewMonthlySubscriptions({ clients: [client, { id: "sin-abono", maquinaFrioCalor: true }], subscriptions: [september, october], now: new Date("2026-10-03T09:00:00") });
+    const history = subscriptionUsageHistory({
+      clientId: client.id,
+      subscriptions: result.subscriptions,
+      visits: [
+        { fecha: "2026-09-15", subscriptionAttribution: { subscriptionId: september.id, cantidadX20: 2 } },
+        { fecha: "2026-10-02", subscriptionAttribution: { subscriptionId: october.id, cantidadX20: 1 } },
+      ],
+    });
+
+    expect(result.renewed).toEqual([]);
+    expect(result.subscriptions).toHaveLength(2);
+    expect(result.clients[0].subscriptionSummary.subscriptionId).toBe(october.id);
+    expect(history).toEqual([
+      expect.objectContaining({ id: october.id, deliveredTotal: 1, deliveries: [expect.objectContaining({ fecha: "2026-10-02", cantidadX20: 1 })] }),
+      expect.objectContaining({ id: september.id, deliveredTotal: 2, deliveries: [expect.objectContaining({ fecha: "2026-09-15", cantidadX20: 2 })] }),
+    ]);
   });
 });
 
