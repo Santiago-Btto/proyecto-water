@@ -10,16 +10,9 @@ import {
   persistentLocalCache,
   persistentMultipleTabManager,
 } from "firebase/firestore";
+import { resolveFirebaseConfig } from "./firebaseProjectConfig";
 
-export const firebaseConfig = {
-  apiKey: "AIzaSyDclVml6BewwOWG5PQrtKyi28mNFiHOR44",
-  authDomain: "agua-correa-e8c6b.firebaseapp.com",
-  projectId: "agua-correa-e8c6b",
-  storageBucket: "agua-correa-e8c6b.firebasestorage.app",
-  messagingSenderId: "734391391296",
-  appId: "1:734391391296:web:8d6b04b87b74181552fba5",
-  measurementId: "G-07VXHTFX6S",
-};
+export const firebaseConfig = resolveFirebaseConfig(import.meta.env);
 
 export const firebaseApp = initializeApp(firebaseConfig);
 export const firebaseAuth = getAuth(firebaseApp);
