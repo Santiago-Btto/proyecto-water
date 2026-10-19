@@ -20,6 +20,12 @@ import { firebaseAuth, firestore, COLLECTION } from "./firebaseConfig";
 import { applyDeliveryVisitMutation, submitVisit, totalStreetDebt } from "./operationalIntegrity";
 import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, getPeriod, recordSubscriptionPayment, renewMonthlySubscriptions, splitX20Delivery, subscriptionMetrics, subscriptionPeriodMetrics, subscriptionUsageHistory, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
 import { isDashboardDateInRange } from "./dashboardCalendarFilters";
+import { summarizeClientsWithDebt } from "./clientDebtSummary";
+import {
+  createInstallmentPlan,
+  generateInstallmentExpenses,
+  installmentPlanProgress,
+} from "./installmentExpenses";
 import {
   CLIENTES_POR_BLOQUE,
   clientesVisiblesEnRecorrido,
@@ -123,6 +129,7 @@ const DEFAULT_CONFIG = {
   adminPin: "",
   repartidores: [],
   inicioSemana: "domingo",
+  gastosEnCuotas: [],
 
   precios: {
     b20: 0,
@@ -2958,6 +2965,7 @@ function AdminClientes({ db, mutate }) {
   const [confirmDel, setConfirmDel] = useState(null);
   const [detalleId, setDetalleId] = useState(null);
   const [ordenLista, setOrdenLista] = useState("nombre");
+  const [mostrarDeudores, setMostrarDeudores] = useState(false);
   const [diasAbiertos, setDiasAbiertos] = useState(
     () => new Set([diaSemanaHoy()])
   );
@@ -3000,6 +3008,8 @@ function AdminClientes({ db, mutate }) {
   const clienteDetalle = detalleId
     ? db.clientes.find((c) => c.id === detalleId)
     : null;
+
+  const { clients: clientesConDeuda, total: totalDeudas } = summarizeClientsWithDebt(db.clientes);
 
 function guardarCliente(f) {
   const next = clone(db);
@@ -3221,6 +3231,48 @@ function guardarCliente(f) {
           Nuevo
         </Btn>
       </div>
+
+      {clientesConDeuda.length > 0 && (
+        <Card className="mb-3" style={{ background: C.dangerBg, border: `1px solid ${C.danger}` }}>
+          <button
+            type="button"
+            onClick={() => setMostrarDeudores((abierto) => !abierto)}
+            className="w-full flex items-center justify-between gap-3 text-left"
+          >
+            <div>
+              <div className="text-xs font-extrabold uppercase tracking-wide" style={{ color: C.danger }}>
+                Clientes con deudas
+              </div>
+              <div className="text-[10px] mt-0.5" style={{ color: C.muted }}>
+                {clientesConDeuda.length} cliente{clientesConDeuda.length !== 1 ? "s" : ""} · Total {formatMoney(totalDeudas)}
+              </div>
+            </div>
+            <ChevronRight size={18} color={C.danger} style={{ transform: mostrarDeudores ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.2s" }} />
+          </button>
+
+          {mostrarDeudores && (
+            <div className="mt-3 pt-2 flex flex-col gap-2" style={{ borderTop: `1px solid ${C.danger}` }}>
+              {clientesConDeuda.map((cliente) => (
+                <button
+                  key={cliente.id}
+                  type="button"
+                  onClick={() => setDetalleId(cliente.id)}
+                  className="w-full rounded-xl px-3 py-2 flex items-center justify-between gap-3 text-left"
+                  style={{ background: C.surface, border: `1px solid ${C.border}` }}
+                >
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold truncate">{cliente.nombre}</div>
+                    <div className="text-[10px] truncate" style={{ color: C.muted }}>{cliente.direccion || "Sin dirección"}</div>
+                  </div>
+                  <div className="font-mono font-extrabold text-sm flex-shrink-0" style={{ color: C.danger }}>
+                    {formatMoney(cliente.deudaAcumulada)}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
 
       <div className="flex items-center gap-2 mb-3">
         <span className="text-xs font-semibold mr-1" style={{ color: C.muted }}>
@@ -4309,6 +4361,9 @@ function AdminGastos({ db, mutate }) {
   const [concepto, setConcepto] = useState("");
   const [monto, setMonto] = useState("");
   const [categoria, setCategoria] = useState("otros");
+  const [cantidadCuotas, setCantidadCuotas] = useState("2");
+  const [periodoInicioCuotas, setPeriodoInicioCuotas] = useState(() => hoyISO().slice(0, 7));
+  const [errorCuotas, setErrorCuotas] = useState("");
   const [confirmDel, setConfirmDel] = useState(null);
   const [rango, setRango] = useState("hoy");
 
@@ -4328,6 +4383,45 @@ function AdminGastos({ db, mutate }) {
     setMonto("");
     setCategoria("otros");
     setSheet(false);
+  }
+
+  function guardarCuotas() {
+    try {
+      const plan = createInstallmentPlan({
+        id: uid(),
+        concepto,
+        categoria,
+        montoCuota: monto,
+        cuotasTotales: cantidadCuotas,
+        periodoInicio: periodoInicioCuotas,
+      });
+      const next = clone(db);
+      next.config.gastosEnCuotas = [...(next.config.gastosEnCuotas || []), plan];
+      const scheduled = generateInstallmentExpenses({
+        plans: next.config.gastosEnCuotas,
+        expenses: next.gastos,
+        currentPeriod: getPeriod(),
+      });
+      next.gastos = scheduled.expenses;
+      mutate(next);
+      setConcepto("");
+      setMonto("");
+      setCantidadCuotas("2");
+      setPeriodoInicioCuotas(hoyISO().slice(0, 7));
+      setCategoria("otros");
+      setErrorCuotas("");
+      setSheet(false);
+    } catch (error) {
+      setErrorCuotas(error.message);
+    }
+  }
+
+  function detenerCuotas(planId) {
+    const next = clone(db);
+    next.config.gastosEnCuotas = (next.config.gastosEnCuotas || []).map((plan) =>
+      plan.id === planId ? { ...plan, activo: false } : plan
+    );
+    mutate(next);
   }
 
   function borrar(g) {
@@ -4362,6 +4456,9 @@ function AdminGastos({ db, mutate }) {
   const total = gastosFiltrados.reduce(
     (s, gasto) => s + (Number(gasto.monto) || 0),
     0
+  );
+  const planesEnCuotas = (db.config.gastosEnCuotas || []).slice().sort(
+    (a, b) => String(a.periodoInicio).localeCompare(String(b.periodoInicio))
   );
   const resumenPorCategoria = useMemo(
     () =>
@@ -4427,9 +4524,19 @@ function AdminGastos({ db, mutate }) {
             </div>
           </div>
 
-          <Btn variant="accent" icon={Plus} onClick={() => setSheet(true)}>
-            Gasto
-          </Btn>
+          <div className="flex flex-col items-end gap-1.5">
+            <Btn variant="accent" icon={Plus} onClick={() => setSheet("simple")}>
+              Gasto
+            </Btn>
+            <button
+              type="button"
+              onClick={() => { setErrorCuotas(""); setSheet("cuotas"); }}
+              className="text-[10px] font-bold"
+              style={{ color: C.accentSoft }}
+            >
+              + En cuotas
+            </button>
+          </div>
         </div>
       </Card>
 
@@ -4455,6 +4562,40 @@ function AdminGastos({ db, mutate }) {
           </button>
         ))}
       </div>
+
+      {planesEnCuotas.length > 0 && (
+        <Card className="mb-4">
+          <div className="text-xs font-extrabold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
+            Gastos en cuotas
+          </div>
+          <div className="flex flex-col gap-2">
+            {planesEnCuotas.map((plan) => {
+              const progreso = installmentPlanProgress(plan, db.gastos);
+              return (
+                <div key={plan.id} className="rounded-xl px-3 py-2" style={{ background: C.soft }}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-bold truncate">{plan.concepto}</div>
+                      <div className="text-[10px]" style={{ color: C.muted }}>
+                        {formatMoney(plan.montoCuota)} por mes · {progreso.generated}/{progreso.total} cuotas registradas
+                      </div>
+                    </div>
+                    {plan.activo !== false && !progreso.completed ? (
+                      <button type="button" onClick={() => detenerCuotas(plan.id)} className="text-[10px] font-bold flex-shrink-0" style={{ color: C.danger }}>
+                        Detener
+                      </button>
+                    ) : (
+                      <Badge tone={progreso.completed ? "success" : "muted"}>
+                        {progreso.completed ? "Completado" : "Detenido"}
+                      </Badge>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
 
       {resumenPorCategoria.length > 0 && (
         <Card className="mb-4">
@@ -4550,9 +4691,14 @@ function AdminGastos({ db, mutate }) {
                           <Badge tone={categoriaDeGasto(g.categoria).tone}>
                             {categoriaDeGasto(g.categoria).label}
                           </Badge>
+                          {g.cuotaPlanId && (
+                            <Badge tone="muted">
+                              Cuota {g.cuotaNumero}/{g.cuotasTotales}
+                            </Badge>
+                          )}
                         </div>
                         <div className="text-[10px] mt-0.5" style={{ color: C.mutedLight }}>
-                          Gasto registrado el {fechaLegible(g.fecha)}
+                          {g.cuotaPlanId ? "Generado por un gasto en cuotas" : `Gasto registrado el ${fechaLegible(g.fecha)}`}
                         </div>
                       </div>
 
@@ -4563,15 +4709,17 @@ function AdminGastos({ db, mutate }) {
                         >
                           -{formatMoney(g.monto)}
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmDel(g)}
-                          className="w-8 h-8 rounded-lg flex items-center justify-center active:scale-95"
-                          style={{ background: C.dangerBg }}
-                          aria-label={`Eliminar gasto ${g.concepto}`}
-                        >
-                          <Trash2 size={14} color={C.danger} />
-                        </button>
+                        {!g.cuotaPlanId && (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDel(g)}
+                            className="w-8 h-8 rounded-lg flex items-center justify-center active:scale-95"
+                            style={{ background: C.dangerBg }}
+                            aria-label={`Eliminar gasto ${g.concepto}`}
+                          >
+                            <Trash2 size={14} color={C.danger} />
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -4583,7 +4731,7 @@ function AdminGastos({ db, mutate }) {
       )}
 
       {sheet && (
-        <Sheet title="Nuevo gasto" onClose={() => setSheet(false)} closeOnBackdrop={false}>
+        <Sheet title={sheet === "cuotas" ? "Nuevo gasto en cuotas" : "Nuevo gasto"} onClose={() => setSheet(false)} closeOnBackdrop={false}>
           <Field label="Concepto">
             <Input
               value={concepto}
@@ -4609,7 +4757,7 @@ function AdminGastos({ db, mutate }) {
               ))}
             </select>
           </Field>
-          <Field label="Monto">
+          <Field label={sheet === "cuotas" ? "Monto de cada cuota" : "Monto"}>
             <Input
               type="number"
               inputMode="decimal"
@@ -4619,17 +4767,43 @@ function AdminGastos({ db, mutate }) {
               placeholder="0"
             />
           </Field>
-          <Card style={{ background: C.bg, border: "none" }} className="mb-3">
+          {sheet === "cuotas" ? <>
+            <Field label="Cantidad de cuotas">
+              <Input
+                type="number"
+                inputMode="numeric"
+                min="1"
+                value={cantidadCuotas}
+                onChange={(e) => setCantidadCuotas(e.target.value)}
+                placeholder="Ej: 6"
+              />
+            </Field>
+            <Field label="Mes de la primera cuota">
+              <Input
+                type="month"
+                value={periodoInicioCuotas}
+                onChange={(e) => setPeriodoInicioCuotas(e.target.value)}
+              />
+            </Field>
+            <Card style={{ background: C.bg, border: "none" }} className="mb-3">
+              <div className="text-[10px]" style={{ color: C.muted }}>
+                Se registra una cuota por mes desde el mes elegido. Las siguientes se generan automáticamente al abrir la app, sin duplicarse.
+              </div>
+            </Card>
+          </> : <Card style={{ background: C.bg, border: "none" }} className="mb-3">
             <div className="text-[10px] font-bold uppercase" style={{ color: C.muted }}>
               Fecha
             </div>
             <div className="text-sm font-bold mt-0.5">
               {diaSemanaHoy()} {fechaLegible(hoyISO())}
             </div>
-          </Card>
+          </Card>}
+          {errorCuotas && sheet === "cuotas" && (
+            <div className="text-xs font-semibold mb-2" style={{ color: C.danger }}>{errorCuotas}</div>
+          )}
           <div className="flex gap-2 mt-2">
             <Btn variant="ghost" full onClick={() => setSheet(false)}>Cancelar</Btn>
-            <Btn full onClick={guardar}>Guardar</Btn>
+            <Btn full onClick={sheet === "cuotas" ? guardarCuotas : guardar}>Guardar</Btn>
           </div>
         </Sheet>
       )}
@@ -8706,6 +8880,17 @@ export default function App() {
 
     pendientes.forEach((clientId) => renovacionesMensualesEnCurso.current.add(`${renewal.period}-${clientId}`));
     mutate({ ...db, clientes: renewal.clients, subscriptions: renewal.subscriptions });
+  }, [authUser?.uid, loading, db, mutate]);
+
+  useEffect(() => {
+    if (!esSesionAutenticada(authUser) || loading) return;
+    const scheduled = generateInstallmentExpenses({
+      plans: db.config.gastosEnCuotas || [],
+      expenses: db.gastos,
+      currentPeriod: getPeriod(),
+    });
+    if (!scheduled.generated.length) return;
+    mutate({ ...db, gastos: scheduled.expenses });
   }, [authUser?.uid, loading, db, mutate]);
 
   async function iniciarSesion(email, password) {
