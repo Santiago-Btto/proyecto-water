@@ -38,6 +38,25 @@ describe("dashboard calendar filters", () => {
     ).toBe(false);
   });
 
+  it("uses Monday through Sunday when the business starts its week on Monday", () => {
+    expect(
+      isDashboardDateInRange({
+        date: "2026-08-03",
+        range: "semana",
+        currentDate: "2026-08-09",
+        weekStartsOn: "monday",
+      })
+    ).toBe(true);
+    expect(
+      isDashboardDateInRange({
+        date: "2026-08-02",
+        range: "semana",
+        currentDate: "2026-08-09",
+        weekStartsOn: "monday",
+      })
+    ).toBe(false);
+  });
+
   it("includes the final day of the current month only", () => {
     expect(
       isDashboardDateInRange({

@@ -9,7 +9,7 @@ function parseLocalDate(iso) {
     : null;
 }
 
-export function isDashboardDateInRange({ date, range, currentDate }) {
+export function isDashboardDateInRange({ date, range, currentDate, weekStartsOn = "sunday" }) {
   const recordDate = parseLocalDate(date);
   const today = parseLocalDate(currentDate);
   if (!recordDate || !today) return false;
@@ -21,7 +21,10 @@ export function isDashboardDateInRange({ date, range, currentDate }) {
   if (range !== "semana") return false;
 
   const weekStart = new Date(today);
-  weekStart.setDate(today.getDate() - today.getDay());
+  const offset = weekStartsOn === "monday"
+    ? (today.getDay() + 6) % 7
+    : today.getDay();
+  weekStart.setDate(today.getDate() - offset);
   const weekEnd = new Date(weekStart);
   weekEnd.setDate(weekStart.getDate() + 6);
 

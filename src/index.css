@@ -8,3 +8,16 @@ html, body, #root {
   height: 100%;
   overscroll-behavior: none;
 }
+
+.app-screen {
+  height: 100vh;
+  height: 100dvh;
+  min-height: 100svh;
+  overflow: hidden;
+}
+
+.bottom-navigation {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  position: relative;
+  z-index: 10;
+}

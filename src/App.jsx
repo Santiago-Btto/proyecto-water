@@ -122,6 +122,7 @@ const CATEGORIAS_GASTO = [
 const DEFAULT_CONFIG = {
   adminPin: "",
   repartidores: [],
+  inicioSemana: "domingo",
 
   precios: {
     b20: 0,
@@ -778,8 +779,8 @@ async function migrarEnvasesClientesSiHaceFalta() {
 function Screen({ children }) {
   return (
     <div
+      className="app-screen"
       style={{
-        height: "100vh",
         maxWidth: 460,
         margin: "0 auto",
         background: C.bg,
@@ -1375,7 +1376,7 @@ function AdminApp({ db, mutate, onLogout, offline }) {
         {tab === "suscripciones" && <AdminSuscripciones db={db} mutate={mutate} />}
         {tab === "ajustes" && <AdminAjustes db={db} mutate={mutate} />}
       </div>
-      <div className="flex-shrink-0 flex" style={{ background: C.surface, borderTop: `1px solid ${C.border}` }}>
+      <div className="bottom-navigation flex-shrink-0 flex" style={{ background: C.surface, borderTop: `1px solid ${C.border}` }}>
         {tabs.map((t) => {
           const active = tab === t.key;
           const Icon = t.icon;
@@ -1623,6 +1624,7 @@ function AdminDashboard({ db, mutate }) {
         date: fecha,
         range: rango,
         currentDate: hoy,
+        weekStartsOn: db.config.inicioSemana,
       });
     }
 
@@ -1639,7 +1641,7 @@ function AdminDashboard({ db, mutate }) {
             (b.fecha || "").localeCompare(a.fecha || "") ||
             (b.timestamp || 0) - (a.timestamp || 0)
         ),
-    [db.visitas, rango, fechaSeleccionada, hoy]
+    [db.visitas, db.config.inicioSemana, rango, fechaSeleccionada, hoy]
   );
 
   const gastosFiltrados = useMemo(
@@ -1652,7 +1654,7 @@ function AdminDashboard({ db, mutate }) {
             (b.fecha || "").localeCompare(a.fecha || "") ||
             (b.timestamp || 0) - (a.timestamp || 0)
         ),
-    [db.gastos, rango, fechaSeleccionada, hoy]
+    [db.gastos, db.config.inicioSemana, rango, fechaSeleccionada, hoy]
   );
 
   const pagosAbonosFiltrados = useMemo(
@@ -1666,7 +1668,7 @@ function AdminDashboard({ db, mutate }) {
         .sort((a, b) =>
           (b.reciboPago?.fecha || "").localeCompare(a.reciboPago?.fecha || "")
         ),
-    [db.subscriptions, rango, fechaSeleccionada, hoy]
+    [db.subscriptions, db.config.inicioSemana, rango, fechaSeleccionada, hoy]
   );
 
   const entregasAbonosFiltradas = useMemo(
@@ -1762,7 +1764,7 @@ const totalBultosVendidos = PRODUCTOS.reduce(
     rango === "hoy"
       ? "Hoy"
       : rango === "semana"
-      ? "Semana (domingo a sábado)"
+      ? `Semana (${db.config.inicioSemana === "lunes" ? "lunes a domingo" : "domingo a sábado"})`
       : rango === "mes"
       ? "Este mes"
       : rango === "todo"
@@ -4346,9 +4348,10 @@ function AdminGastos({ db, mutate }) {
           date: gasto.fecha,
           range: rango,
           currentDate: fechaActual,
+          weekStartsOn: db.config.inicioSemana,
         });
       }),
-    [db.gastos, rango, fechaActual]
+    [db.gastos, db.config.inicioSemana, rango, fechaActual]
   );
   const etiquetaRango = {
     hoy: "Hoy",
@@ -4700,6 +4703,12 @@ function AdminAjustes({ db, mutate }) {
     setPinMsg("PIN actualizado ✓");
   }
 
+  function cambiarInicioSemana(inicioSemana) {
+    const next = clone(db);
+    next.config.inicioSemana = inicioSemana;
+    mutate(next);
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <div>
@@ -4733,6 +4742,33 @@ function AdminAjustes({ db, mutate }) {
           <div className="flex gap-2 mt-2">
             <Input value={nuevoRep} onChange={(e) => setNuevoRep(e.target.value)} placeholder="Nombre del repartidor" />
             <Btn onClick={agregarRepartidor} icon={Plus}>Agregar</Btn>
+          </div>
+        </Card>
+      </div>
+
+      <div>
+        <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>Semana</div>
+        <Card>
+          <div className="text-xs mb-3" style={{ color: C.muted }}>
+            Define qué días incluye el filtro Semana en resúmenes, gastos y abonos.
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {["domingo", "lunes"].map((inicioSemana) => {
+              const activo = (db.config.inicioSemana || "domingo") === inicioSemana;
+              return <button
+                key={inicioSemana}
+                type="button"
+                onClick={() => cambiarInicioSemana(inicioSemana)}
+                className="rounded-xl px-3 py-2.5 text-xs font-bold"
+                style={{
+                  background: activo ? C.primary : C.soft,
+                  color: activo ? "#fff" : C.ink,
+                  border: `1px solid ${activo ? C.primary : C.border}`,
+                }}
+              >
+                {inicioSemana === "domingo" ? "Domingo a sábado" : "Lunes a domingo"}
+              </button>;
+            })}
           </div>
         </Card>
       </div>
@@ -4999,7 +5035,7 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
 
       {vista !== "recorrido" && (
         <div
-          className="flex-shrink-0 flex"
+          className="bottom-navigation flex-shrink-0 flex"
           style={{ background: C.surface, borderTop: `1px solid ${C.border}` }}
         >
           {[
