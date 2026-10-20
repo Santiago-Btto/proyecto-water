@@ -20,6 +20,7 @@ import { firebaseAuth, firestore, COLLECTION } from "./firebaseConfig";
 import { applyDeliveryVisitMutation, submitVisit, totalStreetDebt } from "./operationalIntegrity";
 import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, getPeriod, recordSubscriptionPayment, renewMonthlySubscriptions, splitX20Delivery, subscriptionMetrics, subscriptionPeriodMetrics, subscriptionUsageHistory, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
 import { isDashboardDateInRange } from "./dashboardCalendarFilters";
+import { MENDOZA_DEPARTMENTS, isMendozaDepartment } from "./mendozaDepartments";
 import { summarizeClientsWithDebt } from "./clientDebtSummary";
 import {
   createInstallmentPlan,
@@ -2637,10 +2638,11 @@ function ClienteForm({
         envasesPermanentes: envasesPermanentesDe(initial),
         envasesExtra: envasesExtraDe(initial),
         maquinaFrioCalor: initial.maquinaFrioCalor ?? false,
+        departamento: isMendozaDepartment(initial.departamento) ? initial.departamento : "",
       };
     }
     return {
-      nombre: "", direccion: "", telefono: "", notas: "",
+      nombre: "", direccion: "", departamento: "", telefono: "", notas: "",
       diasVisita: [], repartidorId: repartidores[0]?.id || "",
       envasesPermanentes: envasesVacio(), envasesExtra: envasesVacio(),
       maquinaFrioCalor: false, deudaAcumulada: 0, orden: "", activo: true,
@@ -2687,6 +2689,19 @@ function ClienteForm({
     <div>
       <Field label="Nombre *"><Input value={f.nombre} onChange={(e) => setF({ ...f, nombre: e.target.value })} placeholder="Ej: Familia Gómez" /></Field>
       <Field label="Dirección *"><Input value={f.direccion} onChange={(e) => setF({ ...f, direccion: e.target.value })} placeholder="Calle 123" /></Field>
+      <Field label="Departamento (Mendoza)">
+        <select
+          value={f.departamento}
+          onChange={(e) => setF({ ...f, departamento: e.target.value })}
+          className="w-full rounded-xl px-3 py-2.5 text-sm outline-none"
+          style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.ink }}
+        >
+          <option value="">Sin asignar</option>
+          {MENDOZA_DEPARTMENTS.map((departamento) => (
+            <option key={departamento} value={departamento}>{departamento}</option>
+          ))}
+        </select>
+      </Field>
       <Field label="Teléfono"><Input value={f.telefono} onChange={(e) => setF({ ...f, telefono: e.target.value })} placeholder="Ej: 261 555 5555" inputMode="tel" /></Field>
       <Field label="Día(s) de visita *">
         <DayPills
