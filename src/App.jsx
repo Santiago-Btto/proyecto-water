@@ -789,7 +789,6 @@ function Screen({ children }) {
     <div
       className="app-screen"
       style={{
-        maxWidth: 460,
         margin: "0 auto",
         background: C.bg,
         display: "flex",
@@ -1375,7 +1374,7 @@ function AdminApp({ db, mutate, onLogout, offline }) {
           </div>
         }
       />
-      <div className="flex-1 overflow-y-auto px-4 py-4">
+      <div className="app-content flex-1 overflow-y-auto px-4 py-4">
         {tab === "inicio" && <AdminDashboard db={db} mutate={mutate} />}
         {tab === "clientes" && <AdminClientes db={db} mutate={mutate} />}
         {tab === "historial" && <AdminHistorial db={db} mutate={mutate} />}
@@ -5189,7 +5188,7 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
         }
       />
 
-      <div className="flex-1 overflow-y-auto px-4 py-4">
+      <div className="app-content flex-1 overflow-y-auto px-4 py-4">
         {vista === "inicio" && (
           <RepartidorInicio
             deHoy={deHoy}

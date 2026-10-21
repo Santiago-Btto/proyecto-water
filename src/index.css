@@ -10,6 +10,8 @@ html, body, #root {
 }
 
 .app-screen {
+  width: 100%;
+  max-width: 460px;
   height: 100vh;
   height: 100dvh;
   min-height: 100svh;
@@ -20,4 +22,30 @@ html, body, #root {
   padding-bottom: env(safe-area-inset-bottom, 0px);
   position: relative;
   z-index: 10;
+}
+
+@media (min-width: 700px) {
+  .app-screen {
+    max-width: 900px;
+  }
+
+  .app-content {
+    padding: 24px;
+  }
+
+  .bottom-navigation button {
+    padding-top: 14px;
+    padding-bottom: 14px;
+  }
+}
+
+@media (min-width: 1100px) {
+  .app-screen {
+    max-width: 1040px;
+  }
+
+  .app-content {
+    padding-left: 32px;
+    padding-right: 32px;
+  }
 }
