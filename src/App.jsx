@@ -22,6 +22,7 @@ import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionS
 import { isDashboardDateInRange } from "./dashboardCalendarFilters";
 import { MENDOZA_DEPARTMENTS, isMendozaDepartment } from "./mendozaDepartments";
 import { summarizeClientsWithDebt } from "./clientDebtSummary";
+import { chargeableVisitTotal, clientSpecialPriceEntries, isComplimentaryVisit, resolveClientUnitPrice, savedSpecialPrices } from "./specialPricing";
 import {
   createInstallmentPlan,
   generateInstallmentExpenses,
@@ -288,6 +289,14 @@ function formatMoney(n) {
   } catch {
     return "$" + val.toFixed(0);
   }
+}
+function resumenPreciosEspeciales(cliente) {
+  return clientSpecialPriceEntries(cliente)
+    .map(([key, precio]) => {
+      const producto = PRODUCTOS.find((item) => item.key === key);
+      return `${producto?.label || key}: ${precio === 0 ? "sin cargo" : formatMoney(precio)}`;
+    })
+    .join(" · ");
 }
 function clone(o) {
   return JSON.parse(JSON.stringify(o));
@@ -2464,7 +2473,7 @@ const totalBultosVendidos = PRODUCTOS.reduce(
                         </div>
 
                         {v.vendio ? (
-                          <Badge tone="success">{formatMoney(v.total)}</Badge>
+                          <Badge tone="success">{isComplimentaryVisit(v) ? "Sin cargo" : formatMoney(v.total)}</Badge>
                         ) : (
                           <Badge tone="muted">No vendió</Badge>
                         )}
@@ -2626,6 +2635,7 @@ function ClienteForm({
   initial,
   repartidores,
   clientes = [],
+  precios = {},
   onSave,
   onCancel,
   isAdmin,
@@ -2651,6 +2661,8 @@ function ClienteForm({
   const [ubicacionesPorDia, setUbicacionesPorDia] = useState({});
   const [mostrarSaldoPendiente, setMostrarSaldoPendiente] =
   useState(() => Number(initial?.deudaAcumulada || 0) > 0);
+  const [preciosEspecialesActivos, setPreciosEspecialesActivos] =
+    useState(() => clientSpecialPriceEntries(initial).length > 0);
     const [extrasEditadosManualmente, setExtrasEditadosManualmente] =
     useState(false);
 
@@ -2659,8 +2671,12 @@ function ClienteForm({
     if (!f.direccion.trim()) return setError("Ingresá la dirección.");
     if (f.diasVisita.length === 0) return setError("Elegí al menos un día de visita.");
     if (isAdmin && !f.repartidorId) return setError("Asigná un repartidor.");
+    if (isAdmin && preciosEspecialesActivos && Object.values(f.preciosEspeciales || {}).some(
+      (valor) => valor !== "" && (!Number.isFinite(Number(valor)) || Number(valor) < 0)
+    )) return setError("Los precios especiales deben ser $0 o importes positivos.");
     onSave({
       ...f,
+      ...(isAdmin && { preciosEspeciales: savedSpecialPrices(f, preciosEspecialesActivos) }),
       _ubicacionesPorDia: f.diasVisita.map((dia) => ({
         dia,
         ubicacion:
@@ -2763,6 +2779,72 @@ function ClienteForm({
             {repartidores.map((r) => <option key={r.id} value={r.id}>{r.nombre}</option>)}
           </select>
         </Field>
+      )}
+      {isAdmin && (
+        <div className="mb-3">
+          <div className="text-xs font-semibold mb-1" style={{ color: C.muted }}>
+            ¿Precios especiales?
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              aria-pressed={preciosEspecialesActivos}
+              onClick={() => setPreciosEspecialesActivos(true)}
+              className="flex-1 py-2 rounded-xl font-bold text-sm"
+              style={{ background: preciosEspecialesActivos ? C.primary : C.bg, color: preciosEspecialesActivos ? "#fff" : C.muted }}
+            >
+              Sí
+            </button>
+            <button
+              type="button"
+              aria-pressed={!preciosEspecialesActivos}
+              onClick={() => setPreciosEspecialesActivos(false)}
+              className="flex-1 py-2 rounded-xl font-bold text-sm"
+              style={{ background: !preciosEspecialesActivos ? C.primary : C.bg, color: !preciosEspecialesActivos ? "#fff" : C.muted }}
+            >
+              No
+            </button>
+            </div>
+          {preciosEspecialesActivos && (
+            <Card className="mt-2" style={{ background: C.accentSoft }}>
+              <div className="text-xs mb-3" style={{ color: C.muted }}>
+                Dejá vacío para cobrar el precio normal. Escribí 0 si se entrega gratis. Solo cambia las próximas visitas.
+              </div>
+              <div className="flex flex-col gap-3">
+                {PRODUCTOS.map((producto) => (
+                  <div key={producto.key} className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold">{producto.label}</div>
+                      <div className="text-[10px]" style={{ color: C.muted }}>
+                        Normal: {formatMoney(precios[producto.key])}
+                      </div>
+                    </div>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      inputMode="numeric"
+                      aria-label={`Precio especial de ${producto.label}`}
+                      value={f.preciosEspeciales?.[producto.key] ?? ""}
+                      onChange={(e) => {
+                        const valor = e.target.value;
+                        setF((actual) => {
+                          const preciosEspeciales = { ...(actual.preciosEspeciales || {}) };
+                          if (valor === "") delete preciosEspeciales[producto.key];
+                          else preciosEspeciales[producto.key] = valor;
+                          return { ...actual, preciosEspeciales };
+                        });
+                      }}
+                      placeholder="Normal"
+                      className="w-24 rounded-xl px-2 py-2 text-sm text-right outline-none"
+                      style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}
+                    />
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+        </div>
       )}
       <Field label="¿Tiene máquina de frío/calor?">
         <div className="flex gap-2">
@@ -2980,6 +3062,7 @@ function AdminClientes({ db, mutate }) {
   const [detalleId, setDetalleId] = useState(null);
   const [ordenLista, setOrdenLista] = useState("nombre");
   const [mostrarDeudores, setMostrarDeudores] = useState(false);
+  const [mostrarEspeciales, setMostrarEspeciales] = useState(false);
   const [diasAbiertos, setDiasAbiertos] = useState(
     () => new Set([diaSemanaHoy()])
   );
@@ -3024,6 +3107,9 @@ function AdminClientes({ db, mutate }) {
     : null;
 
   const { clients: clientesConDeuda, total: totalDeudas } = summarizeClientsWithDebt(db.clientes);
+  const clientesEspeciales = db.clientes
+    .filter((cliente) => clientSpecialPriceEntries(cliente).length > 0)
+    .sort((a, b) => a.nombre.localeCompare(b.nombre));
 
 function guardarCliente(f) {
   const next = clone(db);
@@ -3214,6 +3300,7 @@ function guardarCliente(f) {
               initial={sheet === "nuevo" ? null : sheet}
               repartidores={db.config.repartidores}
               clientes={db.clientes}
+              precios={db.config.precios}
               isAdmin
               onSave={guardarCliente}
               onCancel={() => setSheet(null)}
@@ -3287,6 +3374,45 @@ function guardarCliente(f) {
           )}
         </Card>
       )}
+
+      <Card className="mb-3" style={{ background: C.accentSoft }}>
+          <button
+            type="button"
+            onClick={() => setMostrarEspeciales((abierto) => !abierto)}
+            className="w-full flex items-center justify-between gap-3 text-left"
+          >
+            <div>
+              <div className="text-xs font-extrabold uppercase tracking-wide" style={{ color: C.primary }}>
+                Clientes con precios especiales
+              </div>
+              <div className="text-[10px] mt-0.5" style={{ color: C.muted }}>
+                {clientesEspeciales.length} cliente{clientesEspeciales.length !== 1 ? "s" : ""} · Tocá para ver o configurar
+              </div>
+            </div>
+            <ChevronRight size={18} color={C.primary} style={{ transform: mostrarEspeciales ? "rotate(90deg)" : "none" }} />
+          </button>
+          {mostrarEspeciales && (
+            <div className="mt-3 pt-2 flex flex-col gap-2" style={{ borderTop: `1px solid ${C.border}` }}>
+              {clientesEspeciales.length === 0 && (
+                <div className="text-xs" style={{ color: C.muted }}>
+                  Todavía no hay precios especiales. Abrí un cliente, tocá Editar y configurá los productos que correspondan.
+                </div>
+              )}
+              {clientesEspeciales.map((cliente) => (
+                <button
+                  key={cliente.id}
+                  type="button"
+                  onClick={() => setDetalleId(cliente.id)}
+                  className="w-full rounded-xl px-3 py-2 text-left"
+                  style={{ background: C.surface, border: `1px solid ${C.border}` }}
+                >
+                  <div className="text-sm font-bold">{cliente.nombre}</div>
+                  <div className="text-[10px]" style={{ color: C.muted }}>{resumenPreciosEspeciales(cliente)}</div>
+                </button>
+              ))}
+            </div>
+          )}
+      </Card>
 
       <div className="flex items-center gap-2 mb-3">
         <span className="text-xs font-semibold mr-1" style={{ color: C.muted }}>
@@ -3563,6 +3689,7 @@ function guardarCliente(f) {
             initial={sheet === "nuevo" ? null : sheet}
             repartidores={db.config.repartidores}
             clientes={db.clientes}
+            precios={db.config.precios}
             isAdmin
             onSave={guardarCliente}
             onCancel={() => setSheet(null)}
@@ -3721,6 +3848,9 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
           {totalEnvasesPrestados(envasesPermanentesDe(cliente)) > 0 && <Badge tone="accent">Permanentes: {textoEnvasesPrestados(envasesPermanentesDe(cliente))}</Badge>}
           {totalEnvasesPrestados(envasesExtraDe(cliente)) > 0 && <Badge tone="warning">Extra: {textoEnvasesPrestados(envasesExtraDe(cliente))}</Badge>}
           {cliente.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
+          {clientSpecialPriceEntries(cliente).length > 0 && (
+            <Badge tone="accent">Precios especiales: {resumenPreciosEspeciales(cliente)}</Badge>
+          )}
         </div>
       </Card>
 
@@ -3751,12 +3881,12 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
                   <Card key={v.id}>
                     <div className="flex items-center justify-between">
                       <div className="text-xs font-bold" style={{ color: C.muted }}>{fechaLegible(v.fecha)}</div>
-                      {v.vendio ? <Badge tone="success">{formatMoney(v.total)}</Badge> : <Badge tone="muted">No vendió</Badge>}
+                      {v.vendio ? <Badge tone="success">{isComplimentaryVisit(v) ? "Sin cargo" : formatMoney(v.total)}</Badge> : <Badge tone="muted">No vendió</Badge>}
                     </div>
                     {v.vendio && (
                       <div className="text-xs mt-1">
                         {v.items.filter((it) => it.cantidad > 0).map((it) => `${it.cantidad}× ${PRODUCTOS.find((p) => p.key === it.tipo)?.corto}`).join(", ")}
-                        {" · "}{({ efectivo: "Efectivo", mercadopago: "Mercado Pago", deuda: "Fiado" })[v.metodoPago]}
+                        {v.metodoPago && <> · {({ efectivo: "Efectivo", mercadopago: "Mercado Pago", deuda: "Fiado" })[v.metodoPago]}</>}
                       </div>
                     )}
                     {v.deudaCobrada > 0 && <div className="text-xs mt-0.5" style={{ color: C.success }}>Cobró deuda vieja: {formatMoney(v.deudaCobrada)}</div>}
@@ -4186,7 +4316,7 @@ function AdminHistorial({ db, mutate }) {
                     {v.vendio ? (
                       <div className="text-xs mt-1">
                         {(v.items || []).filter((it) => it.cantidad > 0).map((it) => `${it.cantidad}× ${PRODUCTOS.find((p) => p.key === it.tipo)?.corto}`).join(", ")}
-                        {" — "}<span className="font-mono font-bold">{formatMoney(v.total)}</span>
+                        {" — "}<span className="font-mono font-bold">{isComplimentaryVisit(v) ? "Sin cargo" : formatMoney(v.total)}</span>
                       </div>
                     ) : (
                       <div className="text-xs mt-1" style={{ color: C.mutedLight }}>No vendió{v.notas ? " · " + v.notas : ""}</div>
@@ -6902,6 +7032,10 @@ function ClienteVisitaCard({
               <Badge tone="accent">Abono activo</Badge>
             )}
 
+            {clientSpecialPriceEntries(cliente).length > 0 && (
+              <Badge tone="accent">Precio especial</Badge>
+            )}
+
             {cliente.notas && <Badge tone="muted">Nota</Badge>}
           </div>
 
@@ -7028,8 +7162,7 @@ const deudaBase = Number(cliente.deudaAcumulada) || 0;
         // Al editar conservamos el precio que tenía la visita original.
         precioUnitario:
           anterior?.precioUnitario ??
-          precios[p.key] ??
-          0,
+          resolveClientUnitPrice(cliente, p.key, precios[p.key]),
       };
     })
   );
@@ -7260,8 +7393,9 @@ useEffect(() => {
           ),
         }
       : currentSubscription;
-  const quotaPreview = splitX20Delivery({ quantity: b20Quantity, subscription: subscriptionParaCorreccion, unitPrice: precios.b20 });
-  const quotaFeedback = deliveryQuotaFeedback({ quantity: b20Quantity, subscription: subscriptionParaCorreccion, unitPrice: precios.b20, mutationError: errorStock });
+  const precioB20Visita = items.find((item) => item.tipo === "b20")?.precioUnitario || 0;
+  const quotaPreview = splitX20Delivery({ quantity: b20Quantity, subscription: subscriptionParaCorreccion, unitPrice: precioB20Visita });
+  const quotaFeedback = deliveryQuotaFeedback({ quantity: b20Quantity, subscription: subscriptionParaCorreccion, unitPrice: precioB20Visita, mutationError: errorStock });
   // Sin un abono activo ambos ids serían `undefined`. No hay que tratar eso
   // como una coincidencia: una visita normal no tiene atribución de abono.
   const attributedPreviously =
@@ -7279,10 +7413,7 @@ useEffect(() => {
         cantidadX20: attributedPreviously + quotaPreview.covered,
       }
     : quotaPreview.attribution;
-  const totalVentaNormal = Math.max(
-    0,
-    total - b20Quantity * (Number(precios.b20) || 0) + quotaPreview.ordinaryAmount
-  );
+  const totalVentaNormal = chargeableVisitTotal(items, quotaPreview.covered);
   const tieneOtrosProductos = items.some(
     (item) => item.tipo !== "b20" && Number(item.cantidad) > 0
   );
@@ -7569,6 +7700,16 @@ deudaCobrada: deudaCobradaFinal,
         items: visita.items,
         total: visita.total,
         subscriptionAttribution: visita.subscriptionAttribution,
+        freeProductKeys: [
+          ...new Set([
+            ...clientSpecialPriceEntries(cliente)
+              .filter(([, precio]) => precio === 0)
+              .map(([key]) => key),
+            ...(visitaInicial?.items || [])
+              .filter((item) => Number(item.cantidad) > 0 && Number(item.precioUnitario) === 0)
+              .map((item) => item.tipo),
+          ]),
+        ],
       },
       save: () => onGuardar(visita),
       setPending: setGuardando,
@@ -7861,7 +8002,7 @@ deudaCobrada: deudaCobradaFinal,
 
                                 {v.vendio ? (
                                   <Badge tone="success">
-                                    {formatMoney(v.total || 0)}
+                                    {isComplimentaryVisit(v) ? "Sin cargo" : formatMoney(v.total || 0)}
                                   </Badge>
                                 ) : (
                                   <Badge tone="muted">No vendió</Badge>
@@ -8212,10 +8353,12 @@ deudaCobrada: deudaCobradaFinal,
                           color: C.mutedLight,
                         }}
                       >
-                        {formatMoney(
-                          precios[p.key] || 0
-                        )}{" "}
-                        c/u
+                        {Number(items[idx].precioUnitario) === 0
+                          ? "Sin cargo"
+                          : `${formatMoney(items[idx].precioUnitario)} c/u`}
+                        {clientSpecialPriceEntries(cliente).some(([key]) => key === p.key) && (
+                          <span style={{ color: C.primary }}> · precio especial</span>
+                        )}
                       </div>}
                     </div>
 
@@ -8245,7 +8388,15 @@ deudaCobrada: deudaCobradaFinal,
             </span>
           </div>}
 
-          {(!modoAbono || tieneVentaNormalEnAbono) && <Field label={modoAbono ? "Cobrar excedente y productos extra" : "Forma de pago"}>
+          {registraVenta && totalVentaNormal === 0 && (
+            <div className="text-xs font-bold mb-3" style={{ color: C.success }}>
+              {modoAbono && !tieneVentaNormalEnAbono
+                ? "Entrega cubierta por abono"
+                : "Entrega sin cargo · no hay importe para cobrar ni fiar"}
+            </div>
+          )}
+
+          {registraVenta && totalVentaNormal > 0 && <Field label={modoAbono ? "Cobrar excedente y productos extra" : "Forma de pago"}>
             <div className="flex gap-2">
               {[
                 [
@@ -8290,7 +8441,7 @@ deudaCobrada: deudaCobradaFinal,
             </div>
           </Field>}
 
-          {(!modoAbono || tieneVentaNormalEnAbono) && metodoPagoFinal !== "deuda" && (
+          {registraVenta && totalVentaNormal > 0 && metodoPagoFinal !== "deuda" && (
             <Field
               label="Monto pagado ahora"
               hint={

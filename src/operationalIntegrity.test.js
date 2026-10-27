@@ -31,6 +31,27 @@ describe("isValidSale", () => {
     ).toBe(false);
   });
 
+  it("accepts a free delivery explicitly configured for that client", () => {
+    expect(isValidSale({
+      vendio: true,
+      items: [{ tipo: "b20", cantidad: 1, precioUnitario: 0 }],
+      total: 0,
+      freeProductKeys: ["b20"],
+    })).toBe(true);
+  });
+
+  it("does not allow an unconfigured free product to slip into a zero-total sale", () => {
+    expect(isValidSale({
+      vendio: true,
+      items: [
+        { tipo: "b20", cantidad: 1, precioUnitario: 0 },
+        { tipo: "sifon", cantidad: 1, precioUnitario: 0 },
+      ],
+      total: 0,
+      freeProductKeys: ["b20"],
+    })).toBe(false);
+  });
+
   it("accepts a sale with a positive item and total", () => {
     expect(
       isValidSale({

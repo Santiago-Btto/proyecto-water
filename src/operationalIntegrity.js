@@ -1,16 +1,18 @@
-export function isValidSale({ vendio, items = [], total, subscriptionAttribution }) {
+export function isValidSale({ vendio, items = [], total, subscriptionAttribution, freeProductKeys = [] }) {
   if (!vendio) return true;
 
   if (Number(subscriptionAttribution?.cantidadX20) > 0) return true;
 
-  return (
-    items.some((item) => Number(item.cantidad) > 0) &&
-    Number(total) > 0
+  const delivered = items.filter((item) => Number(item.cantidad) > 0);
+  if (delivered.length === 0) return false;
+  if (Number(total) > 0) return true;
+  return Number(total) === 0 && delivered.every(
+    (item) => freeProductKeys.includes(item.tipo) && Number(item.precioUnitario) === 0
   );
 }
 
 const INVALID_SALE_ERROR =
-  "La venta necesita al menos un producto con cantidad y un total mayor a $0.";
+  "La entrega necesita al menos un producto con cantidad y un total válido. Para entregar sin cargo, configurá el precio especial del cliente en $0.";
 const SAVE_ERROR = "No se pudo guardar la visita. Intentá nuevamente.";
 const CONNECTION_ERROR =
   "No se pudo guardar la visita. Revisá la conexión antes de reintentar.";
