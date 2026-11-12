@@ -17,8 +17,8 @@ import {
   signOut,
 } from "firebase/auth";
 import { firebaseAuth, firestore, COLLECTION } from "./firebaseConfig";
-import { applyDeliveryVisitMutation, submitVisit, totalStreetDebt } from "./operationalIntegrity";
-import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, getPeriod, recordSubscriptionPayment, renewMonthlySubscriptions, splitX20Delivery, subscriptionMetrics, subscriptionPeriodMetrics, subscriptionUsageHistory, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
+import { applyDeliveryVisitMutation, deleteDeliveryVisitMutation, submitVisit, totalStreetDebt } from "./operationalIntegrity";
+import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, getPeriod, recordSubscriptionPayment, renewMonthlySubscriptions, resolveClientSubscriptionForPeriod, splitX20Delivery, subscriptionMetrics, subscriptionPeriodMetrics, subscriptionUsageHistory, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
 import { isDashboardDateInRange } from "./dashboardCalendarFilters";
 import { MENDOZA_DEPARTMENTS, isMendozaDepartment } from "./mendozaDepartments";
 import { summarizeClientsWithDebt } from "./clientDebtSummary";
@@ -1320,7 +1320,13 @@ function AdminSuscripciones({ db, mutate }) {
     <Card><div className="font-bold text-sm mb-2">Resumen de suscripciones · {periodoActual}</div><div className="text-xs" style={{ color: C.muted }}>Pagado {formatMoney(metrics.paidTotal)} · Pendiente {formatMoney(metrics.pendingTotal)} · Vencido {formatMoney(metrics.overdueTotal)} · Cupo restante {metrics.remainingTotal}</div><div className="text-[10px] mt-2" style={{ color: C.muted }}>Los abonos se renuevan automáticamente al comenzar cada mes.</div></Card>
     {(db.clientes || []).filter((client) => client.maquinaFrioCalor).map((client) => {
       const summary = client.subscriptionSummary;
-      const current = (db.subscriptions || []).find((item) => item.id === summary?.subscriptionId);
+      const current =
+        resolveClientSubscriptionForPeriod({
+          client,
+          subscriptions: db.subscriptions || [],
+          period: periodoActual,
+        }) ||
+        (db.subscriptions || []).find((item) => item.id === summary?.subscriptionId);
       const view = clientSubscriptionSummaryView({ client, subscription: current });
       const selectable = canSelectSubscription({ client, subscriptions: db.subscriptions || [] });
       const puedeCorregir = current && !current.reciboPago && Number(current.cantidadConsumida || 0) === 0;
@@ -1624,7 +1630,7 @@ function AdminDashboard({ db, mutate }) {
   }
 
   function guardarCorreccion(visita) {
-    const result = applyDeliveryVisitMutation({ state: db, visit, mutate });
+    const result = applyDeliveryVisitMutation({ state: db, visit: visita, mutate });
     if (result.ok) setVisitaEditandoId(null);
     return result;
   }
@@ -4049,41 +4055,7 @@ function AdminHistorial({ db, mutate }) {
   }
 
   function borrarVisita(v) {
-    const next = clone(db);
-    const deltaExtras = calcularDeltaExtras(v);
-    const deltaStock = calcularDeltaStockEnvases(v);
-
-    next.visitas = next.visitas.filter((x) => x.id !== v.id);
-    const ci = next.clientes.findIndex((c) => c.id === v.clienteId);
-    if (ci >= 0) {
-      next.clientes[ci].deudaAcumulada = Math.max(
-  0,
-  (next.clientes[ci].deudaAcumulada || 0) -
-    (v.ajusteDeudaManual || 0) -
-    (v.deudaGenerada || 0) +
-    (v.deudaCobrada || 0)
-);
-
-      next.clientes[ci].envasesExtra = aplicarDeltaEnvases(
-        envasesExtraDe(next.clientes[ci]),
-        deltaExtras,
-        -1
-      );
-
-      next.clientes[ci].envasesPermanentes = aplicarRetiroPermanentes(
-        envasesPermanentesDe(next.clientes[ci]),
-        v.permanentesRetirados,
-        -1
-      );
-
-      delete next.clientes[ci].envasesPrestados;
-    }
-
-    if (db.config.stockActivo) {
-      moverStockRepartidor(v.repartidorId, deltaStock, -1);
-    }
-
-    mutate(next);
+    deleteDeliveryVisitMutation({ state: db, visitId: v.id, mutate });
     setConfirmDel(null);
   }
 
@@ -7119,14 +7091,20 @@ function VisitaSheet({
 }) {
   const permanentes = envasesPermanentesDe(cliente);
   const saldoActual = envasesExtraDe(cliente);
-  // Al editar una venta existente, respetamos el tipo de esa venta. Un
-  // cliente puede tener un abono hoy y, aun así, una venta normal anterior.
-  const subscriptionIdParaVisita = visitaInicial
-    ? visitaInicial.subscriptionAttribution?.subscriptionId || null
-    : cliente.subscriptionSummary?.subscriptionId || null;
-  const tieneAbonoActivo = subscriptions.some(
-    (subscription) => subscription.id === subscriptionIdParaVisita
-  );
+  const periodoVisita = (visitaInicial?.fecha || hoyISO()).slice(0, 7);
+  const subscriptionPorAtribucion = visitaInicial?.subscriptionAttribution?.subscriptionId
+    ? subscriptions.find(
+        (subscription) =>
+          subscription.id === visitaInicial.subscriptionAttribution.subscriptionId
+      ) || null
+    : null;
+  const subscriptionDelPeriodo = resolveClientSubscriptionForPeriod({
+    client: cliente,
+    subscriptions,
+    period: visitaInicial?.subscriptionAttribution?.periodo || periodoVisita,
+  });
+  const currentSubscription = subscriptionPorAtribucion || subscriptionDelPeriodo;
+  const tieneAbonoActivo = !!currentSubscription;
   // Deuda que tenía el cliente ANTES de esta visita.
 const deudaBase = Number(cliente.deudaAcumulada) || 0;
 
@@ -7376,9 +7354,6 @@ useEffect(() => {
 }, [extrasPrestados, extrasRetirados, tieneAbonoActivo]);
 
   const total = totalPedido(items);
-  const currentSubscription = subscriptions.find(
-    (subscription) => subscription.id === subscriptionIdParaVisita
-  ) || null;
   const modoAbono = tieneAbonoActivo;
   const b20Quantity = Number(items.find((item) => item.tipo === "b20")?.cantidad) || 0;
   const cantidadAtribuidaOriginal =
@@ -7639,8 +7614,8 @@ const ajusteDeudaManual =
       clienteId: cliente.id,
       clienteNombre: cliente.nombre,
       repartidorId: cliente.repartidorId,
-      fecha: hoyISO(),
-      diaSemana: diaSemanaHoy(),
+      fecha: visitaInicial?.fecha || hoyISO(),
+      diaSemana: visitaInicial?.diaSemana || diaSemanaHoy(),
       vendio: registraVenta,
       items: registraVenta ? items.map((item) => item.tipo === "b20" ? { ...item, cantidad: quotaPreview.excess } : item) : [],
       subscriptionAttribution: subscriptionAttributionFinal,
@@ -8911,7 +8886,22 @@ export default function App() {
 });
   const [connError, setConnError] = useState(null);
   const [offline, setOffline] = useState(typeof navigator !== "undefined" ? !navigator.onLine : false);
-  const renovacionesMensualesEnCurso = useRef(new Set());
+  const [periodoRevision, setPeriodoRevision] = useState(() => getPeriod());
+
+  useEffect(() => {
+    function verificarCambioDeMes() {
+      const actual = getPeriod();
+      setPeriodoRevision((previo) => (previo === actual ? previo : actual));
+    }
+    const interval = setInterval(verificarCambioDeMes, 60_000);
+    window.addEventListener("focus", verificarCambioDeMes);
+    document.addEventListener("visibilitychange", verificarCambioDeMes);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", verificarCambioDeMes);
+      document.removeEventListener("visibilitychange", verificarCambioDeMes);
+    };
+  }, []);
 
   useEffect(() => {
     const onOnline = () => setOffline(false);
@@ -9039,13 +9029,21 @@ export default function App() {
     const renewal = renewMonthlySubscriptions({
       clients: db.clientes,
       subscriptions: db.subscriptions,
+      visits: db.visitas,
     });
-    const pendientes = renewal.renewed.filter((clientId) => !renovacionesMensualesEnCurso.current.has(`${renewal.period}-${clientId}`));
-    if (!pendientes.length) return;
+    const huboCambios =
+      renewal.renewed.length > 0 ||
+      (renewal.synced && renewal.synced.length > 0) ||
+      (renewal.reconciledVisits && renewal.reconciledVisits.length > 0);
+    if (!huboCambios) return;
 
-    pendientes.forEach((clientId) => renovacionesMensualesEnCurso.current.add(`${renewal.period}-${clientId}`));
-    mutate({ ...db, clientes: renewal.clients, subscriptions: renewal.subscriptions });
-  }, [authUser?.uid, loading, db, mutate]);
+    mutate({
+      ...db,
+      clientes: renewal.clients,
+      subscriptions: renewal.subscriptions,
+      visitas: renewal.visits,
+    });
+  }, [authUser?.uid, loading, db, mutate, periodoRevision]);
 
   useEffect(() => {
     if (!esSesionAutenticada(authUser) || loading) return;

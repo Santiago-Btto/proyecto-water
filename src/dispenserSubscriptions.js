@@ -122,9 +122,53 @@ function createMonthlyRenewal(subscription, period, now) {
   };
 }
 
+function isSameSubscriptionSummary(currentSummary, nextSummary) {
+  if (!currentSummary || !nextSummary) return false;
+  return (
+    currentSummary.subscriptionId === nextSummary.subscriptionId &&
+    currentSummary.periodo === nextSummary.periodo &&
+    currentSummary.estadoPago === nextSummary.estadoPago &&
+    currentSummary.promocionId === nextSummary.promocionId &&
+    currentSummary.promocionNombre === nextSummary.promocionNombre &&
+    Number(currentSummary.cantidadConsumida || 0) === Number(nextSummary.cantidadConsumida || 0) &&
+    Number(currentSummary.cantidadRestante || 0) === Number(nextSummary.cantidadRestante || 0)
+  );
+}
+
+export function resolveClientSubscriptionForPeriod({
+  client,
+  subscriptions = [],
+  period,
+  now = new Date(),
+} = {}) {
+  if (!client?.id) return null;
+  const targetPeriod = String(period || getPeriod(now));
+  const clientSubscriptions = subscriptions
+    .filter((subscription) => subscription?.clienteId === client.id)
+    .slice()
+    .sort((a, b) => String(b.periodo || "").localeCompare(String(a.periodo || "")));
+
+  const exact = clientSubscriptions.find((subscription) => subscription.periodo === targetPeriod);
+  if (exact) return exact;
+
+  if (!client.maquinaFrioCalor) return null;
+
+  const latestPrior = clientSubscriptions.find(
+    (subscription) => String(subscription.periodo || "") < targetPeriod
+  );
+  if (!latestPrior) return null;
+
+  return createMonthlyRenewal(latestPrior, targetPeriod, now);
+}
+
 // El reinicio es deliberadamente local: se ejecuta al abrir o sincronizar la app
 // desde el día 1 y Firestore conserva tanto el mes anterior como sus entregas.
-export function renewMonthlySubscriptions({ clients = [], subscriptions = [], now = new Date() } = {}) {
+export function renewMonthlySubscriptions({
+  clients = [],
+  subscriptions = [],
+  visits = [],
+  now = new Date(),
+} = {}) {
   const period = getPeriod(now);
   const subscriptionsByClient = new Map();
   subscriptions.forEach((subscription) => {
@@ -134,27 +178,202 @@ export function renewMonthlySubscriptions({ clients = [], subscriptions = [], no
   });
 
   const renewed = [];
+  const synced = [];
+  const reconciledVisits = [];
   const nextSubscriptions = subscriptions.slice();
-  const nextClients = clients.map((client) => {
-    if (!client?.maquinaFrioCalor || !client.subscriptionSummary?.subscriptionId) return client;
-    const clientSubscriptions = subscriptionsByClient.get(client.id) || [];
-    const current = clientSubscriptions.find((subscription) => subscription.periodo === period);
-    if (current) {
-      const summary = subscriptionSummaryFrom(current);
-      return client.subscriptionSummary?.subscriptionId === summary.subscriptionId ? client : { ...client, subscriptionSummary: summary };
+  const nextVisits = visits.slice();
+
+  function reconcileClientVisits(client, subscription) {
+    let updatedSub = subscription;
+    let debtDelta = 0;
+
+    const attributedTotal = nextVisits
+      .filter(
+        (visit) =>
+          visit?.subscriptionAttribution?.subscriptionId === subscription.id
+      )
+      .reduce(
+        (sum, visit) =>
+          sum + (Number(visit.subscriptionAttribution?.cantidadX20) || 0),
+        0
+      );
+
+    if (
+      attributedTotal > 0 &&
+      (Number(updatedSub.cantidadConsumida) || 0) < attributedTotal
+    ) {
+      const quota = Number(updatedSub.cantidadX20) || 0;
+      const syncedConsumed = quota > 0 ? Math.min(quota, attributedTotal) : attributedTotal;
+      updatedSub = {
+        ...updatedSub,
+        cantidadConsumida: syncedConsumed,
+        cantidadRestante: Math.max(0, quota - syncedConsumed),
+      };
     }
 
-    const selected = clientSubscriptions.find((subscription) => subscription.id === client.subscriptionSummary.subscriptionId);
-    const latest = selected || clientSubscriptions.slice().sort((a, b) => String(b.periodo).localeCompare(String(a.periodo)))[0];
+    const candidateIndices = nextVisits
+      .map((visit, index) => ({ visit, index }))
+      .filter(
+        ({ visit }) =>
+          visit?.clienteId === client.id &&
+          String(visit.fecha || "").slice(0, 7) === period &&
+          visit.vendio &&
+          !visit.subscriptionAttribution &&
+          (visit.items || []).some(
+            (item) => item.tipo === "b20" && Number(item.cantidad) > 0
+          )
+      )
+      .sort(
+        (a, b) =>
+          String(a.visit.fecha || "").localeCompare(String(b.visit.fecha || "")) ||
+          (Number(a.visit.timestamp) || 0) - (Number(b.visit.timestamp) || 0)
+      );
+
+    candidateIndices.forEach(({ index }) => {
+      const visit = nextVisits[index];
+      const b20Item = (visit.items || []).find((item) => item.tipo === "b20");
+      const requested = Number(b20Item?.cantidad) || 0;
+      const unitPrice = Number(b20Item?.precioUnitario) || 0;
+      const split = splitX20Delivery({
+        quantity: requested,
+        subscription: updatedSub,
+        unitPrice,
+      });
+      if (split.covered <= 0) return;
+
+      const cantidadConsumida =
+        (Number(updatedSub.cantidadConsumida) || 0) + split.covered;
+      updatedSub = {
+        ...updatedSub,
+        cantidadConsumida,
+        cantidadRestante: Math.max(
+          0,
+          (Number(updatedSub.cantidadX20) || 0) - cantidadConsumida
+        ),
+      };
+
+      const nextItems = (visit.items || []).map((item) =>
+        item.tipo === "b20" ? { ...item, cantidad: split.excess } : item
+      );
+      const nextTotal = nextItems.reduce(
+        (sum, item) =>
+          sum + (Number(item.cantidad) || 0) * (Number(item.precioUnitario) || 0),
+        0
+      );
+      const previousDebtGenerated = Number(visit.deudaGenerada) || 0;
+      const previousOrdinaryPaid = Math.max(
+        0,
+        (Number(visit.total) || 0) - previousDebtGenerated
+      );
+
+      let nextDebtGenerated = 0;
+      let nextOrdinaryPaid = 0;
+      if (visit.metodoPago === "deuda") {
+        nextDebtGenerated = nextTotal;
+      } else if (previousDebtGenerated === 0) {
+        nextOrdinaryPaid = nextTotal;
+      } else {
+        nextOrdinaryPaid = Math.min(nextTotal, previousOrdinaryPaid);
+        nextDebtGenerated = Math.max(0, nextTotal - nextOrdinaryPaid);
+      }
+
+      debtDelta += nextDebtGenerated - previousDebtGenerated;
+      const nextMetodoPago = nextTotal > 0 ? visit.metodoPago : null;
+      const nextPagos = {};
+      if (
+        nextTotal > 0 &&
+        nextMetodoPago &&
+        nextMetodoPago !== "deuda" &&
+        nextOrdinaryPaid > 0
+      ) {
+        nextPagos[nextMetodoPago] = nextOrdinaryPaid;
+      }
+      if ((Number(visit.deudaCobrada) || 0) > 0 && visit.metodoDeuda) {
+        nextPagos[visit.metodoDeuda] =
+          (nextPagos[visit.metodoDeuda] || 0) + Number(visit.deudaCobrada);
+      }
+
+      nextVisits[index] = {
+        ...visit,
+        items: nextItems,
+        total: nextTotal,
+        metodoPago: nextMetodoPago,
+        pagos: nextPagos,
+        deudaGenerada: nextDebtGenerated,
+        subscriptionAttribution: split.attribution,
+      };
+      reconciledVisits.push(visit.id);
+    });
+
+    return { subscription: updatedSub, debtDelta };
+  }
+
+  const nextClients = clients.map((client) => {
+    if (!client?.maquinaFrioCalor) return client;
+    const clientSubscriptions = subscriptionsByClient.get(client.id) || [];
+    if (!client.subscriptionSummary?.subscriptionId && clientSubscriptions.length === 0) {
+      return client;
+    }
+
+    const current = clientSubscriptions.find((subscription) => subscription.periodo === period);
+    if (current) {
+      const reconciled = reconcileClientVisits(client, current);
+      if (reconciled.subscription !== current) {
+        const subIdx = nextSubscriptions.findIndex((item) => item.id === current.id);
+        if (subIdx >= 0) nextSubscriptions[subIdx] = reconciled.subscription;
+      }
+      const summary = subscriptionSummaryFrom(reconciled.subscription);
+      const nextDebt = Math.max(
+        0,
+        (Number(client.deudaAcumulada) || 0) + reconciled.debtDelta
+      );
+      if (
+        reconciled.subscription === current &&
+        isSameSubscriptionSummary(client.subscriptionSummary, summary) &&
+        nextDebt === (Number(client.deudaAcumulada) || 0)
+      ) {
+        return client;
+      }
+      synced.push(client.id);
+      return {
+        ...client,
+        deudaAcumulada: nextDebt,
+        subscriptionSummary: summary,
+      };
+    }
+
+    const latestByPeriod = clientSubscriptions
+      .slice()
+      .sort((a, b) => String(b.periodo || "").localeCompare(String(a.periodo || "")))[0];
+    const selected = clientSubscriptions.find(
+      (subscription) => subscription.id === client.subscriptionSummary?.subscriptionId
+    );
+    const latest = latestByPeriod || selected;
     if (!latest || String(latest.periodo) >= period) return client;
 
-    const renewal = createMonthlyRenewal(latest, period, now);
-    nextSubscriptions.push(renewal);
+    const initialRenewal = createMonthlyRenewal(latest, period, now);
+    const reconciled = reconcileClientVisits(client, initialRenewal);
+    nextSubscriptions.push(reconciled.subscription);
     renewed.push(client.id);
-    return { ...client, subscriptionSummary: subscriptionSummaryFrom(renewal) };
+    return {
+      ...client,
+      deudaAcumulada: Math.max(
+        0,
+        (Number(client.deudaAcumulada) || 0) + reconciled.debtDelta
+      ),
+      subscriptionSummary: subscriptionSummaryFrom(reconciled.subscription),
+    };
   });
 
-  return { period, clients: nextClients, subscriptions: nextSubscriptions, renewed };
+  return {
+    period,
+    clients: nextClients,
+    subscriptions: nextSubscriptions,
+    visits: nextVisits,
+    renewed,
+    synced,
+    reconciledVisits,
+  };
 }
 
 export function subscriptionUsageHistory({ clientId, subscriptions = [], visits = [] } = {}) {
@@ -166,9 +385,17 @@ export function subscriptionUsageHistory({ clientId, subscriptions = [], visits 
         .filter((visit) => visit.subscriptionAttribution?.subscriptionId === subscription.id)
         .map((visit) => ({ fecha: visit.fecha, cantidadX20: Number(visit.subscriptionAttribution?.cantidadX20) || 0 }))
         .sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
+      const deliveredTotal = deliveries.reduce((total, delivery) => total + delivery.cantidadX20, 0);
+      const quota = Number(subscription.cantidadX20) || 0;
+      const cantidadConsumida = Math.max(
+        Number(subscription.cantidadConsumida) || 0,
+        quota > 0 ? Math.min(quota, deliveredTotal) : deliveredTotal
+      );
       return {
         ...subscription,
-        deliveredTotal: deliveries.reduce((total, delivery) => total + delivery.cantidadX20, 0),
+        cantidadConsumida,
+        cantidadRestante: Math.max(0, quota - cantidadConsumida),
+        deliveredTotal,
         deliveries,
       };
     });

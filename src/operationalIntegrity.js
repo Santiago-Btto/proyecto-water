@@ -1,3 +1,8 @@
+import {
+  resolveClientSubscriptionForPeriod,
+  subscriptionSummaryFrom,
+} from "./dispenserSubscriptions";
+
 export function isValidSale({ vendio, items = [], total, subscriptionAttribution, freeProductKeys = [] }) {
   if (!vendio) return true;
 
@@ -179,13 +184,7 @@ function subscriptionSummary(subscriptions, clientId) {
     .filter((item) => item.clienteId === clientId)
     .sort((a, b) => String(b.periodo || "").localeCompare(String(a.periodo || "")))[0];
   if (!subscription) return null;
-  return {
-    subscriptionId: subscription.id,
-    periodo: subscription.periodo,
-    estadoPago: subscription.estadoPago,
-    cantidadConsumida: subscription.cantidadConsumida || 0,
-    cantidadRestante: subscription.cantidadRestante ?? Math.max(0, (Number(subscription.cantidadX20) || 0) - (Number(subscription.cantidadConsumida) || 0)),
-  };
+  return subscriptionSummaryFrom(subscription);
 }
 
 export function applyDeliveryVisitMutation({ state, visit, mutate }) {
@@ -205,6 +204,22 @@ export function applyDeliveryVisitMutation({ state, visit, mutate }) {
     const hasSubscriptionEffect = !!(previousVisit?.subscriptionAttribution || visit.subscriptionAttribution);
     let subscriptions = state.subscriptions || [];
     if (hasSubscriptionEffect) {
+      if (
+        visit.subscriptionAttribution?.subscriptionId &&
+        !subscriptions.some((item) => item.id === visit.subscriptionAttribution.subscriptionId)
+      ) {
+        const targetPeriod =
+          visit.subscriptionAttribution.periodo ||
+          String(visit.fecha || "").slice(0, 7);
+        const synthesized = resolveClientSubscriptionForPeriod({
+          client: state.clientes[clientIndex],
+          subscriptions,
+          period: targetPeriod,
+        });
+        if (synthesized && synthesized.id === visit.subscriptionAttribution.subscriptionId) {
+          subscriptions = [...subscriptions, synthesized];
+        }
+      }
       subscriptions = applySubscriptionAttribution(subscriptions, previousVisit?.subscriptionAttribution, -1);
       subscriptions = applySubscriptionAttribution(subscriptions, visit.subscriptionAttribution, 1);
     }

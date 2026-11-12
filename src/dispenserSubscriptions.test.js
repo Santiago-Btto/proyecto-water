@@ -10,6 +10,7 @@ import {
   getSubscriptionStatus,
   recordSubscriptionPayment,
   renewMonthlySubscriptions,
+  resolveClientSubscriptionForPeriod,
   splitX20Delivery,
   subscriptionMetrics,
   subscriptionPeriodMetrics,
@@ -194,12 +195,329 @@ describe("monthly subscription renewal and history", () => {
     });
 
     expect(result.renewed).toEqual([]);
+    expect(result.synced).toEqual(["cliente-1"]);
     expect(result.subscriptions).toHaveLength(2);
     expect(result.clients[0].subscriptionSummary.subscriptionId).toBe(october.id);
     expect(history).toEqual([
       expect.objectContaining({ id: october.id, deliveredTotal: 1, deliveries: [expect.objectContaining({ fecha: "2026-10-02", cantidadX20: 1 })] }),
       expect.objectContaining({ id: september.id, deliveredTotal: 2, deliveries: [expect.objectContaining({ fecha: "2026-09-15", cantidadX20: 2 })] }),
     ]);
+  });
+
+  it("renews automatically even if client.subscriptionSummary was lost or stuck on an older month", () => {
+    const clientWithoutSummary = {
+      id: "cliente-1",
+      nombre: "Dani",
+      maquinaFrioCalor: true,
+      subscriptionSummary: null,
+    };
+    const august = {
+      ...september,
+      id: "cliente-1-2026-08",
+      periodo: "2026-08",
+      promocionId: "p4",
+      promocionNombre: "Plan 4",
+      cantidadX20: 4,
+    };
+    const septemberUpgraded = {
+      ...september,
+      id: "cliente-1-2026-09",
+      periodo: "2026-09",
+      promocionId: "p6",
+      promocionNombre: "Plan 6",
+      cantidadX20: 6,
+    };
+    const clientStuckInAugust = {
+      ...client,
+      subscriptionSummary: { subscriptionId: "cliente-1-2026-08", periodo: "2026-08" },
+    };
+
+    const fromMissingSummary = renewMonthlySubscriptions({
+      clients: [clientWithoutSummary],
+      subscriptions: [septemberUpgraded],
+      now: new Date("2026-10-05T10:00:00"),
+    });
+    expect(fromMissingSummary.renewed).toEqual(["cliente-1"]);
+    expect(fromMissingSummary.clients[0].subscriptionSummary).toMatchObject({
+      subscriptionId: "cliente-1-2026-10",
+      periodo: "2026-10",
+      cantidadRestante: 6,
+    });
+
+    const fromStuckSummary = renewMonthlySubscriptions({
+      clients: [clientStuckInAugust],
+      subscriptions: [august, septemberUpgraded],
+      now: new Date("2026-10-05T10:00:00"),
+    });
+    expect(fromStuckSummary.renewed).toEqual(["cliente-1"]);
+    expect(fromStuckSummary.subscriptions).toContainEqual(
+      expect.objectContaining({
+        id: "cliente-1-2026-10",
+        periodo: "2026-10",
+        cantidadX20: 6,
+        suscripcionAnteriorId: "cliente-1-2026-09",
+      })
+    );
+  });
+
+  it("resolves or synthesizes the active subscription for the visit period so deliveries never fall back to normal sales", () => {
+    const staleClient = {
+      id: "cliente-1",
+      nombre: "Dani",
+      maquinaFrioCalor: true,
+      subscriptionSummary: {
+        subscriptionId: "cliente-1-2026-09",
+        periodo: "2026-09",
+        cantidadConsumida: 4,
+        cantidadRestante: 0,
+      },
+    };
+    const exhaustedSeptember = {
+      ...september,
+      cantidadConsumida: 4,
+      cantidadRestante: 0,
+    };
+
+    const synthesizedOctober = resolveClientSubscriptionForPeriod({
+      client: staleClient,
+      subscriptions: [exhaustedSeptember],
+      period: "2026-10",
+      now: new Date("2026-10-02T12:00:00"),
+    });
+    expect(synthesizedOctober).toMatchObject({
+      id: "cliente-1-2026-10",
+      clienteId: "cliente-1",
+      periodo: "2026-10",
+      cantidadX20: 4,
+      cantidadConsumida: 0,
+      cantidadRestante: 4,
+      renovadaAutomaticamente: true,
+    });
+
+    const beforeFirstSubscription = resolveClientSubscriptionForPeriod({
+      client: staleClient,
+      subscriptions: [exhaustedSeptember],
+      period: "2026-08",
+      now: new Date("2026-08-15T12:00:00"),
+    });
+    expect(beforeFirstSubscription).toBeNull();
+  });
+
+  it("automatically reconciles a current-month b20 visit that was recorded as a normal sale before the subscription renewed", () => {
+    const clientWithOldSummary = {
+      id: "cliente-1",
+      nombre: "Cliente Abono",
+      maquinaFrioCalor: true,
+      deudaAcumulada: 7000,
+      subscriptionSummary: {
+        subscriptionId: "cliente-1-2026-10",
+        periodo: "2026-10",
+        cantidadConsumida: 4,
+        cantidadRestante: 0,
+      },
+    };
+    const octoberSub = {
+      ...september,
+      id: "cliente-1-2026-10",
+      periodo: "2026-10",
+      cantidadX20: 4,
+      cantidadConsumida: 4,
+      cantidadRestante: 0,
+    };
+    const mistakenNormalVisit = {
+      id: "visita-11-nov",
+      clienteId: "cliente-1",
+      fecha: "2026-11-11",
+      vendio: true,
+      items: [
+        { tipo: "b20", cantidad: 2, precioUnitario: 3500 },
+        { tipo: "sifon", cantidad: 0, precioUnitario: 1500 },
+      ],
+      total: 7000,
+      metodoPago: "deuda",
+      pagos: {},
+      deudaGenerada: 7000,
+      deudaCobrada: 0,
+      subscriptionAttribution: null,
+    };
+
+    const result = renewMonthlySubscriptions({
+      clients: [clientWithOldSummary],
+      subscriptions: [octoberSub],
+      visits: [mistakenNormalVisit],
+      now: new Date("2026-11-11T15:00:00"),
+    });
+
+    expect(result.renewed).toEqual(["cliente-1"]);
+    expect(result.reconciledVisits).toEqual(["visita-11-nov"]);
+    expect(result.subscriptions[1]).toMatchObject({
+      id: "cliente-1-2026-11",
+      periodo: "2026-11",
+      cantidadConsumida: 2,
+      cantidadRestante: 2,
+    });
+    expect(result.clients[0]).toMatchObject({
+      id: "cliente-1",
+      deudaAcumulada: 0,
+      subscriptionSummary: {
+        subscriptionId: "cliente-1-2026-11",
+        periodo: "2026-11",
+        cantidadConsumida: 2,
+        cantidadRestante: 2,
+      },
+    });
+    expect(result.visits[0]).toMatchObject({
+      id: "visita-11-nov",
+      total: 0,
+      metodoPago: null,
+      pagos: {},
+      deudaGenerada: 0,
+      subscriptionAttribution: {
+        subscriptionId: "cliente-1-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 2,
+      },
+    });
+    expect(result.visits[0].items.find((i) => i.tipo === "b20").cantidad).toBe(0);
+  });
+
+  it("reconciles partial quota coverage and preserves excess b20 plus other products on a cash visit", () => {
+    const clientWithOldSummary = {
+      id: "cliente-1",
+      nombre: "Cliente Abono",
+      maquinaFrioCalor: true,
+      deudaAcumulada: 0,
+      subscriptionSummary: {
+        subscriptionId: "cliente-1-2026-10",
+        periodo: "2026-10",
+      },
+    };
+    const octoberSub = {
+      ...september,
+      id: "cliente-1-2026-10",
+      periodo: "2026-10",
+      cantidadX20: 4,
+      cantidadConsumida: 4,
+      cantidadRestante: 0,
+    };
+    const mixedNormalVisit = {
+      id: "visita-mixta",
+      clienteId: "cliente-1",
+      fecha: "2026-11-11",
+      vendio: true,
+      items: [
+        { tipo: "b20", cantidad: 5, precioUnitario: 3000 },
+        { tipo: "sifon", cantidad: 1, precioUnitario: 1500 },
+      ],
+      total: 16500,
+      metodoPago: "efectivo",
+      pagos: { efectivo: 16500 },
+      deudaGenerada: 0,
+      deudaCobrada: 0,
+      subscriptionAttribution: null,
+    };
+
+    const result = renewMonthlySubscriptions({
+      clients: [clientWithOldSummary],
+      subscriptions: [octoberSub],
+      visits: [mixedNormalVisit],
+      now: new Date("2026-11-11T15:00:00"),
+    });
+
+    expect(result.reconciledVisits).toEqual(["visita-mixta"]);
+    expect(result.subscriptions[1]).toMatchObject({
+      id: "cliente-1-2026-11",
+      cantidadConsumida: 4,
+      cantidadRestante: 0,
+    });
+    expect(result.visits[0]).toMatchObject({
+      id: "visita-mixta",
+      total: 4500,
+      metodoPago: "efectivo",
+      pagos: { efectivo: 4500 },
+      deudaGenerada: 0,
+      subscriptionAttribution: {
+        subscriptionId: "cliente-1-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 4,
+      },
+    });
+    expect(result.visits[0].items.find((i) => i.tipo === "b20").cantidad).toBe(1);
+  });
+
+  it("repairs a desynchronized 0/6 counter when attributed deliveries already exist and adds any unattributed delivery from today", () => {
+    const flavia = {
+      id: "flavia",
+      nombre: "Flavia alvarez",
+      maquinaFrioCalor: true,
+      deudaAcumulada: 0,
+      subscriptionSummary: {
+        subscriptionId: "flavia-2026-11",
+        periodo: "2026-11",
+        estadoPago: "pendiente",
+        promocionId: "promo-6",
+        promocionNombre: "Abono 6 bidones",
+        cantidadConsumida: 0,
+        cantidadRestante: 6,
+      },
+    };
+    const novemberDesynced = {
+      id: "flavia-2026-11",
+      clienteId: "flavia",
+      periodo: "2026-11",
+      promocionId: "promo-6",
+      promocionNombre: "Abono 6 bidones",
+      cantidadX20: 6,
+      cantidadConsumida: 0,
+      cantidadRestante: 6,
+      precioMensual: 15000,
+      estadoPago: "pendiente",
+    };
+    const visitNov6Attributed = {
+      id: "v-nov-06",
+      clienteId: "flavia",
+      fecha: "2026-11-06",
+      vendio: true,
+      items: [{ tipo: "b20", cantidad: 0, precioUnitario: 3500 }],
+      total: 0,
+      subscriptionAttribution: {
+        subscriptionId: "flavia-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 2,
+      },
+    };
+    const visitTodayNormal = {
+      id: "v-nov-11",
+      clienteId: "flavia",
+      fecha: "2026-11-11",
+      vendio: true,
+      items: [{ tipo: "b20", cantidad: 2, precioUnitario: 3500 }],
+      total: 7000,
+      metodoPago: "efectivo",
+      pagos: { efectivo: 7000 },
+      deudaGenerada: 0,
+      subscriptionAttribution: null,
+    };
+
+    const result = renewMonthlySubscriptions({
+      clients: [flavia],
+      subscriptions: [novemberDesynced],
+      visits: [visitNov6Attributed, visitTodayNormal],
+      now: new Date("2026-11-11T18:00:00"),
+    });
+
+    expect(result.synced).toEqual(["flavia"]);
+    expect(result.reconciledVisits).toEqual(["v-nov-11"]);
+    expect(result.subscriptions[0]).toMatchObject({
+      id: "flavia-2026-11",
+      cantidadConsumida: 4,
+      cantidadRestante: 2,
+    });
+    expect(result.clients[0].subscriptionSummary).toMatchObject({
+      subscriptionId: "flavia-2026-11",
+      cantidadConsumida: 4,
+      cantidadRestante: 2,
+    });
   });
 });
 

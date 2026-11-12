@@ -287,6 +287,132 @@ describe("applyDeliveryVisitMutation", () => {
     expect(mutate.mock.calls[0][0].subscriptions[0]).toMatchObject({ cantidadConsumida: 0, cantidadRestante: 4 });
     expect(mutate.mock.calls[0][0].clientes[0].deudaAcumulada).toBe(0);
   });
+
+  it("materializes the new month subscription on the fly when saving a delivery before background renewal synced", () => {
+    const mutate = vi.fn();
+    const state = {
+      clientes: [{
+        id: "cliente-1",
+        maquinaFrioCalor: true,
+        deudaAcumulada: 0,
+        subscriptionSummary: {
+          subscriptionId: "cliente-1-2026-10",
+          periodo: "2026-10",
+          cantidadConsumida: 4,
+          cantidadRestante: 0,
+        },
+      }],
+      visitas: [],
+      stock: [],
+      subscriptions: [{
+        id: "cliente-1-2026-10",
+        clienteId: "cliente-1",
+        periodo: "2026-10",
+        promocionId: "plan-4",
+        promocionNombre: "Plan 4",
+        cantidadX20: 4,
+        cantidadConsumida: 4,
+        cantidadRestante: 0,
+        precioMensual: 12000,
+        estadoPago: "pagada",
+      }],
+      config: { stockActivo: false },
+    };
+
+    const visit = {
+      id: "visita-noviembre",
+      clienteId: "cliente-1",
+      fecha: "2026-11-11",
+      vendio: true,
+      items: [{ tipo: "b20", cantidad: 0, precioUnitario: 3500 }],
+      total: 0,
+      subscriptionAttribution: {
+        subscriptionId: "cliente-1-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 2,
+      },
+    };
+
+    expect(applyDeliveryVisitMutation({ state, visit, mutate })).toEqual({ ok: true });
+    const next = mutate.mock.calls[0][0];
+    expect(next.subscriptions).toHaveLength(2);
+    expect(next.subscriptions[1]).toMatchObject({
+      id: "cliente-1-2026-11",
+      periodo: "2026-11",
+      promocionId: "plan-4",
+      promocionNombre: "Plan 4",
+      cantidadX20: 4,
+      cantidadConsumida: 2,
+      cantidadRestante: 2,
+      renovadaAutomaticamente: true,
+    });
+    expect(next.clientes[0].subscriptionSummary).toMatchObject({
+      subscriptionId: "cliente-1-2026-11",
+      periodo: "2026-11",
+      promocionId: "plan-4",
+      promocionNombre: "Plan 4",
+      cantidadConsumida: 2,
+      cantidadRestante: 2,
+    });
+  });
+
+  it("converts a visit mistakenly saved as a normal sale into an attributed subscription delivery on edit", () => {
+    const mutate = vi.fn();
+    const mistakenNormalVisit = {
+      id: "visita-hoy",
+      clienteId: "cliente-1",
+      fecha: "2026-11-11",
+      vendio: true,
+      items: [{ tipo: "b20", cantidad: 2, precioUnitario: 3500 }],
+      total: 7000,
+      deudaGenerada: 7000,
+      subscriptionAttribution: null,
+    };
+    const state = {
+      clientes: [{
+        id: "cliente-1",
+        maquinaFrioCalor: true,
+        deudaAcumulada: 7000,
+      }],
+      visitas: [mistakenNormalVisit],
+      stock: [],
+      subscriptions: [{
+        id: "cliente-1-2026-10",
+        clienteId: "cliente-1",
+        periodo: "2026-10",
+        promocionId: "plan-4",
+        promocionNombre: "Plan 4",
+        cantidadX20: 4,
+        cantidadConsumida: 4,
+        cantidadRestante: 0,
+        precioMensual: 12000,
+        estadoPago: "pagada",
+      }],
+      config: { stockActivo: false },
+    };
+
+    const correctedVisit = {
+      ...mistakenNormalVisit,
+      items: [{ tipo: "b20", cantidad: 0, precioUnitario: 3500 }],
+      total: 0,
+      deudaGenerada: 0,
+      subscriptionAttribution: {
+        subscriptionId: "cliente-1-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 2,
+      },
+    };
+
+    expect(applyDeliveryVisitMutation({ state, visit: correctedVisit, mutate })).toEqual({ ok: true });
+    const next = mutate.mock.calls[0][0];
+    expect(next.clientes[0].deudaAcumulada).toBe(0);
+    expect(next.subscriptions[1]).toMatchObject({
+      id: "cliente-1-2026-11",
+      periodo: "2026-11",
+      cantidadConsumida: 2,
+      cantidadRestante: 2,
+    });
+  });
 });
 
 describe("totalStreetDebt", () => {
