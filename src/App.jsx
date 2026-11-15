@@ -17,7 +17,16 @@ import {
   signOut,
 } from "firebase/auth";
 import { firebaseAuth, firestore, COLLECTION } from "./firebaseConfig";
-import { applyDeliveryVisitMutation, deleteDeliveryVisitMutation, submitVisit, totalStreetDebt } from "./operationalIntegrity";
+import {
+  applyDeliveryVisitMutation,
+  deleteClientGuard,
+  deleteClientMutation,
+  deleteDeliveryVisitMutation,
+  deleteDriverGuard,
+  deleteDriverMutation,
+  submitVisit,
+  totalStreetDebt,
+} from "./operationalIntegrity";
 import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, getPeriod, recordSubscriptionPayment, renewMonthlySubscriptions, resolveClientSubscriptionForPeriod, splitX20Delivery, subscriptionMetrics, subscriptionPeriodMetrics, subscriptionUsageHistory, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
 import { isDashboardDateInRange } from "./dashboardCalendarFilters";
 import { MENDOZA_DEPARTMENTS, isMendozaDepartment } from "./mendozaDepartments";
@@ -3283,10 +3292,8 @@ function guardarCliente(f) {
 }
 
   function eliminarCliente(c) {
-    if (totalEnvasesCliente(c) > 0) return;
-    const next = clone(db);
-    next.clientes = next.clientes.filter((x) => x.id !== c.id);
-    mutate(next);
+    const result = deleteClientMutation({ state: db, clientId: c.id, mutate });
+    if (!result.ok) return;
     setConfirmDel(null);
     if (detalleId === c.id) setDetalleId(null);
   }
@@ -3707,66 +3714,77 @@ function guardarCliente(f) {
         </Sheet>
       )}
 
-      {confirmDel && (
-        <Sheet title="Eliminar cliente" onClose={() => setConfirmDel(null)}>
-          {totalEnvasesCliente(confirmDel) > 0 ? (
-            <>
-              <Card
-                style={{ background: C.warningBg, border: "none" }}
-                className="mb-3"
-              >
-                <div className="text-sm font-bold" style={{ color: C.warning }}>
-                  No se puede eliminar este cliente.
-                </div>
-                <div className="text-xs mt-1" style={{ color: C.muted }}>
-                  La empresa todavía tiene envases en poder de este cliente.
-                </div>
-                <div
-                  className="font-bold text-sm mt-2"
-                  style={{ color: C.danger }}
+      {confirmDel && (() => {
+        const guardCliente = deleteClientGuard(confirmDel);
+        return (
+          <Sheet title="Eliminar cliente" onClose={() => setConfirmDel(null)}>
+            {!guardCliente.canDelete ? (
+              <>
+                <Card
+                  style={{ background: C.warningBg, border: "none" }}
+                  className="mb-3"
                 >
-                  {totalEnvasesPrestados(
-                    envasesPermanentesDe(confirmDel)
-                  ) > 0 && (
-                    <div>
-                      Permanentes: {textoEnvasesPrestados(
-                        envasesPermanentesDe(confirmDel)
-                      )}
-                    </div>
-                  )}
-                  {totalEnvasesPrestados(envasesExtraDe(confirmDel)) > 0 && (
-                    <div>
-                      Extras: {textoEnvasesPrestados(envasesExtraDe(confirmDel))}
-                    </div>
-                  )}
-                </div>
-                <div className="text-xs mt-2" style={{ color: C.muted }}>
-                  Primero registrá la devolución de los envases y después vas a
-                  poder eliminarlo.
-                </div>
-              </Card>
-              <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>
-                Volver
-              </Btn>
-            </>
-          ) : (
-            <>
-              <div className="text-sm mb-4">
-                ¿Seguro que querés eliminar a <b>{confirmDel.nombre}</b>? Podés
-                deshacerlo después con el botón deshacer.
-              </div>
-              <div className="flex gap-2">
+                  <div className="text-sm font-bold" style={{ color: C.warning }}>
+                    No se puede eliminar este cliente.
+                  </div>
+                  <div className="text-xs mt-1" style={{ color: C.muted }}>
+                    {guardCliente.hasDebt && guardCliente.hasContainers
+                      ? "Este cliente todavía registra saldo deudor y envases de la empresa en su poder."
+                      : guardCliente.hasDebt
+                      ? "Este cliente todavía registra un saldo deudor pendiente."
+                      : "La empresa todavía tiene envases en poder de este cliente."}
+                  </div>
+                  <div
+                    className="font-bold text-sm mt-2 space-y-1"
+                    style={{ color: C.danger }}
+                  >
+                    {guardCliente.hasDebt && (
+                      <div>
+                        Deuda pendiente: {formatMoney(guardCliente.debt)}
+                      </div>
+                    )}
+                    {totalEnvasesPrestados(
+                      envasesPermanentesDe(confirmDel)
+                    ) > 0 && (
+                      <div>
+                        Permanentes: {textoEnvasesPrestados(
+                          envasesPermanentesDe(confirmDel)
+                        )}
+                      </div>
+                    )}
+                    {totalEnvasesPrestados(envasesExtraDe(confirmDel)) > 0 && (
+                      <div>
+                        Extras: {textoEnvasesPrestados(envasesExtraDe(confirmDel))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-xs mt-2" style={{ color: C.muted }}>
+                    Primero regularizá {guardCliente.hasDebt && guardCliente.hasContainers ? "la deuda y la devolución de los envases" : guardCliente.hasDebt ? "el cobro o ajuste de la deuda" : "la devolución de los envases"} y después vas a poder eliminarlo.
+                  </div>
+                </Card>
                 <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>
-                  Cancelar
+                  Volver
                 </Btn>
-                <Btn variant="danger" full onClick={() => eliminarCliente(confirmDel)}>
-                  Eliminar
-                </Btn>
-              </div>
-            </>
-          )}
-        </Sheet>
-      )}
+              </>
+            ) : (
+              <>
+                <div className="text-sm mb-4">
+                  ¿Seguro que querés eliminar a <b>{confirmDel.nombre}</b>? Podés
+                  deshacerlo después con el botón deshacer.
+                </div>
+                <div className="flex gap-2">
+                  <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>
+                    Cancelar
+                  </Btn>
+                  <Btn variant="danger" full onClick={() => eliminarCliente(confirmDel)}>
+                    Eliminar
+                  </Btn>
+                </div>
+              </>
+            )}
+          </Sheet>
+        );
+      })()}
     </div>
   );
 }
@@ -4344,7 +4362,7 @@ function AdminHistorial({ db, mutate }) {
 
       {confirmDel && (
         <Sheet title="Eliminar visita" onClose={() => setConfirmDel(null)}>
-          <div className="text-sm mb-4">Se va a revertir el efecto en la deuda, los envases del cliente y el stock de la camioneta.</div>
+          <div className="text-sm mb-4">Se va a revertir el efecto en la deuda, los envases del cliente, el cupo del abono y el stock de la camioneta.</div>
           <div className="flex gap-2">
             <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>Cancelar</Btn>
             <Btn variant="danger" full onClick={() => borrarVisita(confirmDel)}>Eliminar</Btn>
@@ -5024,9 +5042,18 @@ function AdminAjustes({ db, mutate }) {
   const [precios, setPrecios] = useState(db.config.precios);
   const [nuevoRep, setNuevoRep] = useState("");
   const [confirmDelRep, setConfirmDelRep] = useState(null);
+  const [reasignarRepId, setReasignarRepId] = useState("");
+  const [errorDelRep, setErrorDelRep] = useState("");
   const [pinActual, setPinActual] = useState("");
   const [pinNuevo, setPinNuevo] = useState("");
   const [pinMsg, setPinMsg] = useState("");
+
+  function abrirConfirmarEliminarRepartidor(r) {
+    const otro = (db.config.repartidores || []).find((item) => item.id !== r.id);
+    setReasignarRepId(otro ? otro.id : "");
+    setErrorDelRep("");
+    setConfirmDelRep(r);
+  }
 
   function guardarPrecios() {
   const next = clone(db);
@@ -5053,10 +5080,17 @@ function AdminAjustes({ db, mutate }) {
   }
 
   function eliminarRepartidor(r) {
-    const next = clone(db);
-    next.config.repartidores = next.config.repartidores.filter((x) => x.id !== r.id);
-    next.stock = (next.stock || []).filter((x) => x.id !== r.id);
-    mutate(next);
+    const result = deleteDriverMutation({
+      state: db,
+      driverId: r.id,
+      reassignToDriverId: reasignarRepId,
+      mutate,
+    });
+    if (!result.ok) {
+      setErrorDelRep(result.error || "No se pudo eliminar el repartidor.");
+      return;
+    }
+    setErrorDelRep("");
     setConfirmDelRep(null);
   }
 
@@ -5103,7 +5137,7 @@ function AdminAjustes({ db, mutate }) {
           {db.config.repartidores.map((r) => (
             <div key={r.id} className="flex items-center justify-between py-1.5">
               <span className="text-sm font-semibold">{r.nombre}</span>
-              <button onClick={() => setConfirmDelRep(r)}><Trash2 size={15} color={C.danger} /></button>
+              <button onClick={() => abrirConfirmarEliminarRepartidor(r)}><Trash2 size={15} color={C.danger} /></button>
             </div>
           ))}
           <div className="flex gap-2 mt-2">
@@ -5164,15 +5198,92 @@ function AdminAjustes({ db, mutate }) {
         </Card>
       </div>
 
-      {confirmDelRep && (
-        <Sheet title="Eliminar repartidor" onClose={() => setConfirmDelRep(null)}>
-          <div className="text-sm mb-4">¿Eliminar a <b>{confirmDelRep.nombre}</b>? Los clientes que tenía asignados van a quedar sin repartidor.</div>
-          <div className="flex gap-2">
-            <Btn variant="ghost" full onClick={() => setConfirmDelRep(null)}>Cancelar</Btn>
-            <Btn variant="danger" full onClick={() => eliminarRepartidor(confirmDelRep)}>Eliminar</Btn>
-          </div>
-        </Sheet>
-      )}
+      {confirmDelRep && (() => {
+        const guardRep = deleteDriverGuard({
+          driverId: confirmDelRep.id,
+          stock: db.stock || [],
+          clients: db.clientes || [],
+          drivers: db.config.repartidores || [],
+        });
+        const resumenCargaCamioneta = ARTICULOS_STOCK
+          .filter((item) => (Number(guardRep.truckStock[item.key]) || 0) > 0)
+          .map((item) => `${guardRep.truckStock[item.key]}× ${item.label}`)
+          .join(" · ");
+
+        return (
+          <Sheet title="Eliminar repartidor" onClose={() => setConfirmDelRep(null)}>
+            {guardRep.hasTruckStock ? (
+              <>
+                <Card
+                  style={{ background: C.warningBg, border: "none" }}
+                  className="mb-3"
+                >
+                  <div className="text-sm font-bold" style={{ color: C.warning }}>
+                    No se puede eliminar a {confirmDelRep.nombre}.
+                  </div>
+                  <div className="text-xs mt-1" style={{ color: C.muted }}>
+                    Todavía figura con stock arriba de su camioneta. Si lo eliminás ahora, esos bultos pasarían como disponibles al galpón.
+                  </div>
+                  <div className="font-bold text-sm mt-2" style={{ color: C.danger }}>
+                    En camioneta: {resumenCargaCamioneta}
+                  </div>
+                  <div className="text-xs mt-2" style={{ color: C.muted }}>
+                    Primero poné su camioneta en 0 desde la pestaña <b>Stock</b> y guardá los cambios.
+                  </div>
+                </Card>
+                <Btn variant="ghost" full onClick={() => setConfirmDelRep(null)}>
+                  Volver
+                </Btn>
+              </>
+            ) : (
+              <>
+                <div className="text-sm mb-3">
+                  ¿Eliminar a <b>{confirmDelRep.nombre}</b>?
+                </div>
+                {guardRep.assignedClientsCount > 0 && (
+                  <Card style={{ background: C.bg, border: `1px solid ${C.border}` }} className="mb-3">
+                    <div className="text-xs font-bold mb-1" style={{ color: C.ink }}>
+                      Tiene {guardRep.assignedClientsCount} cliente{guardRep.assignedClientsCount !== 1 ? "s" : ""} asignado{guardRep.assignedClientsCount !== 1 ? "s" : ""}
+                    </div>
+                    {guardRep.requiresReassignment ? (
+                      <Field label="Reasignar sus clientes a:">
+                        <select
+                          value={reasignarRepId}
+                          onChange={(e) => {
+                            setReasignarRepId(e.target.value);
+                            setErrorDelRep("");
+                          }}
+                          className="w-full rounded-xl px-3 py-2.5 text-sm font-semibold"
+                          style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.ink }}
+                        >
+                          {guardRep.otherDrivers.map((otro) => (
+                            <option key={otro.id} value={otro.id}>
+                              {otro.nombre}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                    ) : (
+                      <div className="text-xs" style={{ color: C.muted }}>
+                        Como no hay otro repartidor cargado, sus clientes van a quedar sin repartidor asignado.
+                      </div>
+                    )}
+                  </Card>
+                )}
+                {errorDelRep && (
+                  <div className="text-xs font-semibold mb-3" style={{ color: C.danger }}>
+                    {errorDelRep}
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <Btn variant="ghost" full onClick={() => setConfirmDelRep(null)}>Cancelar</Btn>
+                  <Btn variant="danger" full onClick={() => eliminarRepartidor(confirmDelRep)}>Eliminar</Btn>
+                </div>
+              </>
+            )}
+          </Sheet>
+        );
+      })()}
     </div>
   );
 }

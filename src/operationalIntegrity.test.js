@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   applyDeliveryVisitMutation,
+  deleteClientGuard,
+  deleteClientMutation,
   deleteDeliveryVisitMutation,
+  deleteDriverGuard,
+  deleteDriverMutation,
   deriveVisitEffects,
   isValidSale,
   saveDeliveryVisit,
@@ -412,6 +416,227 @@ describe("applyDeliveryVisitMutation", () => {
       cantidadConsumida: 2,
       cantidadRestante: 2,
     });
+  });
+
+  it("restores subscription quota on delete even when the current month subscription was synthesized from the previous month", () => {
+    const mutate = vi.fn();
+    const visit = {
+      id: "visita-nov",
+      clienteId: "cliente-1",
+      fecha: "2026-11-11",
+      subscriptionAttribution: {
+        subscriptionId: "cliente-1-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 2,
+      },
+    };
+    const state = {
+      clientes: [{
+        id: "cliente-1",
+        maquinaFrioCalor: true,
+        deudaAcumulada: 0,
+      }],
+      visitas: [visit],
+      stock: [],
+      subscriptions: [{
+        id: "cliente-1-2026-10",
+        clienteId: "cliente-1",
+        periodo: "2026-10",
+        promocionId: "plan-6",
+        promocionNombre: "Abono 6 bidones",
+        cantidadX20: 6,
+        cantidadConsumida: 6,
+        cantidadRestante: 0,
+        precioMensual: 15000,
+        estadoPago: "pagada",
+      }],
+      config: { stockActivo: false },
+    };
+
+    expect(deleteDeliveryVisitMutation({ state, visitId: visit.id, mutate })).toEqual({ ok: true });
+    const next = mutate.mock.calls[0][0];
+    expect(next.visitas).toEqual([]);
+    expect(next.subscriptions[1]).toMatchObject({
+      id: "cliente-1-2026-11",
+      cantidadConsumida: 0,
+      cantidadRestante: 6,
+    });
+  });
+});
+
+describe("deleteClientGuard & deleteClientMutation", () => {
+  it("blocks deleting a client with pending debt even when they have no containers", () => {
+    const mutate = vi.fn();
+    const client = {
+      id: "cliente-deudor",
+      nombre: "Juan Pérez",
+      deudaAcumulada: 4500,
+      envasesPermanentes: { b20: 0, b12: 0, sifon: 0 },
+      envasesExtra: { b20: 0, b12: 0, sifon: 0 },
+    };
+    const guard = deleteClientGuard(client);
+    expect(guard.canDelete).toBe(false);
+    expect(guard.hasDebt).toBe(true);
+    expect(guard.debt).toBe(4500);
+    expect(guard.hasContainers).toBe(false);
+
+    const result = deleteClientMutation({
+      state: { clientes: [client] },
+      clientId: client.id,
+      mutate,
+    });
+    expect(result.ok).toBe(false);
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it("blocks deleting a client with containers and allows deleting when both debt and containers are zero", () => {
+    const mutate = vi.fn();
+    const withContainers = {
+      id: "c1",
+      nombre: "Con envases",
+      deudaAcumulada: 0,
+      envasesPermanentes: { b20: 2, b12: 0, sifon: 0 },
+      envasesExtra: { b20: 0, b12: 0, sifon: 1 },
+    };
+    const cleanClient = {
+      id: "c2",
+      nombre: "Al día",
+      deudaAcumulada: 0,
+      envasesPermanentes: { b20: 0, b12: 0, sifon: 0 },
+      envasesExtra: { b20: 0, b12: 0, sifon: 0 },
+    };
+
+    expect(deleteClientGuard(withContainers)).toMatchObject({
+      canDelete: false,
+      hasContainers: true,
+      hasDebt: false,
+    });
+    expect(
+      deleteClientMutation({
+        state: { clientes: [withContainers, cleanClient] },
+        clientId: "c1",
+        mutate,
+      }).ok
+    ).toBe(false);
+
+    expect(
+      deleteClientMutation({
+        state: { clientes: [withContainers, cleanClient] },
+        clientId: "c2",
+        mutate,
+      })
+    ).toEqual({ ok: true });
+    expect(mutate.mock.calls[0][0].clientes).toEqual([withContainers]);
+  });
+});
+
+describe("deleteDriverGuard & deleteDriverMutation", () => {
+  it("blocks deleting a driver who still has stock loaded in their truck", () => {
+    const mutate = vi.fn();
+    const state = {
+      config: {
+        repartidores: [
+          { id: "rep-1", nombre: "Nico" },
+          { id: "rep-2", nombre: "Santi" },
+        ],
+      },
+      stock: [{ id: "rep-1", b20: 12, b12: 0, sifon: 4, esqueletos: 0 }],
+      clientes: [],
+    };
+
+    const guard = deleteDriverGuard({
+      driverId: "rep-1",
+      stock: state.stock,
+      clients: state.clientes,
+      drivers: state.config.repartidores,
+    });
+    expect(guard.canDelete).toBe(false);
+    expect(guard.hasTruckStock).toBe(true);
+    expect(guard.truckStock).toEqual({ b20: 12, b12: 0, sifon: 4, esqueletos: 0 });
+
+    const result = deleteDriverMutation({
+      state,
+      driverId: "rep-1",
+      mutate,
+    });
+    expect(result.ok).toBe(false);
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it("requires reassigning clients when other drivers exist and reassigns them on delete", () => {
+    const mutate = vi.fn();
+    const state = {
+      config: {
+        repartidores: [
+          { id: "rep-1", nombre: "Nico" },
+          { id: "rep-2", nombre: "Santi" },
+        ],
+      },
+      stock: [{ id: "rep-1", b20: 0, b12: 0, sifon: 0, esqueletos: 0 }],
+      clientes: [
+        { id: "c1", nombre: "Ana", repartidorId: "rep-1" },
+        { id: "c2", nombre: "Luis", repartidorId: "rep-2" },
+      ],
+    };
+
+    expect(
+      deleteDriverMutation({
+        state,
+        driverId: "rep-1",
+        reassignToDriverId: "",
+        mutate,
+      }).ok
+    ).toBe(false);
+    expect(mutate).not.toHaveBeenCalled();
+
+    expect(
+      deleteDriverMutation({
+        state,
+        driverId: "rep-1",
+        reassignToDriverId: "rep-2",
+        mutate,
+      })
+    ).toEqual({ ok: true });
+
+    const next = mutate.mock.calls[0][0];
+    expect(next.config.repartidores).toEqual([{ id: "rep-2", nombre: "Santi" }]);
+    expect(next.stock).toEqual([]);
+    expect(next.clientes).toEqual([
+      { id: "c1", nombre: "Ana", repartidorId: "rep-2" },
+      { id: "c2", nombre: "Luis", repartidorId: "rep-2" },
+    ]);
+  });
+
+  it("blocks deleting a driver when only esqueletos are in the truck, and allows deleting the last driver with 0 stock by clearing client assignment", () => {
+    const mutate = vi.fn();
+    const withEsqueletos = {
+      config: { repartidores: [{ id: "rep-1", nombre: "Nico" }] },
+      stock: [{ id: "rep-1", b20: 0, b12: 0, sifon: 0, esqueletos: 3 }],
+      clientes: [{ id: "c1", nombre: "Ana", repartidorId: "rep-1" }],
+    };
+
+    expect(
+      deleteDriverMutation({
+        state: withEsqueletos,
+        driverId: "rep-1",
+        mutate,
+      }).ok
+    ).toBe(false);
+
+    const lastDriverZeroStock = {
+      config: { repartidores: [{ id: "rep-1", nombre: "Nico" }] },
+      stock: [{ id: "rep-1", b20: 0, b12: 0, sifon: 0, esqueletos: 0 }],
+      clientes: [{ id: "c1", nombre: "Ana", repartidorId: "rep-1" }],
+    };
+
+    expect(
+      deleteDriverMutation({
+        state: lastDriverZeroStock,
+        driverId: "rep-1",
+        mutate,
+      })
+    ).toEqual({ ok: true });
+    expect(mutate.mock.calls[0][0].clientes[0].repartidorId).toBe("");
   });
 });
 

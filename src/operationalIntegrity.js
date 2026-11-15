@@ -261,7 +261,32 @@ export function deleteDeliveryVisitMutation({ state, visitId, mutate }) {
     const clientIndex = state.clientes.findIndex((client) => client.id === previousVisit.clienteId);
     if (clientIndex < 0) throw new Error("Cliente no encontrado");
     const { client, stockDelta } = deriveVisitEffects({ client: state.clientes[clientIndex], previousVisit, visit: {} });
-    const subscriptions = applySubscriptionAttribution(state.subscriptions || [], previousVisit.subscriptionAttribution, -1);
+    let subscriptions = state.subscriptions || [];
+    if (
+      previousVisit.subscriptionAttribution?.subscriptionId &&
+      !subscriptions.some((item) => item.id === previousVisit.subscriptionAttribution.subscriptionId)
+    ) {
+      const targetPeriod =
+        previousVisit.subscriptionAttribution.periodo ||
+        String(previousVisit.fecha || "").slice(0, 7);
+      const synthesized = resolveClientSubscriptionForPeriod({
+        client: state.clientes[clientIndex],
+        subscriptions,
+        period: targetPeriod,
+      });
+      if (synthesized && synthesized.id === previousVisit.subscriptionAttribution.subscriptionId) {
+        const consumed = Number(previousVisit.subscriptionAttribution.cantidadX20) || 0;
+        subscriptions = [
+          ...subscriptions,
+          {
+            ...synthesized,
+            cantidadConsumida: consumed,
+            cantidadRestante: Math.max(0, (Number(synthesized.cantidadX20) || 0) - consumed),
+          },
+        ];
+      }
+    }
+    subscriptions = applySubscriptionAttribution(subscriptions, previousVisit.subscriptionAttribution, -1);
     const clientes = state.clientes.slice();
     clientes[clientIndex] = previousVisit.subscriptionAttribution
       ? { ...client, subscriptionSummary: subscriptionSummary(subscriptions, client.id) }
@@ -282,6 +307,147 @@ export function deleteDeliveryVisitMutation({ state, visitId, mutate }) {
     console.error("No se pudo borrar la visita", error);
     return { ok: false, error: "No se pudo borrar la visita. Revisá la conexión e intentá nuevamente." };
   }
+}
+
+export function deleteClientGuard(client = {}) {
+  const permanent = normalizedPermanentContainers(client);
+  const extra = normalizedExtraContainers(client);
+  const totalPermanent = RETURNABLE_PRODUCTS.reduce(
+    (sum, key) => sum + (Number(permanent[key]) || 0),
+    0
+  );
+  const totalExtra = RETURNABLE_PRODUCTS.reduce(
+    (sum, key) => sum + (Number(extra[key]) || 0),
+    0
+  );
+  const totalContainers = totalPermanent + totalExtra;
+  const debt = Math.max(0, Number(client?.deudaAcumulada ?? client?.deuda) || 0);
+  const hasContainers = totalContainers > 0;
+  const hasDebt = debt > 0;
+
+  return {
+    canDelete: !hasContainers && !hasDebt,
+    hasContainers,
+    hasDebt,
+    debt,
+    totalContainers,
+    permanentContainers: permanent,
+    extraContainers: extra,
+  };
+}
+
+export function deleteClientMutation({ state, clientId, mutate }) {
+  const client = (state?.clientes || []).find((item) => item.id === clientId);
+  if (!client) {
+    return { ok: false, error: "Cliente no encontrado" };
+  }
+  const guard = deleteClientGuard(client);
+  if (!guard.canDelete) {
+    return {
+      ok: false,
+      guard,
+      error: guard.hasDebt && guard.hasContainers
+        ? "No se puede eliminar un cliente con deuda pendiente y envases en su poder."
+        : guard.hasDebt
+        ? "No se puede eliminar un cliente con saldo deudor pendiente."
+        : "No se puede eliminar un cliente con envases en su poder.",
+    };
+  }
+
+  mutate({
+    ...state,
+    clientes: state.clientes.filter((item) => item.id !== clientId),
+  });
+  return { ok: true };
+}
+
+const TRUCK_STOCK_KEYS = ["b20", "b12", "sifon", "esqueletos"];
+
+export function deleteDriverGuard({
+  driverId,
+  stock = [],
+  clients = [],
+  drivers = [],
+}) {
+  const stockRecord = (stock || []).find((item) => item.id === driverId) || {};
+  const truckStock = Object.fromEntries(
+    TRUCK_STOCK_KEYS.map((key) => [key, Math.max(0, Number(stockRecord[key]) || 0)])
+  );
+  const totalTruckStock = TRUCK_STOCK_KEYS.reduce(
+    (sum, key) => sum + truckStock[key],
+    0
+  );
+  const hasTruckStock = totalTruckStock > 0;
+  const assignedClients = (clients || []).filter(
+    (client) => client.repartidorId === driverId
+  );
+  const otherDrivers = (drivers || []).filter((driver) => driver.id !== driverId);
+
+  return {
+    canDelete: !hasTruckStock,
+    hasTruckStock,
+    totalTruckStock,
+    truckStock,
+    assignedClientsCount: assignedClients.length,
+    otherDrivers,
+    requiresReassignment: assignedClients.length > 0 && otherDrivers.length > 0,
+  };
+}
+
+export function deleteDriverMutation({
+  state,
+  driverId,
+  reassignToDriverId = null,
+  mutate,
+}) {
+  const drivers = state?.config?.repartidores || [];
+  const guard = deleteDriverGuard({
+    driverId,
+    stock: state?.stock || [],
+    clients: state?.clientes || [],
+    drivers,
+  });
+
+  if (guard.hasTruckStock) {
+    return {
+      ok: false,
+      guard,
+      error:
+        "No se puede eliminar el repartidor mientras tenga bultos o esqueletos cargados en la camioneta.",
+    };
+  }
+
+  if (guard.requiresReassignment) {
+    const validTarget = guard.otherDrivers.some(
+      (driver) => driver.id === reassignToDriverId
+    );
+    if (!validTarget) {
+      return {
+        ok: false,
+        guard,
+        error: "Elegí a qué repartidor reasignar los clientes antes de eliminarlo.",
+      };
+    }
+  }
+
+  const nextDriverId = guard.requiresReassignment ? reassignToDriverId : "";
+  const nextClients = (state.clientes || []).map((client) =>
+    client.repartidorId === driverId
+      ? { ...client, repartidorId: nextDriverId }
+      : client
+  );
+
+  mutate({
+    ...state,
+    config: {
+      ...state.config,
+      repartidores: drivers.filter((driver) => driver.id !== driverId),
+    },
+    stock: (state.stock || []).filter((item) => item.id !== driverId),
+    clientes: nextClients,
+  });
+
+  return { ok: true };
 }
 
 export async function saveVisitAtomically({

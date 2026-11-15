@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { APP_VERSION } from "./appVersion";
 
 describe("versión de la aplicación", () => {
-  it("identifica esta publicación como la versión 1.0.7", () => {
-    expect(APP_VERSION).toBe("1.0.7");
+  it("identifica esta publicación como la versión 1.0.8", () => {
+    expect(APP_VERSION).toBe("1.0.8");
   });
 
   it("reemplaza el identificador de la publicación anterior", () => {
