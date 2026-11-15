@@ -1002,12 +1002,13 @@ function EmptyState({ icon: Icon, title, text, action }) {
 function Badge({ children, tone = "muted" }) {
   const tones = {
     muted: { bg: C.bg, fg: C.muted },
+    neutral: { bg: C.bg, fg: C.muted },
     success: { bg: C.successBg, fg: C.success },
     warning: { bg: C.warningBg, fg: C.warning },
     danger: { bg: C.dangerBg, fg: C.danger },
     accent: { bg: C.accentSoft, fg: C.primary },
   };
-  const t = tones[tone];
+  const t = tones[tone] || tones.muted;
   return (
     <span className="px-2 py-0.5 rounded-md text-xs font-bold" style={{ background: t.bg, color: t.fg }}>
       {children}
@@ -4400,11 +4401,15 @@ function AdminStock({ db, mutate }) {
     next.config.stockTotal = Object.fromEntries(
       ARTICULOS_STOCK.map((p) => [p.key, Number(total[p.key]) || 0])
     );
-    next.stock = db.config.repartidores.map((r) => ({
-      id: r.id,
-      ...stockInventarioVacio(),
-      ...(porRepartidor[r.id] || {}),
-    }));
+    next.stock = db.config.repartidores.map((r) => {
+      const actual = (db.stock || []).find((s) => s.id === r.id);
+      return {
+        ...(Array.isArray(actual?.salidasDia) ? { salidasDia: actual.salidasDia } : {}),
+        id: r.id,
+        ...stockInventarioVacio(),
+        ...(porRepartidor[r.id] || {}),
+      };
+    });
 
     mutate(next);
     setMensaje("Stock guardado ✓");
@@ -4490,7 +4495,7 @@ function AdminStock({ db, mutate }) {
             <Card key={rep.id}>
               <div className="flex items-center justify-between gap-2 mb-1">
                 <div className="font-bold text-sm">{rep.nombre}</div>
-                <Badge tone={resumen.tieneSalidaHoy ? "accent" : "neutral"}>
+                <Badge tone={resumen.tieneSalidaHoy ? "accent" : "muted"}>
                   {resumen.tieneSalidaHoy
                     ? `${resumen.salidasHoy.length} salida${resumen.salidasHoy.length !== 1 ? "s" : ""} hoy`
                     : "Sin salida registrada hoy"}
