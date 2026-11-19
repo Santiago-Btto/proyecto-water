@@ -12,5 +12,6 @@ describe("seguridad de cambios globales", () => {
     expect(app).not.toContain("onClick={redo}");
     expect(app).not.toContain("const pastRef");
     expect(app).not.toContain("function undo()");
+    expect(app).not.toContain("botón deshacer");
   });
 });

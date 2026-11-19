@@ -444,6 +444,50 @@ export function splitX20Delivery({ quantity, subscription, unitPrice }) {
   };
 }
 
+export function prepareSubscriptionVisitEdition({
+  visitaInicial = null,
+  currentSubscription = null,
+} = {}) {
+  const esEdicion = Boolean(visitaInicial);
+  const anteriorB20 = (visitaInicial?.items || []).find(
+    (it) => it.tipo === "b20"
+  );
+  const cantidadAtribuidaOriginal =
+    esEdicion &&
+    (!currentSubscription ||
+      visitaInicial?.subscriptionAttribution?.subscriptionId ===
+        currentSubscription.id)
+      ? Number(visitaInicial?.subscriptionAttribution?.cantidadX20) || 0
+      : 0;
+  const initialB20Quantity =
+    (Number(anteriorB20?.cantidad) || 0) +
+    (esEdicion
+      ? Number(visitaInicial?.subscriptionAttribution?.cantidadX20) || 0
+      : 0);
+
+  let subscriptionForCalculation = currentSubscription || null;
+  if (esEdicion && currentSubscription) {
+    const quota = Number(currentSubscription.cantidadX20) || 0;
+    const cantidadConsumida = Math.max(
+      0,
+      (Number(currentSubscription.cantidadConsumida) || 0) -
+        cantidadAtribuidaOriginal
+    );
+    subscriptionForCalculation = {
+      ...currentSubscription,
+      cantidadConsumida,
+      cantidadRestante: Math.max(0, quota - cantidadConsumida),
+    };
+  }
+
+  return {
+    esEdicion,
+    initialB20Quantity,
+    cantidadAtribuidaOriginal,
+    subscriptionForCalculation,
+  };
+}
+
 export function clientSubscriptionSummaryView({ client, subscription, now = new Date() }) {
   if (!client?.maquinaFrioCalor) return { eligible: false, state: "ineligible", label: "No elegible" };
   if (!subscription) return { eligible: true, state: "none", label: "Sin suscripción" };
@@ -472,6 +516,27 @@ export function deliveryQuotaFeedback({ quantity, subscription, unitPrice, mutat
     ordinaryAmount: split.ordinaryAmount,
     retryableError: mutationError ? "No se pudo guardar por conexión. Revisá la conexión y reintentá." : null,
   };
+}
+
+export function formatVisitProductsText(
+  visita,
+  productosCatalogo = [],
+  separator = ", "
+) {
+  const parts = [];
+  const abonoB20 = Number(visita?.subscriptionAttribution?.cantidadX20) || 0;
+  if (abonoB20 > 0) {
+    parts.push(`${abonoB20}× 20L (Abono)`);
+  }
+
+  (visita?.items || []).forEach((it) => {
+    const cantidad = Number(it?.cantidad) || 0;
+    if (cantidad <= 0) return;
+    const producto = productosCatalogo.find((p) => p.key === it.tipo);
+    parts.push(`${cantidad}× ${producto?.corto || it.tipo}`);
+  });
+
+  return parts.join(separator);
 }
 
 export function subscriptionMetrics(subscriptions = []) {

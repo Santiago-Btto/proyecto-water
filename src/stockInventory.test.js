@@ -4,6 +4,7 @@ import {
   PRODUCTOS_CARGA_CAMIONETA,
   calcularStockEnCamionetas,
   calcularStockEnGalpon,
+  combinarStockAdminConSalidas,
   registrarCargaCamioneta,
   resumenCargaRepartidorDia,
   stockInventarioVacio,
@@ -217,5 +218,56 @@ describe("carga de salida y recargas del repartidor", () => {
     expect(salida).toMatchObject({ b20: 2, b12: 0, sifon: 0 });
     expect(resumen.entregadosDesdeUltimaSalida).toEqual({ b20: 5, b12: 0, sifon: 0 });
     expect(resumen.restanteEnCamioneta).toEqual({ b20: 0, b12: 0, sifon: 0 });
+  });
+
+  it("preserva salidasDia, ultimaCargaFecha y ultimaCargaTimestamp al guardar stock desde AdminStock", () => {
+    const stockActual = registrarCargaCamioneta({
+      stockActual: { id: "rep-1", esqueletos: 4 },
+      repartidorId: "rep-1",
+      carga: { b20: 40, b12: 10, sifon: 20 },
+      fecha: "2026-11-14",
+      timestamp: 1000,
+      id: "salida-1",
+    });
+
+    const combinado = combinarStockAdminConSalidas({
+      stockActual,
+      stockEditado: { b20: 42, b12: 10, sifon: 18, esqueletos: 6 },
+      repartidorId: "rep-1",
+    });
+
+    expect(combinado).toEqual({
+      id: "rep-1",
+      b20: 42,
+      b12: 10,
+      sifon: 18,
+      esqueletos: 6,
+      ultimaCargaFecha: "2026-11-14",
+      ultimaCargaTimestamp: 1000,
+      salidasDia: [
+        {
+          id: "salida-1",
+          fecha: "2026-11-14",
+          timestamp: 1000,
+          b20: 40,
+          b12: 10,
+          sifon: 20,
+        },
+      ],
+    });
+
+    const sinSalidasPrevias = combinarStockAdminConSalidas({
+      stockActual: null,
+      stockEditado: { b20: 15, esqueletos: 3 },
+      repartidorId: "rep-2",
+    });
+
+    expect(sinSalidasPrevias).toEqual({
+      id: "rep-2",
+      b20: 15,
+      b12: 0,
+      sifon: 0,
+      esqueletos: 3,
+    });
   });
 });

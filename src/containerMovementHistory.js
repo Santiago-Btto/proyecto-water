@@ -13,7 +13,7 @@ export const PERIODOS_MOVIMIENTOS_ENVASES = [
   { key: "fecha", label: "Fecha específica" },
 ];
 
-function fechaEnPeriodo(fecha, { periodo, fechaActual, fechaEspecifica }) {
+function fechaEnPeriodo(fecha, { periodo, fechaActual, fechaEspecifica, weekStartsOn, inicioSemana }) {
   if (periodo === "todo") return true;
   if (periodo === "fecha") return fecha === fechaEspecifica;
   if (periodo === "hoy") return fecha === fechaActual;
@@ -22,6 +22,7 @@ function fechaEnPeriodo(fecha, { periodo, fechaActual, fechaEspecifica }) {
     date: fecha,
     range: periodo,
     currentDate: fechaActual,
+    weekStartsOn: weekStartsOn || inicioSemana,
   });
 }
 

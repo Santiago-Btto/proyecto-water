@@ -6,14 +6,17 @@ import {
   createSubscription,
   createPromotionSnapshot,
   deliveryQuotaFeedback,
+  formatVisitProductsText,
   getPeriod,
   getSubscriptionStatus,
+  prepareSubscriptionVisitEdition,
   recordSubscriptionPayment,
   renewMonthlySubscriptions,
   resolveClientSubscriptionForPeriod,
   splitX20Delivery,
   subscriptionMetrics,
   subscriptionPeriodMetrics,
+  subscriptionSummaryFrom,
   subscriptionUsageHistory,
   upsertPromotion,
   validatePromotion,
@@ -533,5 +536,173 @@ describe("subscription UI boundaries", () => {
   it("provides covered, remaining, excess, and retryable error feedback for delivery UI", () => {
     expect(deliveryQuotaFeedback({ quantity: 3, subscription: { id: "s1", periodo: "2026-08", cantidadX20: 4, cantidadConsumida: 2 }, unitPrice: 5000 })).toEqual({ quota: 4, covered: 2, remaining: 0, excess: 1, ordinaryAmount: 5000, retryableError: null });
     expect(deliveryQuotaFeedback({ quantity: 1, subscription: null, unitPrice: 5000, mutationError: "offline" })).toMatchObject({ quota: 0, covered: 0, excess: 1, retryableError: expect.stringMatching(/conexi.n.*reintent/i) });
+  });
+
+  it("prepares subscription visit edition so drivers and admins can lower, raise, keep, or zero out an attributed b20 delivery", () => {
+    const currentSubscription = {
+      id: "c1-2026-11",
+      clienteId: "c1",
+      periodo: "2026-11",
+      promocionId: "p6",
+      promocionNombre: "Plan 6",
+      cantidadX20: 6,
+      cantidadConsumida: 3,
+      cantidadRestante: 3,
+      estadoPago: "pendiente",
+    };
+    const visitaInicial = {
+      id: "v1",
+      clienteId: "c1",
+      fecha: "2026-11-12",
+      vendio: true,
+      items: [{ tipo: "b20", cantidad: 0, precioUnitario: 3500 }],
+      subscriptionAttribution: {
+        subscriptionId: "c1-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 2,
+      },
+    };
+
+    const prep = prepareSubscriptionVisitEdition({
+      visitaInicial,
+      currentSubscription,
+    });
+
+    expect(prep.esEdicion).toBe(true);
+    expect(prep.initialB20Quantity).toBe(2);
+    expect(prep.subscriptionForCalculation).toMatchObject({
+      id: "c1-2026-11",
+      cantidadConsumida: 1,
+      cantidadRestante: 5,
+    });
+
+    // Mantener cantidad (ej. editando notas o deuda): no duplica consumo
+    expect(
+      splitX20Delivery({
+        quantity: prep.initialB20Quantity,
+        subscription: prep.subscriptionForCalculation,
+        unitPrice: 3500,
+      })
+    ).toEqual({
+      covered: 2,
+      excess: 0,
+      ordinaryAmount: 0,
+      attribution: {
+        subscriptionId: "c1-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 2,
+      },
+    });
+
+    // Bajar de 2 a 1
+    expect(
+      splitX20Delivery({
+        quantity: 1,
+        subscription: prep.subscriptionForCalculation,
+        unitPrice: 3500,
+      })
+    ).toEqual({
+      covered: 1,
+      excess: 0,
+      ordinaryAmount: 0,
+      attribution: {
+        subscriptionId: "c1-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 1,
+      },
+    });
+
+    // Subir de 2 a 6 (5 cubiertos por el remanente previo 5, 1 excedente)
+    expect(
+      splitX20Delivery({
+        quantity: 6,
+        subscription: prep.subscriptionForCalculation,
+        unitPrice: 3500,
+      })
+    ).toEqual({
+      covered: 5,
+      excess: 1,
+      ordinaryAmount: 3500,
+      attribution: {
+        subscriptionId: "c1-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 5,
+      },
+    });
+
+    // Bajar a 0 (ej. cliente no estaba)
+    expect(
+      splitX20Delivery({
+        quantity: 0,
+        subscription: prep.subscriptionForCalculation,
+        unitPrice: 3500,
+      })
+    ).toEqual({
+      covered: 0,
+      excess: 0,
+      ordinaryAmount: 0,
+      attribution: null,
+    });
+  });
+
+  it("includes promocionId and promocionNombre in subscriptionSummaryFrom", () => {
+    const sub = {
+      id: "c1-2026-11",
+      periodo: "2026-11",
+      estadoPago: "pendiente",
+      promocionId: "p6",
+      promocionNombre: "Plan 6",
+      cantidadX20: 6,
+      cantidadConsumida: 0,
+    };
+    expect(subscriptionSummaryFrom(sub)).toEqual({
+      subscriptionId: "c1-2026-11",
+      periodo: "2026-11",
+      estadoPago: "pendiente",
+      promocionId: "p6",
+      promocionNombre: "Plan 6",
+      cantidadConsumida: 0,
+      cantidadRestante: 6,
+    });
+  });
+
+  it("formats visit product texts including 100% subscription deliveries, mixed deliveries, and ordinary sales", () => {
+    const catalogo = [
+      { key: "b20", corto: "20L" },
+      { key: "b12", corto: "12L" },
+      { key: "sifon", corto: "Sifón" },
+    ];
+
+    const soloAbono = {
+      vendio: true,
+      items: [{ tipo: "b20", cantidad: 0 }],
+      subscriptionAttribution: { subscriptionId: "s-1", cantidadX20: 2 },
+    };
+    expect(formatVisitProductsText(soloAbono, catalogo)).toBe("2× 20L (Abono)");
+
+    const mixta = {
+      vendio: true,
+      items: [
+        { tipo: "b20", cantidad: 1 },
+        { tipo: "sifon", cantidad: 3 },
+      ],
+      subscriptionAttribution: { subscriptionId: "s-1", cantidadX20: 2 },
+    };
+    expect(formatVisitProductsText(mixta, catalogo)).toBe(
+      "2× 20L (Abono), 1× 20L, 3× Sifón"
+    );
+    expect(formatVisitProductsText(mixta, catalogo, " + ")).toBe(
+      "2× 20L (Abono) + 1× 20L + 3× Sifón"
+    );
+
+    const comun = {
+      vendio: true,
+      items: [
+        { tipo: "b20", cantidad: 2 },
+        { tipo: "b12", cantidad: 1 },
+      ],
+      subscriptionAttribution: null,
+    };
+    expect(formatVisitProductsText(comun, catalogo)).toBe("2× 20L, 1× 12L");
   });
 });

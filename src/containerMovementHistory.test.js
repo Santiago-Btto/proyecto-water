@@ -45,4 +45,27 @@ describe("movimientos de envases", () => {
       ["Ana", "retirado", 1],
     ]);
   });
+
+  it("respeta inicioSemana: 'lunes' al filtrar movimientos de la semana", () => {
+    // 2026-08-09 es domingo; con inicioSemana: 'lunes', la semana es del lunes 2026-08-03 al domingo 2026-08-09
+    const movimientos = movimientosDeEnvases({
+      visitas: [
+        { id: "v1", clienteId: "c1", repartidorId: "r1", fecha: "2026-08-02", timestamp: 10, extrasPrestados: { b20: 1 } },
+        { id: "v2", clienteId: "c2", repartidorId: "r1", fecha: "2026-08-03", timestamp: 20, extrasPrestados: { b20: 2 } },
+      ],
+      clientes,
+      repartidores,
+      filtros: {
+        periodo: "semana",
+        fechaActual: "2026-08-09",
+        inicioSemana: "lunes",
+        tipo: "b20",
+        movimiento: "todos",
+      },
+    });
+
+    expect(movimientos.map((m) => [m.clienteNombre, m.cantidad])).toEqual([
+      ["Bruno", 2],
+    ]);
+  });
 });

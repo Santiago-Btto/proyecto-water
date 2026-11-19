@@ -19,6 +19,39 @@ export function stockInventarioDeRepartidor(stock) {
   return { ...stockInventarioVacio(), ...(stock || {}) };
 }
 
+export function combinarStockAdminConSalidas({
+  stockActual = null,
+  stockEditado = null,
+  repartidorId,
+} = {}) {
+  const resultado = {
+    ...(stockActual || {}),
+    ...stockInventarioVacio(),
+    ...(stockEditado || {}),
+    id: repartidorId || stockActual?.id,
+  };
+
+  ARTICULOS_STOCK.forEach(({ key }) => {
+    const raw =
+      stockEditado && key in stockEditado
+        ? stockEditado[key]
+        : stockActual?.[key];
+    resultado[key] = Math.max(0, Number(raw) || 0);
+  });
+
+  if (Array.isArray(stockActual?.salidasDia)) {
+    resultado.salidasDia = stockActual.salidasDia;
+  }
+  if (stockActual?.ultimaCargaFecha) {
+    resultado.ultimaCargaFecha = stockActual.ultimaCargaFecha;
+  }
+  if (stockActual?.ultimaCargaTimestamp !== undefined) {
+    resultado.ultimaCargaTimestamp = stockActual.ultimaCargaTimestamp;
+  }
+
+  return resultado;
+}
+
 export function calcularStockEnCamionetas(porRepartidor) {
   const trabajando = stockInventarioVacio();
 

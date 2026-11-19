@@ -27,9 +27,14 @@ import {
   submitVisit,
   totalStreetDebt,
 } from "./operationalIntegrity";
-import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, getPeriod, recordSubscriptionPayment, renewMonthlySubscriptions, resolveClientSubscriptionForPeriod, splitX20Delivery, subscriptionMetrics, subscriptionPeriodMetrics, subscriptionUsageHistory, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
+import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, formatVisitProductsText, getPeriod, prepareSubscriptionVisitEdition, recordSubscriptionPayment, renewMonthlySubscriptions, resolveClientSubscriptionForPeriod, splitX20Delivery, subscriptionMetrics, subscriptionPeriodMetrics, subscriptionSummaryFrom, subscriptionUsageHistory, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
 import { isDashboardDateInRange } from "./dashboardCalendarFilters";
-import { MENDOZA_DEPARTMENTS, isMendozaDepartment } from "./mendozaDepartments";
+import {
+  MENDOZA_DEPARTMENTS,
+  buildGoogleMapsUrl,
+  formatClientAddress,
+  isMendozaDepartment,
+} from "./mendozaDepartments";
 import { summarizeClientsWithDebt } from "./clientDebtSummary";
 import { chargeableVisitTotal, clientSpecialPriceEntries, isComplimentaryVisit, resolveClientUnitPrice, savedSpecialPrices } from "./specialPricing";
 import {
@@ -48,7 +53,12 @@ import {
   ubicarClienteEnDia,
 } from "./dayRouteOrdering";
 import { buscarClientesParaRepartidor } from "./routeSearch";
-import { esSesionAutenticada, perfilInicialParaSesion } from "./authAccess";
+import {
+  esSesionAutenticada,
+  parsearPerfilActivo,
+  perfilInicialParaSesion,
+  serializarPerfilActivo,
+} from "./authAccess";
 import { PERSISTENCIA_SESION } from "./authSessionPersistence";
 import { APP_VERSION } from "./appVersion";
 import {
@@ -61,6 +71,7 @@ import {
   PRODUCTOS_CARGA_CAMIONETA,
   calcularStockEnCamionetas,
   calcularStockEnGalpon,
+  combinarStockAdminConSalidas,
   registrarCargaCamioneta,
   resumenCargaRepartidorDia,
   stockInventarioDeRepartidor,
@@ -72,6 +83,7 @@ import {
    ============================================================ */
 const C = {
   bg: "#F2F8F9",
+  soft: "#F2F8F9",
   surface: "#FFFFFF",
   ink: "#0B2B3C",
   muted: "#5E7A87",
@@ -260,9 +272,8 @@ function urlWhatsApp(telefono) {
   return numero ? `https://wa.me/${numero}` : "";
 }
 
-function urlGoogleMaps(direccion) {
-  if (!direccion) return "";
-  return `https://maps.google.com/?q=${encodeURIComponent(direccion)}`;
+function urlGoogleMaps(direccion, departamento = "") {
+  return buildGoogleMapsUrl(direccion, departamento);
 }
 function diaSemanaDeFecha(iso) {
   try {
@@ -557,11 +568,11 @@ function descargarCSV(filename, headers, rows) {
   URL.revokeObjectURL(url);
 }
 function exportarClientesCSV(db) {
-  const headers = ["Nombre", "Dirección", "Teléfono", "Días de visita", "Repartidor", "Deuda acumulada", "Envases permanentes", "Envases extra", "Máquina frío/calor", "Notas"];
+  const headers = ["Nombre", "Dirección", "Departamento", "Teléfono", "Días de visita", "Repartidor", "Deuda acumulada", "Envases permanentes", "Envases extra", "Máquina frío/calor", "Notas"];
   const rows = db.clientes.map((c) => {
     const rep = db.config.repartidores.find((r) => r.id === c.repartidorId);
     return [
-      c.nombre, c.direccion, c.telefono || "", (c.diasVisita || []).join(" - "),
+      c.nombre, c.direccion, c.departamento || "", c.telefono || "", (c.diasVisita || []).join(" - "),
       rep?.nombre || "", c.deudaAcumulada || 0,
       textoEnvasesPrestados(envasesPermanentesDe(c)) || "Ninguno",
       textoEnvasesPrestados(envasesExtraDe(c)) || "Ninguno",
@@ -600,10 +611,7 @@ function exportarVisitasCSV(db) {
     .map((v) => {
       const cliente = db.clientes.find((c) => c.id === v.clienteId);
       const rep = db.config.repartidores.find((r) => r.id === v.repartidorId);
-      const productos = (v.items || [])
-        .filter((it) => it.cantidad > 0)
-        .map((it) => `${it.cantidad}x${PRODUCTOS.find((p) => p.key === it.tipo)?.corto}`)
-        .join(" + ");
+      const productos = formatVisitProductsText(v, PRODUCTOS, " + ");
 
       return [
         fechaLegible(v.fecha),
@@ -1284,7 +1292,7 @@ function AdminSuscripciones({ db, mutate }) {
   function selectSubscription(client, promotion) {
     try {
       const subscription = createSubscription({ client, promotion, subscriptions: db.subscriptions || [] });
-      const clients = db.clientes.map((item) => item.id === client.id ? { ...item, subscriptionSummary: { subscriptionId: subscription.id, periodo: subscription.periodo, estadoPago: subscription.estadoPago, cantidadConsumida: 0, cantidadRestante: subscription.cantidadX20 } } : item);
+      const clients = db.clientes.map((item) => item.id === client.id ? { ...item, subscriptionSummary: subscriptionSummaryFrom(subscription) } : item);
       mutate({ ...db, clientes: clients, subscriptions: [...(db.subscriptions || []), subscription] });
     } catch (cause) { setError(cause.message); }
   }
@@ -3569,7 +3577,7 @@ function guardarCliente(f) {
                               </div>
 
                               <a
-                                href={urlGoogleMaps(c.direccion)}
+                                href={urlGoogleMaps(c.direccion, c.departamento)}
                                 target="_blank"
                                 rel="noreferrer"
                                 onClick={(e) => e.stopPropagation()}
@@ -3577,7 +3585,9 @@ function guardarCliente(f) {
                                 style={{ color: C.primary }}
                               >
                                 <MapPin size={12} className="flex-shrink-0" />
-                                <span className="truncate">{c.direccion}</span>
+                                <span className="truncate">
+                                  {formatClientAddress(c.direccion, c.departamento)}
+                                </span>
                               </a>
 
                               {c.telefono && (
@@ -3662,7 +3672,7 @@ function guardarCliente(f) {
                   >
                     <div className="font-bold text-sm">{c.nombre}</div>
                     <a
-                      href={urlGoogleMaps(c.direccion)}
+                      href={urlGoogleMaps(c.direccion, c.departamento)}
                       target="_blank"
                       rel="noreferrer"
                       onClick={(e) => e.stopPropagation()}
@@ -3670,7 +3680,7 @@ function guardarCliente(f) {
                       style={{ color: C.primary }}
                     >
                       <MapPin size={12} />
-                      <span>{c.direccion}</span>
+                      <span>{formatClientAddress(c.direccion, c.departamento)}</span>
                     </a>
                     {c.telefono && (
                       <a
@@ -3769,8 +3779,8 @@ function guardarCliente(f) {
             ) : (
               <>
                 <div className="text-sm mb-4">
-                  ¿Seguro que querés eliminar a <b>{confirmDel.nombre}</b>? Podés
-                  deshacerlo después con el botón deshacer.
+                  ¿Seguro que querés eliminar a <b>{confirmDel.nombre}</b>? Esta
+                  acción no se puede deshacer.
                 </div>
                 <div className="flex gap-2">
                   <Btn variant="ghost" full onClick={() => setConfirmDel(null)}>
@@ -3823,14 +3833,14 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
         <div className="flex flex-wrap gap-2 mt-1.5">
           {cliente.direccion && (
             <a
-              href={urlGoogleMaps(cliente.direccion)}
+              href={urlGoogleMaps(cliente.direccion, cliente.departamento)}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
               style={{ background: C.accentSoft, color: C.primary }}
             >
               <MapPin size={13} />
-              <span>{cliente.direccion}</span>
+              <span>{formatClientAddress(cliente.direccion, cliente.departamento)}</span>
             </a>
           )}
 
@@ -3909,11 +3919,22 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
                   <Card key={v.id}>
                     <div className="flex items-center justify-between">
                       <div className="text-xs font-bold" style={{ color: C.muted }}>{fechaLegible(v.fecha)}</div>
-                      {v.vendio ? <Badge tone="success">{isComplimentaryVisit(v) ? "Sin cargo" : formatMoney(v.total)}</Badge> : <Badge tone="muted">No vendió</Badge>}
+                      {v.vendio ? (
+                        <Badge tone="success">
+                          {isComplimentaryVisit(v)
+                            ? "Sin cargo"
+                            : Number(v.total) === 0 &&
+                              Number(v.subscriptionAttribution?.cantidadX20) > 0
+                            ? "Abono"
+                            : formatMoney(v.total)}
+                        </Badge>
+                      ) : (
+                        <Badge tone="muted">No vendió</Badge>
+                      )}
                     </div>
                     {v.vendio && (
                       <div className="text-xs mt-1">
-                        {v.items.filter((it) => it.cantidad > 0).map((it) => `${it.cantidad}× ${PRODUCTOS.find((p) => p.key === it.tipo)?.corto}`).join(", ")}
+                        {formatVisitProductsText(v, PRODUCTOS)}
                         {v.metodoPago && <> · {({ efectivo: "Efectivo", mercadopago: "Mercado Pago", deuda: "Fiado" })[v.metodoPago]}</>}
                       </div>
                     )}
@@ -4031,12 +4052,17 @@ function AdminHistorial({ db, mutate }) {
         ),
         clientes: db.clientes,
         repartidores: db.config.repartidores,
-        filtros: { ...filtroEnvases, fechaActual: fechaHoy },
+        filtros: {
+          ...filtroEnvases,
+          fechaActual: fechaHoy,
+          inicioSemana: db.config.inicioSemana,
+        },
       }),
     [
       db.visitas,
       db.clientes,
       db.config.repartidores,
+      db.config.inicioSemana,
       filtroRep,
       filtroEnvases,
       fechaHoy,
@@ -4309,8 +4335,16 @@ function AdminHistorial({ db, mutate }) {
                     <div className="text-xs" style={{ color: C.muted }}>{fechaLegible(v.fecha)} · {rep?.nombre || "—"}</div>
                     {v.vendio ? (
                       <div className="text-xs mt-1">
-                        {(v.items || []).filter((it) => it.cantidad > 0).map((it) => `${it.cantidad}× ${PRODUCTOS.find((p) => p.key === it.tipo)?.corto}`).join(", ")}
-                        {" — "}<span className="font-mono font-bold">{isComplimentaryVisit(v) ? "Sin cargo" : formatMoney(v.total)}</span>
+                        {formatVisitProductsText(v, PRODUCTOS)}
+                        {" — "}
+                        <span className="font-mono font-bold">
+                          {isComplimentaryVisit(v)
+                            ? "Sin cargo"
+                            : Number(v.total) === 0 &&
+                              Number(v.subscriptionAttribution?.cantidadX20) > 0
+                            ? "Cubierto por abono"
+                            : formatMoney(v.total)}
+                        </span>
                       </div>
                     ) : (
                       <div className="text-xs mt-1" style={{ color: C.mutedLight }}>No vendió{v.notas ? " · " + v.notas : ""}</div>
@@ -4421,12 +4455,11 @@ function AdminStock({ db, mutate }) {
     );
     next.stock = db.config.repartidores.map((r) => {
       const actual = (db.stock || []).find((s) => s.id === r.id);
-      return {
-        ...(Array.isArray(actual?.salidasDia) ? { salidasDia: actual.salidasDia } : {}),
-        id: r.id,
-        ...stockInventarioVacio(),
-        ...(porRepartidor[r.id] || {}),
-      };
+      return combinarStockAdminConSalidas({
+        stockActual: actual,
+        stockEditado: porRepartidor[r.id],
+        repartidorId: r.id,
+      });
     });
 
     mutate(next);
@@ -6021,7 +6054,7 @@ function RepartidorClientes({ db, mutate, repartidor }) {
                   <div className="font-bold text-sm">{c.nombre}</div>
 
                   <a
-                    href={urlGoogleMaps(c.direccion)}
+                    href={urlGoogleMaps(c.direccion, c.departamento)}
                     target="_blank"
                     rel="noreferrer"
                     onClick={(e) => e.stopPropagation()}
@@ -6029,7 +6062,7 @@ function RepartidorClientes({ db, mutate, repartidor }) {
                     style={{ color: C.primary }}
                   >
                     <MapPin size={12} />
-                    <span>{c.direccion}</span>
+                    <span>{formatClientAddress(c.direccion, c.departamento)}</span>
                   </a>
 
                   {c.telefono && (
@@ -6716,7 +6749,7 @@ const gruposDiasAnteriores =
                         </div>
 
                         <a
-                          href={urlGoogleMaps(c.direccion)}
+                          href={urlGoogleMaps(c.direccion, c.departamento)}
                           target="_blank"
                           rel="noreferrer"
                           onClick={(e) => e.stopPropagation()}
@@ -6724,7 +6757,7 @@ const gruposDiasAnteriores =
                           style={{ color: C.primary }}
                         >
                           <MapPin size={12} />
-                          <span>{c.direccion}</span>
+                          <span>{formatClientAddress(c.direccion, c.departamento)}</span>
                         </a>
 
                         {/* Día/s habitual/es del cliente.
@@ -6837,7 +6870,7 @@ const gruposDiasAnteriores =
                         )}
 
                         <a
-                          href={urlGoogleMaps(c.direccion)}
+                          href={urlGoogleMaps(c.direccion, c.departamento)}
                           target="_blank"
                           rel="noreferrer"
                           className="p-1.5 rounded-lg"
@@ -7377,7 +7410,7 @@ function ClienteVisitaCard({
           </div>
 
           <a
-            href={urlGoogleMaps(cliente.direccion)}
+            href={urlGoogleMaps(cliente.direccion, cliente.departamento)}
             target="_blank"
             rel="noreferrer"
             onClick={(e) => e.stopPropagation()}
@@ -7385,7 +7418,7 @@ function ClienteVisitaCard({
             style={{ color: C.primary }}
           >
             <MapPin size={12} />
-            <span>{cliente.direccion}</span>
+            <span>{formatClientAddress(cliente.direccion, cliente.departamento)}</span>
           </a>
 
           {cliente.deudaAcumulada > 0 && (
@@ -7499,7 +7532,7 @@ function ClienteVisitaCard({
           )}
 
           <a
-            href={urlGoogleMaps(cliente.direccion)}
+            href={urlGoogleMaps(cliente.direccion, cliente.departamento)}
             target="_blank"
             rel="noreferrer"
             className="p-1.5 rounded-lg"
@@ -7553,6 +7586,14 @@ function VisitaSheet({
   });
   const currentSubscription = subscriptionPorAtribucion || subscriptionDelPeriodo;
   const tieneAbonoActivo = !!currentSubscription;
+  const {
+    esEdicion,
+    initialB20Quantity,
+    subscriptionForCalculation: subscriptionParaCorreccion,
+  } = prepareSubscriptionVisitEdition({
+    visitaInicial,
+    currentSubscription,
+  });
   // Deuda que tenía el cliente ANTES de esta visita.
 const deudaBase = Number(cliente.deudaAcumulada) || 0;
 
@@ -7577,14 +7618,12 @@ const deudaBase = Number(cliente.deudaAcumulada) || 0;
 
       return {
         tipo: p.key,
-        // En una visita de abono guardamos solo el excedente como venta.
-        // El selector empieza en cero al editar: representa únicamente lo
-        // que se agrega ahora, no los bidones ya registrados en el plan.
+        // Al editar una visita (tanto repartidor como admin), el selector de 20L
+        // inicia con el total entregado en esa visita (excedente + bidones del abono).
         cantidad:
-          (Number(anterior?.cantidad) || 0) +
-          (modoCorreccionAdministrativa && p.key === "b20"
-            ? Number(visitaInicial?.subscriptionAttribution?.cantidadX20) || 0
-            : 0),
+          p.key === "b20"
+            ? initialB20Quantity
+            : Number(anterior?.cantidad) || 0,
         // Al editar conservamos el precio que tenía la visita original.
         precioUnitario:
           anterior?.precioUnitario ??
@@ -7804,38 +7843,10 @@ useEffect(() => {
   const total = totalPedido(items);
   const modoAbono = tieneAbonoActivo;
   const b20Quantity = Number(items.find((item) => item.tipo === "b20")?.cantidad) || 0;
-  const cantidadAtribuidaOriginal =
-    Number(visitaInicial?.subscriptionAttribution?.cantidadX20) || 0;
-  const subscriptionParaCorreccion =
-    modoCorreccionAdministrativa && currentSubscription
-      ? {
-          ...currentSubscription,
-          cantidadConsumida: Math.max(
-            0,
-            (Number(currentSubscription.cantidadConsumida) || 0) - cantidadAtribuidaOriginal
-          ),
-        }
-      : currentSubscription;
   const precioB20Visita = items.find((item) => item.tipo === "b20")?.precioUnitario || 0;
   const quotaPreview = splitX20Delivery({ quantity: b20Quantity, subscription: subscriptionParaCorreccion, unitPrice: precioB20Visita });
   const quotaFeedback = deliveryQuotaFeedback({ quantity: b20Quantity, subscription: subscriptionParaCorreccion, unitPrice: precioB20Visita, mutationError: errorStock });
-  // Sin un abono activo ambos ids serían `undefined`. No hay que tratar eso
-  // como una coincidencia: una visita normal no tiene atribución de abono.
-  const attributedPreviously =
-    !modoCorreccionAdministrativa &&
-    currentSubscription &&
-    visitaInicial?.subscriptionAttribution?.subscriptionId === currentSubscription.id
-      ? Number(visitaInicial.subscriptionAttribution.cantidadX20) || 0
-      : 0;
-  const subscriptionAttributionFinal = modoCorreccionAdministrativa
-    ? quotaPreview.attribution
-    : currentSubscription && attributedPreviously + quotaPreview.covered > 0
-    ? {
-        subscriptionId: currentSubscription.id,
-        periodo: currentSubscription.periodo,
-        cantidadX20: attributedPreviously + quotaPreview.covered,
-      }
-    : quotaPreview.attribution;
+  const subscriptionAttributionFinal = quotaPreview.attribution;
   const totalVentaNormal = chargeableVisitTotal(items, quotaPreview.covered);
   const tieneOtrosProductos = items.some(
     (item) => item.tipo !== "b20" && Number(item.cantidad) > 0
@@ -8175,26 +8186,26 @@ deudaCobrada: deudaCobradaFinal,
       {currentSubscription && (
         <Card className="mb-3" style={{ background: C.accentSoft, border: "none" }}>
           <div className="text-xs font-bold" style={{ color: C.primary }}>
-            Plan {currentSubscription.periodo}: {modoCorreccionAdministrativa
+            Plan {currentSubscription.periodo}: {esEdicion
               ? subscriptionParaCorreccion.cantidadConsumida || 0
               : currentSubscription.cantidadConsumida || 0}/{currentSubscription.cantidadX20} entregados
           </div>
           <div className="text-xs mt-1">
-            {modoCorreccionAdministrativa ? "Esta visita entrega" : "Esta visita agrega"}: {quotaFeedback.covered} · Quedan {quotaFeedback.remaining} · Excedente a venta normal: {quotaFeedback.excess}
+            {esEdicion ? "Esta visita entrega" : "Esta visita agrega"}: {quotaFeedback.covered} · Quedan {quotaFeedback.remaining} · Excedente a venta normal: {quotaFeedback.excess}
           </div>
         </Card>
       )}
       <div className="flex flex-wrap gap-2 mb-3">
         {cliente.direccion && (
           <a
-            href={urlGoogleMaps(cliente.direccion)}
+            href={urlGoogleMaps(cliente.direccion, cliente.departamento)}
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
             style={{ background: C.accentSoft, color: C.primary }}
           >
             <MapPin size={13} />
-            <span>{cliente.direccion}</span>
+            <span>{formatClientAddress(cliente.direccion, cliente.departamento)}</span>
           </a>
         )}
 
@@ -8425,7 +8436,12 @@ deudaCobrada: deudaCobradaFinal,
 
                                 {v.vendio ? (
                                   <Badge tone="success">
-                                    {isComplimentaryVisit(v) ? "Sin cargo" : formatMoney(v.total || 0)}
+                                    {isComplimentaryVisit(v)
+                                      ? "Sin cargo"
+                                      : Number(v.total) === 0 &&
+                                        Number(v.subscriptionAttribution?.cantidadX20) > 0
+                                      ? "Abono"
+                                      : formatMoney(v.total || 0)}
                                   </Badge>
                                 ) : (
                                   <Badge tone="muted">No vendió</Badge>
@@ -8894,7 +8910,34 @@ deudaCobrada: deudaCobradaFinal,
             </Field>
           )}
 
-          {!modoAbono && <Field label="Notas de la visita">
+          {modoAbono && !registraVenta && (
+            <Field label="Motivo (opcional)">
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {NOTAS_RAPIDAS.map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => setNotas(n)}
+                    className="px-2.5 py-1 rounded-lg text-xs font-semibold"
+                    style={{
+                      background:
+                        notas === n
+                          ? C.primary
+                          : C.bg,
+                      color:
+                        notas === n
+                          ? "#fff"
+                          : C.muted,
+                    }}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+            </Field>
+          )}
+
+          <Field label="Notas de la visita">
             <Textarea
               rows={2}
               value={notas}
@@ -8902,7 +8945,7 @@ deudaCobrada: deudaCobradaFinal,
                 setNotas(e.target.value)
               }
             />
-          </Field>}
+          </Field>
           <Field label="Próxima visita especial">
             <button
               type="button"
@@ -9377,9 +9420,18 @@ export default function App() {
       unsubscribe = onAuthStateChanged(firebaseAuth, (usuario) => {
         if (!activo) return;
         setAuthUser(usuario);
-        setProfile(perfilInicialParaSesion(usuario));
-        setAdminUnlocked(false);
-        sessionStorage.removeItem("adminUnlocked");
+        if (esSesionAutenticada(usuario)) {
+          const perfilGuardado = parsearPerfilActivo(
+            localStorage.getItem("repartoAgua_perfilActivo")
+          );
+          setProfile(perfilInicialParaSesion(usuario, perfilGuardado));
+          setAdminUnlocked(sessionStorage.getItem("adminUnlocked") === "true");
+        } else {
+          setProfile(null);
+          setAdminUnlocked(false);
+          localStorage.removeItem("repartoAgua_perfilActivo");
+          sessionStorage.removeItem("adminUnlocked");
+        }
         setConnError(null);
         setAuthReady(true);
       });
@@ -9515,6 +9567,8 @@ export default function App() {
 
   async function cerrarSesion() {
     try {
+      localStorage.removeItem("repartoAgua_perfilActivo");
+      sessionStorage.removeItem("adminUnlocked");
       await signOut(firebaseAuth);
     } catch (error) {
       console.error("No se pudo cerrar la sesión", error);
@@ -9522,18 +9576,31 @@ export default function App() {
   }
 
   function elegirAdmin() {
-    setProfile({ type: "admin" });
+    const nextProfile = { type: "admin" };
+    setProfile(nextProfile);
     setAdminUnlocked(false);
+    sessionStorage.removeItem("adminUnlocked");
+    const serialized = serializarPerfilActivo(nextProfile);
+    if (serialized) localStorage.setItem("repartoAgua_perfilActivo", serialized);
   }
   function elegirRepartidor(r) {
-    setProfile({ type: "repartidor", id: r.id });
+    const nextProfile = { type: "repartidor", id: r.id };
+    setProfile(nextProfile);
+    const serialized = serializarPerfilActivo(nextProfile);
+    if (serialized) localStorage.setItem("repartoAgua_perfilActivo", serialized);
   }
   function salirDelPerfil() {
     setProfile("picker");
     setAdminUnlocked(false);
+    localStorage.removeItem("repartoAgua_perfilActivo");
     sessionStorage.removeItem("adminUnlocked");
   }
-  function volverAlPicker() { setProfile("picker"); }
+  function volverAlPicker() {
+    setProfile("picker");
+    setAdminUnlocked(false);
+    localStorage.removeItem("repartoAgua_perfilActivo");
+    sessionStorage.removeItem("adminUnlocked");
+  }
 
   if (!authReady) {
     return (

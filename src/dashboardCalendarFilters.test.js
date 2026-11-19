@@ -57,6 +57,41 @@ describe("dashboard calendar filters", () => {
     ).toBe(false);
   });
 
+  it("supports Spanish weekStartsOn values ('lunes' and 'domingo')", () => {
+    expect(
+      isDashboardDateInRange({
+        date: "2026-08-03",
+        range: "semana",
+        currentDate: "2026-08-09",
+        weekStartsOn: "lunes",
+      })
+    ).toBe(true);
+    expect(
+      isDashboardDateInRange({
+        date: "2026-08-02",
+        range: "semana",
+        currentDate: "2026-08-09",
+        weekStartsOn: "lunes",
+      })
+    ).toBe(false);
+    expect(
+      isDashboardDateInRange({
+        date: "2026-08-02",
+        range: "semana",
+        currentDate: "2026-08-08",
+        weekStartsOn: "domingo",
+      })
+    ).toBe(true);
+    expect(
+      isDashboardDateInRange({
+        date: "2026-08-09",
+        range: "semana",
+        currentDate: "2026-08-08",
+        weekStartsOn: "domingo",
+      })
+    ).toBe(false);
+  });
+
   it("includes the final day of the current month only", () => {
     expect(
       isDashboardDateInRange({

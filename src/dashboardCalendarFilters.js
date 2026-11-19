@@ -21,7 +21,10 @@ export function isDashboardDateInRange({ date, range, currentDate, weekStartsOn 
   if (range !== "semana") return false;
 
   const weekStart = new Date(today);
-  const offset = weekStartsOn === "monday"
+  const startsMonday = ["monday", "lunes"].includes(
+    String(weekStartsOn || "").toLowerCase()
+  );
+  const offset = startsMonday
     ? (today.getDay() + 6) % 7
     : today.getDay();
   weekStart.setDate(today.getDate() - offset);
