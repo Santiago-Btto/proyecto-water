@@ -105,6 +105,8 @@ describe("payment, delivery, and reporting stay isolated from ordinary debt", ()
 describe("subscription corrections", () => {
   const plan4 = { id: "p4", nombre: "Plan 4", cantidadX20: 4, precioMensual: 4000, activo: true };
   const plan6 = { id: "p6", nombre: "Plan 6", cantidadX20: 6, precioMensual: 6000, activo: true };
+  const plan8 = { id: "p8", nombre: "Plan 8", cantidadX20: 8, precioMensual: 8000, activo: true };
+  const plan10 = { id: "p10", nombre: "Plan 10", cantidadX20: 10, precioMensual: 10000, activo: true };
   const subscription = { id: "s1", clienteId: "c1", ...createPromotionSnapshot(plan4), cantidadConsumida: 0, cantidadRestante: 4, estadoPago: "pendiente" };
 
   it("replaces a mistaken plan before there is payment or delivery", () => {
@@ -114,9 +116,78 @@ describe("subscription corrections", () => {
     });
   });
 
-  it("refuses corrections once payment or delivery gives the record accounting history", () => {
-    expect(() => changeSubscriptionPromotion({ subscription: { ...subscription, cantidadConsumida: 1 }, promotion: plan6 })).toThrow(/entrega/i);
-    expect(() => changeSubscriptionPromotion({ subscription: { ...subscription, reciboPago: { monto: 4000 } }, promotion: plan6 })).toThrow(/cobro/i);
+  it("allows changing from a larger plan (10x20L) to a smaller one (8x20L) while preserving consumed bottles", () => {
+    const sub10With3Consumed = {
+      id: "s-10",
+      clienteId: "c1",
+      ...createPromotionSnapshot(plan10),
+      cantidadConsumida: 3,
+      cantidadRestante: 7,
+      estadoPago: "pendiente",
+    };
+
+    expect(changeSubscriptionPromotion({ subscription: sub10With3Consumed, promotion: plan8 })).toMatchObject({
+      id: "s-10",
+      promocionId: "p8",
+      promocionNombre: "Plan 8",
+      cantidadX20: 8,
+      precioMensual: 8000,
+      cantidadConsumida: 3,
+      cantidadRestante: 5,
+      estadoPago: "pendiente",
+    });
+  });
+
+  it("clamps cantidadRestante to 0 without negative values when changing to a plan with quota <= already consumed", () => {
+    const sub10With6Consumed = {
+      id: "s-10",
+      clienteId: "c1",
+      ...createPromotionSnapshot(plan10),
+      cantidadConsumida: 6,
+      cantidadRestante: 4,
+      estadoPago: "pendiente",
+    };
+
+    expect(changeSubscriptionPromotion({ subscription: sub10With6Consumed, promotion: plan4 })).toMatchObject({
+      promocionId: "p4",
+      cantidadX20: 4,
+      cantidadConsumida: 6,
+      cantidadRestante: 0,
+    });
+  });
+
+  it("preserves paid status and updates receipt amount when changing the plan of an already paid subscription", () => {
+    const paidSub = {
+      id: "s-paid",
+      clienteId: "c1",
+      ...createPromotionSnapshot(plan10),
+      cantidadConsumida: 2,
+      cantidadRestante: 8,
+      estadoPago: "pagada",
+      reciboPago: { monto: 10000, metodo: "efectivo", fecha: "2026-11-05T10:00:00.000Z" },
+    };
+
+    expect(changeSubscriptionPromotion({ subscription: paidSub, promotion: plan8 })).toMatchObject({
+      id: "s-paid",
+      promocionId: "p8",
+      promocionNombre: "Plan 8",
+      cantidadX20: 8,
+      precioMensual: 8000,
+      cantidadConsumida: 2,
+      cantidadRestante: 6,
+      estadoPago: "pagada",
+      reciboPago: {
+        monto: 8000,
+        metodo: "efectivo",
+        fecha: "2026-11-05T10:00:00.000Z",
+      },
+    });
+  });
+
+  it("rejects missing subscription or inactive/invalid promotions", () => {
+    expect(() => changeSubscriptionPromotion({ subscription: null, promotion: plan6 })).toThrow(/abono/i);
+    expect(() => changeSubscriptionPromotion({ subscription, promotion: { ...plan6, activo: false } })).toThrow(/disponible/i);
+    expect(() => changeSubscriptionPromotion({ subscription, promotion: { ...plan6, cantidadX20: 5 } })).toThrow(/disponible/i);
   });
 });
 

@@ -68,12 +68,9 @@ import {
 } from "./containerMovementHistory";
 import {
   ARTICULOS_STOCK,
-  PRODUCTOS_CARGA_CAMIONETA,
   calcularStockEnCamionetas,
   calcularStockEnGalpon,
   combinarStockAdminConSalidas,
-  registrarCargaCamioneta,
-  resumenCargaRepartidorDia,
   stockInventarioDeRepartidor,
   stockInventarioVacio,
 } from "./stockInventory";
@@ -1307,22 +1304,16 @@ function AdminSuscripciones({ db, mutate }) {
   function changePlan(subscription, promotion) {
     try {
       const changed = changeSubscriptionPromotion({ subscription, promotion });
-      const subscriptions = (db.subscriptions || []).map((item) =>
-        item.id === subscription.id ? changed : item
-      );
+      const existing = db.subscriptions || [];
+      const exists = existing.some((item) => item.id === subscription.id);
+      const subscriptions = exists
+        ? existing.map((item) => (item.id === subscription.id ? changed : item))
+        : [...existing, changed];
       const clientes = db.clientes.map((client) =>
-        client.subscriptionSummary?.subscriptionId === subscription.id
+        client.id === subscription.clienteId
           ? {
               ...client,
-              subscriptionSummary: {
-                ...client.subscriptionSummary,
-                promocionId: changed.promocionId,
-                promocionNombre: changed.promocionNombre,
-                periodo: changed.periodo,
-                estadoPago: changed.estadoPago,
-                cantidadConsumida: 0,
-                cantidadRestante: changed.cantidadRestante,
-              },
+              subscriptionSummary: subscriptionSummaryFrom(changed),
             }
           : client
       );
@@ -1350,7 +1341,11 @@ function AdminSuscripciones({ db, mutate }) {
         (db.subscriptions || []).find((item) => item.id === summary?.subscriptionId);
       const view = clientSubscriptionSummaryView({ client, subscription: current });
       const selectable = canSelectSubscription({ client, subscriptions: db.subscriptions || [] });
-      const puedeCorregir = current && !current.reciboPago && Number(current.cantidadConsumida || 0) === 0;
+      const planesAlternativos = current
+        ? (db.promotions || []).filter(
+            (promotion) => promotion.activo && promotion.id !== current.promocionId
+          )
+        : [];
       const history = subscriptionUsageHistory({ clientId: client.id, subscriptions: db.subscriptions || [], visits: db.visitas || [] });
       const open = historialAbierto === client.id;
       return <Card key={client.id}>
@@ -1361,7 +1356,7 @@ function AdminSuscripciones({ db, mutate }) {
         </> : <>
           <div className="text-xs" style={{ color: C.muted }}>{view.period} · {view.label} · {view.consumed}/{current.cantidadX20} entregados · quedan {view.remaining}</div>
           {current.estadoPago !== "pagada" && <div className="mt-1"><button className="text-xs mr-2" onClick={() => pay(current, "efectivo")} style={{ color: C.primary }}>Cobrar efectivo</button><button className="text-xs" onClick={() => pay(current, "mercadopago")} style={{ color: C.primary }}>Cobrar Mercado Pago</button></div>}
-          {puedeCorregir && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}><div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>¿Elegiste el plan equivocado?</div>{(db.promotions || []).filter((promotion) => promotion.activo && promotion.id !== current.promocionId).map((promotion) => <button key={promotion.id} onClick={() => changePlan(current, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>Cambiar a {promotion.nombre}</button>)}</div>}
+          {planesAlternativos.length > 0 && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}><div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>Cambiar plan de abono</div>{planesAlternativos.map((promotion) => <button key={promotion.id} onClick={() => changePlan(current, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>Cambiar a {promotion.nombre} ({promotion.cantidadX20}×20L)</button>)}</div>}
         </>}
         {history.length > 0 && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
           <button className="w-full flex items-center justify-between text-xs font-bold" onClick={() => setHistorialAbierto(open ? null : client.id)} style={{ color: C.primary }}><span>Historial de consumo</span><ChevronRight size={15} style={{ transform: open ? "rotate(90deg)" : "none" }} /></button>
@@ -4526,75 +4521,6 @@ function AdminStock({ db, mutate }) {
         {mensaje && <div className="text-xs font-bold mt-3" style={{ color: mensaje.includes("✓") ? C.success : C.danger }}>{mensaje}</div>}
         <div className="mt-3"><Btn full icon={Save} onClick={guardarStock}>Guardar stock</Btn></div>
       </Card>
-
-      <div className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.muted }}>
-        Salidas y cargas de hoy · {fechaLegible(hoyISO())}
-      </div>
-      <div className="flex flex-col gap-2 mb-4">
-        {db.config.repartidores.map((rep) => {
-          const stockRep = (db.stock || []).find((s) => s.id === rep.id);
-          const visitasRepHoy = (db.visitas || []).filter(
-            (v) => v.repartidorId === rep.id && v.fecha === hoyISO()
-          );
-          const resumen = resumenCargaRepartidorDia({
-            stockRepartidor: stockRep,
-            visitas: visitasRepHoy,
-            fecha: hoyISO(),
-          });
-
-          return (
-            <Card key={rep.id}>
-              <div className="flex items-center justify-between gap-2 mb-1">
-                <div className="font-bold text-sm">{rep.nombre}</div>
-                <Badge tone={resumen.tieneSalidaHoy ? "accent" : "muted"}>
-                  {resumen.tieneSalidaHoy
-                    ? `${resumen.salidasHoy.length} salida${resumen.salidasHoy.length !== 1 ? "s" : ""} hoy`
-                    : "Sin salida registrada hoy"}
-                </Badge>
-              </div>
-              {resumen.tieneSalidaHoy ? (
-                <>
-                  <div className="text-xs mb-2" style={{ color: C.muted }}>
-                    En camioneta ahora:{" "}
-                    <strong style={{ color: C.ink }}>
-                      {resumen.restanteEnCamioneta.b20}×20L · {resumen.restanteEnCamioneta.b12}×12L · {resumen.restanteEnCamioneta.sifon}×Sifón
-                    </strong>
-                    {" · "}Entregado hoy: {resumen.entregadosTotalHoy.b20}×20L · {resumen.entregadosTotalHoy.b12}×12L · {resumen.entregadosTotalHoy.sifon}×Sifón
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    {resumen.salidasHoy.map((salida, index) => {
-                      const hora = salida.timestamp
-                        ? new Date(salida.timestamp).toLocaleTimeString("es-AR", {
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })
-                        : "";
-                      return (
-                        <div
-                          key={salida.id || index}
-                          className="rounded-lg px-2.5 py-1.5 text-xs flex items-center justify-between"
-                          style={{ background: C.bg }}
-                        >
-                          <span className="font-semibold">
-                            Salida #{index + 1} {hora && `(${hora})`}
-                          </span>
-                          <span className="font-mono font-bold" style={{ color: C.primary }}>
-                            {salida.b20}×20L · {salida.b12}×12L · {salida.sifon}×Sifón
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </>
-              ) : (
-                <div className="text-xs" style={{ color: C.mutedLight }}>
-                  El repartidor todavía no cargó con cuántos bultos salió hoy.
-                </div>
-              )}
-            </Card>
-          );
-        })}
-      </div>
     </div>
   );
 }
@@ -5481,50 +5407,6 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
     pendientesAnterioresActivos.length > 0 ||
     citasSabadoActivas.length > 0;
 
-  const [mostrarSheetCarga, setMostrarSheetCarga] = useState(null);
-  const stockRepartidorActual = useMemo(
-    () => (db.stock || []).find((s) => s.id === repartidor.id) || { id: repartidor.id },
-    [db.stock, repartidor.id]
-  );
-  const resumenCargaHoy = useMemo(
-    () =>
-      resumenCargaRepartidorDia({
-        stockRepartidor: stockRepartidorActual,
-        visitas: visitasHoy,
-        fecha: fechaHoy,
-      }),
-    [stockRepartidorActual, visitasHoy, fechaHoy]
-  );
-
-  function iniciarOContinuarRecorrido() {
-    if (!resumenCargaHoy.tieneSalidaHoy) {
-      setMostrarSheetCarga("inicio");
-      return;
-    }
-    setVista("recorrido");
-  }
-
-  function guardarCargaSalida(carga) {
-    const irARecorrido = mostrarSheetCarga === "inicio";
-    const next = clone(db);
-    if (!next.stock) next.stock = [];
-    const idx = next.stock.findIndex((s) => s.id === repartidor.id);
-    const actual = idx >= 0 ? next.stock[idx] : { id: repartidor.id };
-    const actualizado = registrarCargaCamioneta({
-      stockActual: actual,
-      repartidorId: repartidor.id,
-      carga,
-      fecha: fechaHoy,
-      timestamp: Date.now(),
-      id: uid(),
-    });
-    if (idx >= 0) next.stock[idx] = actualizado;
-    else next.stock.push(actualizado);
-    mutate(next);
-    setMostrarSheetCarga(null);
-    if (irARecorrido) setVista("recorrido");
-  }
-
   return (
     <Screen>
       <TopBar
@@ -5566,9 +5448,7 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
             visitadosCount={completadosCount}
             porReintentarCount={volverMasTarde.length}
             enProgreso={enProgreso}
-            resumenCargaHoy={resumenCargaHoy}
-            onAbrirCarga={() => setMostrarSheetCarga("recarga")}
-            onEmpezar={iniciarOContinuarRecorrido}
+            onEmpezar={() => setVista("recorrido")}
           />
         )}
 
@@ -5585,25 +5465,10 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
             todosLosClientes={misClientes}
             clientesParaBusqueda={db.clientes}
             visitasHoy={visitasHoy}
-            resumenCargaHoy={resumenCargaHoy}
-            onAbrirCarga={() => setMostrarSheetCarga("recarga")}
             onSalir={() => setVista("inicio")}
           />
         )}
       </div>
-
-      {mostrarSheetCarga && (
-        <CargaCamionetaSheet
-          numeroSalida={resumenCargaHoy.salidasHoy.length + 1}
-          valoresIniciales={
-            resumenCargaHoy.tieneSalidaHoy
-              ? resumenCargaHoy.restanteEnCamioneta
-              : { b20: 0, b12: 0, sifon: 0 }
-          }
-          onClose={() => setMostrarSheetCarga(null)}
-          onConfirmar={guardarCargaSalida}
-        />
-      )}
 
       {vista !== "recorrido" && (
         <div
@@ -5641,116 +5506,6 @@ function RepartidorApp({ db, mutate, repartidor, onLogout, offline }) {
   );
 }
 
-function CargaCamionetaSheet({
-  numeroSalida = 1,
-  valoresIniciales = { b20: 0, b12: 0, sifon: 0 },
-  onClose,
-  onConfirmar,
-}) {
-  const [carga, setCarga] = useState(() => ({
-    b20: Math.max(0, Number(valoresIniciales?.b20) || 0),
-    b12: Math.max(0, Number(valoresIniciales?.b12) || 0),
-    sifon: Math.max(0, Number(valoresIniciales?.sifon) || 0),
-  }));
-
-  function cambiarValor(key, valor) {
-    setCarga((prev) => ({
-      ...prev,
-      [key]: Math.max(0, Math.floor(Number(valor) || 0)),
-    }));
-  }
-
-  function ajustarValor(key, delta) {
-    setCarga((prev) => ({
-      ...prev,
-      [key]: Math.max(0, (Number(prev[key]) || 0) + delta),
-    }));
-  }
-
-  return (
-    <Sheet
-      title={
-        numeroSalida > 1
-          ? `Salida #${numeroSalida} · Total en camioneta`
-          : "¿Con cuánto salís hoy?"
-      }
-      onClose={onClose}
-      closeOnBackdrop={false}
-      footer={
-        <Btn
-          full
-          size="lg"
-          icon={Check}
-          onClick={() => onConfirmar(carga)}
-        >
-          {numeroSalida > 1 ? "Guardar carga de camioneta" : "Confirmar y salir al recorrido"}
-        </Btn>
-      }
-    >
-      <div className="text-xs mb-3" style={{ color: C.muted }}>
-        Ingresá el <strong>total de bultos que hay ahora dentro de la camioneta</strong> (no la suma, sino el total con el que salís en esta vuelta).
-      </div>
-
-      <div className="flex flex-col gap-2.5">
-        {PRODUCTOS_CARGA_CAMIONETA.map((producto) => {
-          const cantidad = Number(carga[producto.key]) || 0;
-          return (
-            <Card key={producto.key}>
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <div className="font-bold text-sm">{producto.label}</div>
-                <Badge tone="accent">{cantidad} en camioneta</Badge>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => ajustarValor(producto.key, -5)}
-                  className="px-2.5 py-2 rounded-xl text-xs font-bold"
-                  style={{ background: C.bg, color: C.ink, border: `1px solid ${C.border}` }}
-                >
-                  -5
-                </button>
-                <button
-                  type="button"
-                  onClick={() => ajustarValor(producto.key, -1)}
-                  className="w-10 h-10 rounded-xl flex items-center justify-center"
-                  style={{ background: C.bg, color: C.ink, border: `1px solid ${C.border}` }}
-                >
-                  <Minus size={16} />
-                </button>
-                <Input
-                  type="number"
-                  inputMode="numeric"
-                  min="0"
-                  value={cantidad === 0 ? "" : cantidad}
-                  placeholder="0"
-                  onChange={(e) => cambiarValor(producto.key, e.target.value)}
-                  style={{ textAlign: "center", fontWeight: 800, fontSize: 16 }}
-                />
-                <button
-                  type="button"
-                  onClick={() => ajustarValor(producto.key, 1)}
-                  className="w-10 h-10 rounded-xl flex items-center justify-center"
-                  style={{ background: C.primary, color: "#fff" }}
-                >
-                  <Plus size={16} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => ajustarValor(producto.key, 5)}
-                  className="px-2.5 py-2 rounded-xl text-xs font-bold"
-                  style={{ background: C.accentSoft, color: C.primary, border: `1px solid ${C.border}` }}
-                >
-                  +5
-                </button>
-              </div>
-            </Card>
-          );
-        })}
-      </div>
-    </Sheet>
-  );
-}
-
 function RepartidorInicio({
   deHoy,
   totalRecorridoCount,
@@ -5760,8 +5515,6 @@ function RepartidorInicio({
   visitadosCount,
   porReintentarCount = 0,
   enProgreso,
-  resumenCargaHoy,
-  onAbrirCarga,
   onEmpezar,
 }) {
   const quedanPorAtender =
@@ -5828,59 +5581,12 @@ function RepartidorInicio({
           >
             {!quedanPorAtender
               ? "Ver recorrido completo"
-              : enProgreso || resumenCargaHoy?.tieneSalidaHoy
+              : enProgreso
               ? "Continuar recorrido"
               : "Empezar recorrido"}
           </Btn>
         </>
       )}
-
-      <div className="w-full max-w-md mt-6 text-left">
-        <Card style={{ background: C.accentSoft, border: `1px solid ${C.border}` }}>
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <div>
-              <div className="text-xs font-extrabold uppercase tracking-wide" style={{ color: C.primary }}>
-                En tu camioneta hoy
-              </div>
-              <div className="text-[11px]" style={{ color: C.muted }}>
-                {resumenCargaHoy?.tieneSalidaHoy
-                  ? `Salida #${resumenCargaHoy.salidasHoy.length} activa`
-                  : "Todavía no cargaste con cuánto salís"}
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={onAbrirCarga}
-              className="px-3 py-1.5 rounded-xl text-xs font-bold"
-              style={{ background: C.primary, color: "#fff" }}
-            >
-              {resumenCargaHoy?.tieneSalidaHoy ? "Recargar / Nueva salida" : "Cargar salida"}
-            </button>
-          </div>
-
-          {resumenCargaHoy?.tieneSalidaHoy && (
-            <div className="grid grid-cols-3 gap-2 mt-2">
-              {PRODUCTOS_CARGA_CAMIONETA.map((p) => (
-                <div
-                  key={p.key}
-                  className="rounded-xl p-2 text-center"
-                  style={{ background: C.surface }}
-                >
-                  <div className="text-[10px] font-bold uppercase" style={{ color: C.muted }}>
-                    {p.label}
-                  </div>
-                  <div className="font-mono font-extrabold text-base" style={{ color: C.ink }}>
-                    {resumenCargaHoy.restanteEnCamioneta[p.key]}
-                  </div>
-                  <div className="text-[10px]" style={{ color: C.mutedLight }}>
-                    saliste con {resumenCargaHoy.ultimaSalida?.[p.key] || 0}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
-      </div>
     </div>
   );
 }
@@ -6170,8 +5876,6 @@ function RepartidorRecorrido({
   todosLosClientes = [],
   clientesParaBusqueda = [],
   visitasHoy,
-  resumenCargaHoy,
-  onAbrirCarga,
   onSalir,
 }) {
   const [activo, setActivo] = useState(null);
@@ -6577,44 +6281,6 @@ const gruposDiasAnteriores =
           {visitadosFinalizadosTotales.length}/{clientes.length} completados
         </Badge>
       </div>
-
-      {resumenCargaHoy && (
-        <Card
-          className="mb-3"
-          style={{ background: C.accentSoft, border: `1px solid ${C.border}` }}
-        >
-          <div className="flex items-center justify-between gap-2">
-            <div>
-              <div
-                className="text-[11px] font-extrabold uppercase tracking-wide"
-                style={{ color: C.primary }}
-              >
-                En tu camioneta{" "}
-                {resumenCargaHoy.tieneSalidaHoy
-                  ? `(Salida #${resumenCargaHoy.salidasHoy.length})`
-                  : ""}
-              </div>
-              <div className="flex gap-2 flex-wrap mt-1">
-                {PRODUCTOS_CARGA_CAMIONETA.map((p) => (
-                  <Badge key={p.key} tone="accent">
-                    {p.corto}: {resumenCargaHoy.restanteEnCamioneta[p.key]}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={onAbrirCarga}
-              className="px-3 py-1.5 rounded-xl text-xs font-bold flex-shrink-0"
-              style={{ background: C.primary, color: "#fff" }}
-            >
-              {resumenCargaHoy.tieneSalidaHoy
-                ? "Recargar / Nueva salida"
-                : "Cargar salida"}
-            </button>
-          </div>
-        </Card>
-      )}
 
       <div className="relative mb-4">
         <Search

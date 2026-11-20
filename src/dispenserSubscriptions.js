@@ -403,23 +403,26 @@ export function subscriptionUsageHistory({ clientId, subscriptions = [], visits 
 
 export function changeSubscriptionPromotion({ subscription, promotion }) {
   if (!subscription) throw new Error("No se encontró el abono a corregir.");
-  if (subscription.reciboPago) {
-    throw new Error("No se puede cambiar un abono que ya tiene un cobro registrado.");
-  }
-  if (Number(subscription.cantidadConsumida) > 0) {
-    throw new Error("No se puede cambiar un abono que ya tiene una entrega registrada.");
-  }
   if (!promotion?.activo || !validatePromotion(promotion).ok) {
     throw new Error("La promoción elegida no está disponible.");
   }
 
-  return {
+  const cantidadConsumida = Math.max(0, Number(subscription.cantidadConsumida) || 0);
+  const cantidadRestante = Math.max(0, Number(promotion.cantidadX20) - cantidadConsumida);
+  const next = {
     ...subscription,
     ...createPromotionSnapshot(promotion),
-    cantidadConsumida: 0,
-    cantidadRestante: Number(promotion.cantidadX20),
-    estadoPago: "pendiente",
+    cantidadConsumida,
+    cantidadRestante,
+    estadoPago: subscription.estadoPago || "pendiente",
   };
+  if (subscription.reciboPago) {
+    next.reciboPago = {
+      ...subscription.reciboPago,
+      monto: Number(promotion.precioMensual),
+    };
+  }
+  return next;
 }
 
 export function recordSubscriptionPayment(subscription, { metodo, now = new Date() }) {
