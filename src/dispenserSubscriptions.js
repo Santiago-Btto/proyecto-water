@@ -41,20 +41,11 @@ export function getPeriod(now = new Date()) {
   return `${year}-${month}`;
 }
 
-function isUnpaidOverdue(subscription) {
-  return subscription.estadoPago === "vencida" && !subscription.reciboPago;
-}
-
 export function canSelectSubscription({ client, subscriptions = [], now = new Date() }) {
   if (!client?.maquinaFrioCalor) return { ok: false, error: "Solo los clientes con máquina frío/calor pueden suscribirse." };
-  const day = now.getDate();
-  if (day < 1 || day > 10) return { ok: false, error: "La promoción se puede elegir del día 1 al 10." };
   const period = getPeriod(now);
   if (subscriptions.some((subscription) => subscription.clienteId === client.id && subscription.periodo === period)) {
     return { ok: false, error: "El cliente ya tiene una suscripción para este período." };
-  }
-  if (subscriptions.some((subscription) => subscription.clienteId === client.id && subscription.periodo < period && isUnpaidOverdue(subscription))) {
-    return { ok: false, error: "El cliente tiene una suscripción vencida pendiente." };
   }
   return { ok: true };
 }

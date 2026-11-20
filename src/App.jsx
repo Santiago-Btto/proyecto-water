@@ -1341,9 +1341,16 @@ function AdminSuscripciones({ db, mutate }) {
         (db.subscriptions || []).find((item) => item.id === summary?.subscriptionId);
       const view = clientSubscriptionSummaryView({ client, subscription: current });
       const selectable = canSelectSubscription({ client, subscriptions: db.subscriptions || [] });
-      const planesAlternativos = current
-        ? (db.promotions || []).filter(
-            (promotion) => promotion.activo && promotion.id !== current.promocionId
+      const promocionesActivas = (db.promotions || []).filter((item) => item.activo);
+      const promocionesParaCambio = current
+        ? promocionesActivas.filter(
+            (promotion) =>
+              promotion.id !== current.promocionId &&
+              !(
+                Number(promotion.cantidadX20) === Number(current.cantidadX20) &&
+                (promotion.nombre === current.promocionNombre ||
+                  Number(promotion.precioMensual) === Number(current.precioMensual))
+              )
           )
         : [];
       const history = subscriptionUsageHistory({ clientId: client.id, subscriptions: db.subscriptions || [], visits: db.visitas || [] });
@@ -1352,11 +1359,14 @@ function AdminSuscripciones({ db, mutate }) {
         <div className="font-bold text-sm">{client.nombre}</div>
         {!current ? <>
           <div className="text-xs my-1" style={{ color: C.muted }}>{view.label}</div>
-          {selectable.ok && (db.promotions || []).filter((item) => item.activo).map((promotion) => <button key={promotion.id} onClick={() => selectSubscription(client, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>{promotion.nombre}</button>)}
+          {selectable.ok && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
+            <div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>Asignar plan de abono</div>
+            {promocionesActivas.length > 0 ? promocionesActivas.map((promotion) => <button key={promotion.id} onClick={() => selectSubscription(client, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>Asignar {promotion.nombre} ({promotion.cantidadX20}×20L)</button>) : <div className="text-xs" style={{ color: C.muted }}>Creá o activá una promoción arriba para asignarla</div>}
+          </div>}
         </> : <>
           <div className="text-xs" style={{ color: C.muted }}>{view.period} · {view.label} · {view.consumed}/{current.cantidadX20} entregados · quedan {view.remaining}</div>
           {current.estadoPago !== "pagada" && <div className="mt-1"><button className="text-xs mr-2" onClick={() => pay(current, "efectivo")} style={{ color: C.primary }}>Cobrar efectivo</button><button className="text-xs" onClick={() => pay(current, "mercadopago")} style={{ color: C.primary }}>Cobrar Mercado Pago</button></div>}
-          {planesAlternativos.length > 0 && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}><div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>Cambiar plan de abono</div>{planesAlternativos.map((promotion) => <button key={promotion.id} onClick={() => changePlan(current, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>Cambiar a {promotion.nombre} ({promotion.cantidadX20}×20L)</button>)}</div>}
+          {promocionesParaCambio.length > 0 && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}><div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>Cambiar plan de abono</div>{promocionesParaCambio.map((promotion) => <button key={promotion.id} onClick={() => changePlan(current, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>Cambiar a {promotion.nombre} ({promotion.cantidadX20}×20L)</button>)}</div>}
         </>}
         {history.length > 0 && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
           <button className="w-full flex items-center justify-between text-xs font-bold" onClick={() => setHistorialAbierto(open ? null : client.id)} style={{ color: C.primary }}><span>Historial de consumo</span><ChevronRight size={15} style={{ transform: open ? "rotate(90deg)" : "none" }} /></button>

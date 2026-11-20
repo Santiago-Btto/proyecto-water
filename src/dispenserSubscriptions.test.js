@@ -205,18 +205,55 @@ describe("durable subscription records", () => {
 describe("monthly subscription selection", () => {
   const clock = new Date("2026-08-10T12:00:00");
   const eligible = { id: "cliente-1", maquinaFrioCalor: true };
+  const promotion = { id: "promo-6", nombre: "Plan 6", cantidadX20: 6, precioMensual: 6000, activo: true };
 
-  it("allows an eligible client from day 1 through day 10", () => {
+  it("allows an eligible client on any day of the month and even with a prior overdue subscription", () => {
     expect(getPeriod(clock)).toBe("2026-08");
-    expect(canSelectSubscription({ client: eligible, subscriptions: [], now: clock })).toEqual({ ok: true });
     expect(canSelectSubscription({ client: eligible, subscriptions: [], now: new Date("2026-08-01T12:00:00") })).toEqual({ ok: true });
+    expect(canSelectSubscription({ client: eligible, subscriptions: [], now: clock })).toEqual({ ok: true });
+    expect(canSelectSubscription({ client: eligible, subscriptions: [], now: new Date("2026-08-20T12:00:00") })).toEqual({ ok: true });
+    expect(canSelectSubscription({ client: eligible, subscriptions: [], now: new Date("2026-08-31T12:00:00") })).toEqual({ ok: true });
+    expect(
+      canSelectSubscription({
+        client: eligible,
+        subscriptions: [{ id: "cliente-1-2026-07", clienteId: "cliente-1", periodo: "2026-07", estadoPago: "vencida" }],
+        now: new Date("2026-08-20T12:00:00"),
+      })
+    ).toEqual({ ok: true });
+    expect(
+      createSubscription({
+        client: eligible,
+        promotion,
+        subscriptions: [{ id: "cliente-1-2026-07", clienteId: "cliente-1", periodo: "2026-07", estadoPago: "vencida" }],
+        now: new Date("2026-11-20T12:00:00"),
+      })
+    ).toMatchObject({
+      id: "cliente-1-2026-11",
+      clienteId: "cliente-1",
+      periodo: "2026-11",
+      promocionId: "promo-6",
+      cantidadX20: 6,
+      cantidadConsumida: 0,
+      cantidadRestante: 6,
+      estadoPago: "pendiente",
+    });
   });
 
-  it("rejects ineligible clients, day 11, duplicates, and a prior overdue subscription", () => {
-    expect(canSelectSubscription({ client: { ...eligible, maquinaFrioCalor: false }, subscriptions: [], now: clock }).ok).toBe(false);
-    expect(canSelectSubscription({ client: eligible, subscriptions: [], now: new Date("2026-08-11T12:00:00") }).ok).toBe(false);
-    expect(canSelectSubscription({ client: eligible, subscriptions: [{ id: "cliente-1-2026-08", clienteId: "cliente-1", periodo: "2026-08" }], now: clock }).ok).toBe(false);
-    expect(canSelectSubscription({ client: eligible, subscriptions: [{ id: "cliente-1-2026-07", clienteId: "cliente-1", periodo: "2026-07", estadoPago: "vencida" }], now: clock }).ok).toBe(false);
+  it("rejects only ineligible clients and duplicate subscriptions for the same period", () => {
+    expect(canSelectSubscription({ client: { ...eligible, maquinaFrioCalor: false }, subscriptions: [], now: clock })).toEqual({
+      ok: false,
+      error: "Solo los clientes con máquina frío/calor pueden suscribirse.",
+    });
+    expect(
+      canSelectSubscription({
+        client: eligible,
+        subscriptions: [{ id: "cliente-1-2026-08", clienteId: "cliente-1", periodo: "2026-08" }],
+        now: new Date("2026-08-20T12:00:00"),
+      })
+    ).toEqual({
+      ok: false,
+      error: "El cliente ya tiene una suscripción para este período.",
+    });
   });
 });
 
