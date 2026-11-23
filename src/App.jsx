@@ -52,7 +52,10 @@ import {
   ordenClienteEnDia,
   ubicarClienteEnDia,
 } from "./dayRouteOrdering";
-import { buscarClientesParaRepartidor } from "./routeSearch";
+import {
+  buscarClientesParaRepartidor,
+  filtrarYAgruparClientesOtrosDias,
+} from "./routeSearch";
 import {
   esSesionAutenticada,
   parsearPerfilActivo,
@@ -5548,8 +5551,12 @@ function RepartidorInicio({
             No tenés clientes para hoy
           </div>
           <div className="text-xs mb-6" style={{ color: C.muted }}>
-            Revisá "Mis clientes" para ver tus días de visita.
+            Podés entrar igual para buscar o visitar clientes de otros días.
           </div>
+
+          <Btn size="lg" onClick={onEmpezar} icon={Truck}>
+            Abrir recorrido / Otros días
+          </Btn>
         </>
       ) : (
         <>
@@ -5900,10 +5907,13 @@ function RepartidorRecorrido({
     diasAnteriores: CLIENTES_POR_BLOQUE,
     visitados: CLIENTES_POR_BLOQUE,
   });
-  // Clientes cuyo día normal ya pasó durante esta semana.
-// Empieza cerrado.
-  const [mostrarDiasAnteriores, setMostrarDiasAnteriores] =
-  useState(false);
+  // Clientes asignados a otros días de la semana (ej. Viernes cuando hoy es Lunes).
+  // Si no hay clientes del día de hoy, empieza abierto automáticamente.
+  const [mostrarDiasAnteriores, setMostrarDiasAnteriores] = useState(
+    () => (clientes || []).length === 0
+  );
+  const [diaFiltroOtrosDias, setDiaFiltroOtrosDias] = useState("todos");
+  const [buscaOtrosDias, setBuscaOtrosDias] = useState("");
   const diaActual = diaSemanaHoy();
 
   // Si hubiese más de una visita del mismo cliente hoy, tomamos la más reciente.
@@ -5950,104 +5960,39 @@ function RepartidorRecorrido({
   const clientesFiltrados = clientes;
 
   // ==========================================================
-// CLIENTES DE DÍAS ANTERIORES DE ESTA SEMANA
-//
-// Ejemplo:
-// si hoy es jueves:
-//   lunes, martes y miércoles.
-//
-// No incluimos:
-// - clientes que ya forman parte del recorrido actual;
-// - clientes que ya fueron visitados hoy;
-// - días futuros;
-// - el día de hoy.
-//
-// Si un cliente tiene más de un día asignado, tomamos
-// como referencia el día anterior más cercano a hoy.
-// ==========================================================
-const indiceHoy = DIAS.indexOf(diaActual);
-
-const diasAnterioresSemana =
-  indiceHoy > 0
-    ? DIAS.slice(0, indiceHoy)
-    : [];
-
-const idsClientesRecorrido = new Set(
-  clientes.map((c) => c.id)
-);
-
-const clientesDiasAnteriores = todosLosClientes
-  .filter((c) => {
-    // Ya está incluido normalmente en el recorrido.
-    if (idsClientesRecorrido.has(c.id)) return false;
-
-    // Ya fue atendido hoy.
-    if (visitaPorCliente.has(c.id)) return false;
-
-    // Buscamos qué días anteriores tiene asignados.
-    const diasCliente = c.diasVisita || [];
-
-    const tieneDiaAnterior =
-      diasAnterioresSemana.some((dia) =>
-        diasCliente.includes(dia)
-      );
-
-    if (!tieneDiaAnterior) return false;
-
-    return true;
-  })
-  .map((c) => {
-    // Si tiene varios días anteriores, usamos el más cercano.
-    const diasCliente = c.diasVisita || [];
-
-    const diaAnteriorReferencia =
-      [...diasAnterioresSemana]
-        .reverse()
-        .find((dia) =>
-          diasCliente.includes(dia)
-        ) || "";
-
-    return {
-      ...c,
-      diaAnteriorReferencia,
-    };
-  })
-  .sort((a, b) => {
-    const ia = DIAS.indexOf(
-      a.diaAnteriorReferencia
-    );
-
-    const ib = DIAS.indexOf(
-      b.diaAnteriorReferencia
-    );
-
-    if (ia !== ib) return ia - ib;
-
-    const ordenA = ordenClienteEnDia(a, a.diaAnteriorReferencia);
-    const ordenB = ordenClienteEnDia(b, b.diaAnteriorReferencia);
-
-    if (ordenA !== ordenB) {
-      return ordenA - ordenB;
-    }
-
-    return (a.nombre || "").localeCompare(
-      b.nombre || ""
-    );
-  });
-
-// Agrupamos visualmente por lunes, martes, miércoles, etc.
-const gruposDiasAnteriores =
-  diasAnterioresSemana
-    .map((dia) => ({
-      dia,
-      clientes: clientesDiasAnteriores.filter(
-        (c) =>
-          c.diaAnteriorReferencia === dia
-      ),
-    }))
-    .filter(
-      (grupo) => grupo.clientes.length > 0
-    );
+  // CLIENTES DE OTROS DÍAS DE LA SEMANA
+  //
+  // Incluye todos los clientes del repartidor asignados a otros días
+  // distintos de hoy (ej. Viernes o Sábado aunque hoy sea Lunes),
+  // excluyendo los que ya están en el recorrido actual o visitados hoy.
+  // Permite filtrar por un día específico (ej. Viernes) o buscar por
+  // nombre, dirección o departamento.
+  // ==========================================================
+  const {
+    grupos: gruposDiasAnteriores,
+    clientes: clientesDiasAnteriores,
+    conteoPorDia: conteoOtrosDiasPorDia,
+    diasDisponibles: diasDisponiblesOtrosDias,
+    totalDisponibles: totalDisponiblesOtrosDias,
+  } = useMemo(
+    () =>
+      filtrarYAgruparClientesOtrosDias({
+        clientes: todosLosClientes,
+        diaActual,
+        idsRecorridoActual: clientes.map((c) => c.id),
+        idsVisitadosHoy: Array.from(visitaPorCliente.keys()),
+        diaFiltro: diaFiltroOtrosDias,
+        textoBusqueda: buscaOtrosDias,
+      }),
+    [
+      todosLosClientes,
+      diaActual,
+      clientes,
+      visitaPorCliente,
+      diaFiltroOtrosDias,
+      buscaOtrosDias,
+    ]
+  );
 
   // ==========================================
   // TOTALES REALES DEL RECORRIDO
@@ -6693,191 +6638,287 @@ const gruposDiasAnteriores =
       )}
 
       {/* =====================================================
-    CLIENTES DE DÍAS ANTERIORES
-    ===================================================== */}
-{!textoBusqueda && diasAnterioresSemana.length > 0 && (
-  <div className="mb-4">
-    <button
-      type="button"
-      onClick={() =>
-        setMostrarDiasAnteriores(
-          !mostrarDiasAnteriores
-        )
-      }
-      className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
-      style={{
-        background: C.surface,
-        border: `1px solid ${C.border}`,
-      }}
-    >
-      <div className="flex items-center gap-2">
-        <div
-          className="w-8 h-8 rounded-lg flex items-center justify-center"
-          style={{
-            background: C.accentSoft,
-          }}
-        >
-          <Users
-            size={16}
-            color={C.primary}
-          />
-        </div>
-
-        <div className="text-left">
-          <div className="text-sm font-bold">
-            Clientes de días anteriores
-          </div>
-
-          <div
-            className="text-[10px]"
-            style={{ color: C.muted }}
+          CLIENTES DE OTROS DÍAS
+          ===================================================== */}
+      {!textoBusqueda && (
+        <div className="mb-4">
+          <button
+            type="button"
+            onClick={() => setMostrarDiasAnteriores(!mostrarDiasAnteriores)}
+            className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
+            style={{
+              background: C.surface,
+              border: `1px solid ${C.border}`,
+            }}
           >
-            {clientesDiasAnteriores.length} cliente
-            {clientesDiasAnteriores.length !== 1
-              ? "s"
-              : ""}{" "}
-            disponible
-            {clientesDiasAnteriores.length !== 1
-              ? "s"
-              : ""}
-          </div>
-        </div>
-      </div>
+            <div className="flex items-center gap-2">
+              <div
+                className="w-8 h-8 rounded-lg flex items-center justify-center"
+                style={{
+                  background: C.accentSoft,
+                }}
+              >
+                <Users size={16} color={C.primary} />
+              </div>
 
-      <ChevronRight
-        size={17}
-        color={C.muted}
-        style={{
-          transform: mostrarDiasAnteriores
-            ? "rotate(90deg)"
-            : "rotate(0deg)",
-          transition: "transform 0.2s",
-        }}
-      />
-    </button>
+              <div className="text-left">
+                <div className="text-sm font-bold">Clientes de otros días</div>
 
-    {mostrarDiasAnteriores && (
-      <div className="mt-2">
-        {clientesDiasAnteriores.length === 0 ? (
-          <Card>
-            <div
-              className="text-xs text-center"
-              style={{
-                color: C.mutedLight,
-              }}
-            >
-              No hay clientes disponibles de días anteriores.
+                <div className="text-[10px]" style={{ color: C.muted }}>
+                  {totalDisponiblesOtrosDias} cliente
+                  {totalDisponiblesOtrosDias !== 1 ? "s" : ""} disponible
+                  {totalDisponiblesOtrosDias !== 1 ? "s" : ""} (ej. Viernes u
+                  otros días)
+                </div>
+              </div>
             </div>
-          </Card>
-        ) : (
-          <div className="flex flex-col gap-4">
-            {gruposDiasAnterioresVisibles.map(
-              ({ dia, clientes: clientesGrupo }) => (
-                <div key={dia}>
-                  <div
-                    className="text-[10px] font-extrabold uppercase tracking-wide mb-2 px-1"
+
+            <ChevronRight
+              size={17}
+              color={C.muted}
+              style={{
+                transform: mostrarDiasAnteriores
+                  ? "rotate(90deg)"
+                  : "rotate(0deg)",
+                transition: "transform 0.2s",
+              }}
+            />
+          </button>
+
+          {mostrarDiasAnteriores && (
+            <div className="mt-2">
+              <div className="relative mb-2">
+                <Search
+                  size={15}
+                  color={C.mutedLight}
+                  style={{ position: "absolute", left: 10, top: 10 }}
+                />
+                <input
+                  value={buscaOtrosDias}
+                  onChange={(e) => setBuscaOtrosDias(e.target.value)}
+                  placeholder="Buscar cliente de otros días por nombre o dirección..."
+                  className="w-full rounded-xl pl-8 pr-8 py-2 text-xs outline-none"
+                  style={{
+                    background: C.surface,
+                    border: `1px solid ${C.border}`,
+                    color: C.ink,
+                  }}
+                />
+                {buscaOtrosDias && (
+                  <button
+                    type="button"
+                    onClick={() => setBuscaOtrosDias("")}
+                    style={{ position: "absolute", right: 8, top: 8 }}
+                  >
+                    <X size={16} color={C.muted} />
+                  </button>
+                )}
+              </div>
+
+              {diasDisponiblesOtrosDias.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-3">
+                  <button
+                    type="button"
+                    onClick={() => setDiaFiltroOtrosDias("todos")}
+                    className="px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors"
                     style={{
-                      color: C.primary,
+                      background:
+                        diaFiltroOtrosDias === "todos" ? C.primary : C.surface,
+                      color: diaFiltroOtrosDias === "todos" ? "#fff" : C.ink,
+                      border: `1px solid ${
+                        diaFiltroOtrosDias === "todos" ? C.primary : C.border
+                      }`,
                     }}
                   >
-                    {dia}
-                  </div>
+                    Todos ({totalDisponiblesOtrosDias})
+                  </button>
 
-                  <div className="flex flex-col gap-2">
-                    {clientesGrupo.map((c) => (
-                      <Card
-                        key={`anterior-${c.id}`}
+                  {diasDisponiblesOtrosDias.map((dia) => {
+                    const activoDia = diaFiltroOtrosDias === dia;
+                    return (
+                      <button
+                        key={`filtro-otro-dia-${dia}`}
+                        type="button"
                         onClick={() =>
-                          abrirNuevaVisita(c)
+                          setDiaFiltroOtrosDias(activoDia ? "todos" : dia)
                         }
+                        className="px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors"
                         style={{
-                          cursor: "pointer",
+                          background: activoDia ? C.primary : C.surface,
+                          color: activoDia ? "#fff" : C.ink,
+                          border: `1px solid ${
+                            activoDia ? C.primary : C.border
+                          }`,
                         }}
                       >
-                        <div className="flex items-start gap-2">
-                          <div
-                            className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0"
-                            style={{
-                              background:
-                                C.accentSoft,
-                              color: C.primary,
-                            }}
-                          >
-                            <Plus size={15} />
-                          </div>
-
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <div className="font-bold text-sm">
-                                {c.nombre}
-                              </div>
-
-                              <Badge tone="accent">
-                                {dia.slice(0, 3)}
-                              </Badge>
-                            </div>
-
-                            <div
-                              className="text-xs"
-                              style={{
-                                color: C.muted,
-                              }}
-                            >
-                              {c.direccion}
-                            </div>
-
-                            {Number(
-                              c.deudaAcumulada
-                            ) > 0 && (
-                              <div className="mt-1">
-                                <Badge tone="danger">
-                                  Debe{" "}
-                                  {formatMoney(
-                                    c.deudaAcumulada
-                                  )}
-                                </Badge>
-                              </div>
-                            )}
-
-                            <div
-                              className="text-[10px] mt-1.5"
-                              style={{
-                                color:
-                                  C.mutedLight,
-                              }}
-                            >
-                              Tocar para registrar una
-                              visita extraordinaria hoy
-                            </div>
-                          </div>
-
-                          <ChevronRight
-                            size={17}
-                            color={C.mutedLight}
-                          />
-                        </div>
-                      </Card>
-                    ))}
-                  </div>
+                        {dia} ({conteoOtrosDiasPorDia[dia] || 0})
+                      </button>
+                    );
+                  })}
                 </div>
-              )
-            )}
-          </div>
-        )}
-        <MostrarMasClientes
-          mostrados={clientesDiasAnterioresVisibles.length}
-          total={clientesDiasAnteriores.length}
-          onClick={() =>
-            mostrarMasClientes(
-              "diasAnteriores",
-              clientesDiasAnteriores.length
-            )
-          }
-        />
-      </div>
-    )}
-  </div>
-)}
+              )}
+
+              {clientesDiasAnteriores.length === 0 ? (
+                <Card>
+                  <div
+                    className="text-xs text-center"
+                    style={{
+                      color: C.mutedLight,
+                    }}
+                  >
+                    {buscaOtrosDias.trim() || diaFiltroOtrosDias !== "todos"
+                      ? "No se encontraron clientes de otros días con ese filtro."
+                      : "No hay clientes disponibles de otros días."}
+                  </div>
+                </Card>
+              ) : (
+                <div className="flex flex-col gap-4">
+                  {gruposDiasAnterioresVisibles.map(
+                    ({ dia, clientes: clientesGrupo }) => (
+                      <div key={dia}>
+                        <div
+                          className="text-[10px] font-extrabold uppercase tracking-wide mb-2 px-1"
+                          style={{
+                            color: C.primary,
+                          }}
+                        >
+                          {dia} ({clientesGrupo.length})
+                        </div>
+
+                        <div className="flex flex-col gap-2">
+                          {clientesGrupo.map((c) => {
+                            const ordenEnDia = ordenClienteEnDia(c, dia);
+                            return (
+                              <Card
+                                key={`anterior-${dia}-${c.id}`}
+                                onClick={() => abrirNuevaVisita(c)}
+                                style={{
+                                  cursor: "pointer",
+                                }}
+                              >
+                                <div className="flex items-start gap-2">
+                                  <div
+                                    className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 font-extrabold text-xs"
+                                    style={{
+                                      background: C.accentSoft,
+                                      color: C.primary,
+                                    }}
+                                  >
+                                    {Number.isFinite(ordenEnDia) ? (
+                                      ordenEnDia
+                                    ) : (
+                                      <Plus size={15} />
+                                    )}
+                                  </div>
+
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <div className="font-bold text-sm">
+                                        {c.nombre}
+                                      </div>
+
+                                      {(c.diasVisita || [dia]).map((d) => (
+                                        <Badge
+                                          key={`${c.id}-dia-${d}`}
+                                          tone="accent"
+                                        >
+                                          {d.slice(0, 3)}
+                                        </Badge>
+                                      ))}
+                                    </div>
+
+                                    <a
+                                      href={urlGoogleMaps(
+                                        c.direccion,
+                                        c.departamento
+                                      )}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="text-xs flex items-center gap-1 w-fit mt-0.5"
+                                      style={{ color: C.primary }}
+                                    >
+                                      <MapPin size={12} />
+                                      <span>
+                                        {formatClientAddress(
+                                          c.direccion,
+                                          c.departamento
+                                        )}
+                                      </span>
+                                    </a>
+
+                                    {Number(c.deudaAcumulada) > 0 && (
+                                      <div className="mt-1">
+                                        <Badge tone="danger">
+                                          Debe{" "}
+                                          {formatMoney(c.deudaAcumulada)}
+                                        </Badge>
+                                      </div>
+                                    )}
+
+                                    <div className="flex flex-wrap gap-1 mt-1">
+                                      {totalEnvasesPrestados(
+                                        envasesPermanentesDe(c)
+                                      ) > 0 && (
+                                        <Badge tone="accent">
+                                          Permanentes:{" "}
+                                          {textoEnvasesPrestados(
+                                            envasesPermanentesDe(c)
+                                          )}
+                                        </Badge>
+                                      )}
+
+                                      {totalEnvasesPrestados(
+                                        envasesExtraDe(c)
+                                      ) > 0 && (
+                                        <Badge tone="warning">
+                                          Extra:{" "}
+                                          {textoEnvasesPrestados(
+                                            envasesExtraDe(c)
+                                          )}
+                                        </Badge>
+                                      )}
+                                    </div>
+
+                                    <div
+                                      className="text-[10px] mt-1.5"
+                                      style={{
+                                        color: C.mutedLight,
+                                      }}
+                                    >
+                                      Tocar para registrar una visita
+                                      extraordinaria hoy
+                                    </div>
+                                  </div>
+
+                                  <ChevronRight
+                                    size={17}
+                                    color={C.mutedLight}
+                                  />
+                                </div>
+                              </Card>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+              <MostrarMasClientes
+                mostrados={clientesDiasAnterioresVisibles.length}
+                total={clientesDiasAnteriores.length}
+                onClick={() =>
+                  mostrarMasClientes(
+                    "diasAnteriores",
+                    clientesDiasAnteriores.length
+                  )
+                }
+              />
+            </div>
+          )}
+        </div>
+      )}
 
       {/* CLIENTES VISITADOS Y FINALIZADOS */}
       {!textoBusqueda && visitadosParaMostrar.length > 0 && (
