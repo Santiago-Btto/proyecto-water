@@ -33,12 +33,15 @@ import {
   canSelectSubscription,
   clientSubscriptionSummaryView,
   createSubscription,
+  deletePromotion,
   deliveryQuotaFeedback,
   formatVisitProductsText,
   getPeriod,
   prepareSubscriptionVisitEdition,
   recordSubscriptionPayment,
+  removeClientSubscription,
   renewMonthlySubscriptions,
+  resetClientSubscription,
   resolveClientSubscriptionForPeriod,
   splitX20Delivery,
   subscriptionMetrics,
@@ -1733,7 +1736,11 @@ function AdminSuscripciones({ db, mutate }) {
 
       const nextClients = db.clientes.map((item) =>
         item.id === client.id
-          ? { ...item, subscriptionSummary: subscriptionSummaryFrom(targetSub) }
+          ? {
+              ...item,
+              abonoCancelado: false,
+              subscriptionSummary: subscriptionSummaryFrom(targetSub),
+            }
           : item
       );
 
@@ -1755,7 +1762,15 @@ function AdminSuscripciones({ db, mutate }) {
   function selectSubscription(client, promotion) {
     try {
       const subscription = createSubscription({ client, promotion, subscriptions: db.subscriptions || [] });
-      const clients = db.clientes.map((item) => item.id === client.id ? { ...item, subscriptionSummary: subscriptionSummaryFrom(subscription) } : item);
+      const clients = db.clientes.map((item) =>
+        item.id === client.id
+          ? {
+              ...item,
+              abonoCancelado: false,
+              subscriptionSummary: subscriptionSummaryFrom(subscription),
+            }
+          : item
+      );
       mutate({ ...db, clientes: clients, subscriptions: [...(db.subscriptions || []), subscription] });
       setError("");
     } catch (cause) { setError(cause.message); }
@@ -1780,6 +1795,7 @@ function AdminSuscripciones({ db, mutate }) {
         client.id === subscription.clienteId
           ? {
               ...client,
+              abonoCancelado: false,
               subscriptionSummary: subscriptionSummaryFrom(changed),
             }
           : client
@@ -1787,6 +1803,75 @@ function AdminSuscripciones({ db, mutate }) {
       mutate({ ...db, clientes, subscriptions });
       setError("");
     } catch (cause) { setError(cause.message); }
+  }
+
+  function eliminarPromocion(promotionId) {
+    mutate({
+      ...db,
+      promotions: deletePromotion(db.promotions || [], promotionId),
+    });
+    setError("");
+    setOkMsg("Promoción eliminada ✓");
+  }
+
+  function reiniciarAbonoCliente(client, subscription) {
+    try {
+      const {
+        subscription: resetSub,
+        client: updatedClient,
+        visits: updatedVisits,
+      } = resetClientSubscription({
+        subscription,
+        client,
+        visits: db.visitas || [],
+      });
+      const existing = db.subscriptions || [];
+      const exists = existing.some((item) => item.id === resetSub.id);
+      const nextSubscriptions = exists
+        ? existing.map((item) => (item.id === resetSub.id ? resetSub : item))
+        : [...existing, resetSub];
+      const nextClients = db.clientes.map((item) =>
+        item.id === client.id ? updatedClient : item
+      );
+      mutate({
+        ...db,
+        clientes: nextClients,
+        subscriptions: nextSubscriptions,
+        visitas: updatedVisits,
+      });
+      setError("");
+      setOkMsg(`Abono de ${client.nombre} reiniciado a 0/${resetSub.cantidadX20} ✓`);
+    } catch (cause) {
+      setError(cause.message);
+    }
+  }
+
+  function quitarAbonoCliente(client) {
+    try {
+      const {
+        client: updatedClient,
+        subscriptions: nextSubscriptions,
+        visits: nextVisits,
+      } = removeClientSubscription({
+        client,
+        subscriptions: db.subscriptions || [],
+        visits: db.visitas || [],
+        period: periodoActual,
+      });
+      const nextClients = db.clientes.map((item) =>
+        item.id === client.id ? updatedClient : item
+      );
+      mutate({
+        ...db,
+        clientes: nextClients,
+        subscriptions: nextSubscriptions,
+        visitas: nextVisits,
+      });
+      setError("");
+      setOkMsg(`Abono quitado a ${client.nombre} ✓`);
+    } catch (cause) {
+      setError(cause.message);
+    }
   }
 
   return <div className="space-y-3">
@@ -1842,18 +1927,52 @@ function AdminSuscripciones({ db, mutate }) {
       {error && <div className="text-xs font-semibold mb-2" style={{ color: C.danger }}>{error}</div>}
       {okMsg && <div className="text-xs font-semibold mb-2" style={{ color: C.success }}>{okMsg}</div>}
       <Btn size="sm" onClick={savePromotion} icon={Save}>Guardar promoción</Btn>
-      {(db.promotions || []).map((promotion) => <div key={promotion.id} className="flex justify-between text-xs mt-3"><span>{promotion.nombre}: {promotion.cantidadX20}×20L · {formatMoney(promotion.precioMensual)}</span><button onClick={() => mutate({ ...db, promotions: upsertPromotion(db.promotions, { ...promotion, activo: !promotion.activo }) })} style={{ color: C.primary }}>{promotion.activo ? "Desactivar" : "Activar"}</button></div>)}
+      {(db.promotions || []).map((promotion) => (
+        <div key={promotion.id} className="flex items-center justify-between gap-2 text-xs mt-3">
+          <span>
+            {promotion.nombre}: {promotion.cantidadX20}×20L · {formatMoney(promotion.precioMensual)}
+          </span>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() =>
+                mutate({
+                  ...db,
+                  promotions: upsertPromotion(db.promotions, {
+                    ...promotion,
+                    activo: !promotion.activo,
+                  }),
+                })
+              }
+              className="font-semibold"
+              style={{ color: C.primary }}
+            >
+              {promotion.activo ? "Desactivar" : "Activar"}
+            </button>
+            <button
+              type="button"
+              onClick={() => eliminarPromocion(promotion.id)}
+              className="inline-flex items-center gap-1 font-semibold"
+              style={{ color: C.danger }}
+            >
+              <Trash2 size={13} />
+              Eliminar
+            </button>
+          </div>
+        </div>
+      ))}
     </Card>
     <Card><div className="font-bold text-sm mb-2">Resumen de suscripciones · {periodoActual}</div><div className="text-xs" style={{ color: C.muted }}>Pagado {formatMoney(metrics.paidTotal)} · Pendiente {formatMoney(metrics.pendingTotal)} · Vencido {formatMoney(metrics.overdueTotal)} · Cupo restante {metrics.remainingTotal}</div><div className="text-[10px] mt-2" style={{ color: C.muted }}>Los abonos se renuevan automáticamente al comenzar cada mes.</div></Card>
     {(db.clientes || []).filter((client) => client.maquinaFrioCalor).map((client) => {
       const summary = client.subscriptionSummary;
-      const current =
-        resolveClientSubscriptionForPeriod({
-          client,
-          subscriptions: db.subscriptions || [],
-          period: periodoActual,
-        }) ||
-        (db.subscriptions || []).find((item) => item.id === summary?.subscriptionId);
+      const current = client.abonoCancelado
+        ? null
+        : resolveClientSubscriptionForPeriod({
+            client,
+            subscriptions: db.subscriptions || [],
+            period: periodoActual,
+          }) ||
+          (db.subscriptions || []).find((item) => item.id === summary?.subscriptionId);
       const view = clientSubscriptionSummaryView({ client, subscription: current });
       const selectable = canSelectSubscription({ client, subscriptions: db.subscriptions || [] });
       const promocionesActivas = (db.promotions || []).filter((item) => item.activo);
@@ -1911,6 +2030,25 @@ function AdminSuscripciones({ db, mutate }) {
           <div className="text-xs mt-1" style={{ color: C.muted }}>{view.period} · {view.label} · {view.consumed}/{current.cantidadX20} entregados · quedan {view.remaining}</div>
           {current.estadoPago !== "pagada" && <div className="mt-1"><button className="text-xs font-semibold mr-2" onClick={() => pay(current, "efectivo")} style={{ color: C.primary }}>Cobrar efectivo</button><button className="text-xs font-semibold" onClick={() => pay(current, "mercadopago")} style={{ color: C.primary }}>Cobrar Mercado Pago</button></div>}
           {promocionesParaCambio.length > 0 && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}><div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>Cambiar plan de abono</div><div className="flex flex-wrap gap-2">{promocionesParaCambio.map((promotion) => <button key={promotion.id} onClick={() => changePlan(current, promotion)} className="text-xs font-semibold" style={{ color: C.primary }}>Cambiar a {promotion.nombre} ({promotion.cantidadX20}×20L)</button>)}</div></div>}
+          <div className="mt-2 pt-2 flex flex-wrap gap-2" style={{ borderTop: `1px solid ${C.border}` }}>
+            <button
+              type="button"
+              onClick={() => reiniciarAbonoCliente(client, current)}
+              className="px-2.5 py-1.5 rounded-lg text-xs font-bold"
+              style={{ background: C.accentSoft, color: C.primary }}
+            >
+              Reiniciar abono (0 entregados)
+            </button>
+            <button
+              type="button"
+              onClick={() => quitarAbonoCliente(client)}
+              className="px-2.5 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-1"
+              style={{ background: C.dangerBg, color: C.danger }}
+            >
+              <Trash2 size={13} />
+              Eliminar / Quitar abono
+            </button>
+          </div>
         </>}
 
         <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>

@@ -5,13 +5,16 @@ import {
   clientSubscriptionSummaryView,
   createSubscription,
   createPromotionSnapshot,
+  deletePromotion,
   deliveryQuotaFeedback,
   formatVisitProductsText,
   getPeriod,
   getSubscriptionStatus,
   prepareSubscriptionVisitEdition,
   recordSubscriptionPayment,
+  removeClientSubscription,
   renewMonthlySubscriptions,
+  resetClientSubscription,
   resolveClientSubscriptionForPeriod,
   splitX20Delivery,
   subscriptionMetrics,
@@ -819,5 +822,207 @@ describe("subscription UI boundaries", () => {
       subscriptionAttribution: null,
     };
     expect(formatVisitProductsText(comun, catalogo)).toBe("2× 20L, 1× 12L");
+  });
+
+  it("permite eliminar una promoción, reiniciar un abono a 0 y quitarle el abono a un cliente sin que se renueve solo", () => {
+    const promos = [
+      { id: "p6", nombre: "Plan 6", cantidadX20: 6, precioMensual: 15000, activo: true },
+      { id: "p8", nombre: "Plan 8", cantidadX20: 8, precioMensual: 20000, activo: true },
+    ];
+    expect(deletePromotion(promos, "p6")).toEqual([promos[1]]);
+
+    const client = {
+      id: "c1",
+      nombre: "Laura",
+      maquinaFrioCalor: true,
+      subscriptionSummary: {
+        subscriptionId: "c1-2026-11",
+        periodo: "2026-11",
+        estadoPago: "pagada",
+        promocionId: "p6",
+        promocionNombre: "Plan 6",
+        cantidadConsumida: 4,
+        cantidadRestante: 2,
+      },
+    };
+    const subNov = {
+      id: "c1-2026-11",
+      clienteId: "c1",
+      periodo: "2026-11",
+      promocionId: "p6",
+      promocionNombre: "Plan 6",
+      cantidadX20: 6,
+      cantidadConsumida: 4,
+      cantidadRestante: 2,
+      precioMensual: 15000,
+      estadoPago: "pagada",
+      reciboPago: { monto: 15000, metodo: "efectivo", fecha: "2026-11-05T10:00:00.000Z" },
+    };
+    const visitAttributed = {
+      id: "v-1",
+      clienteId: "c1",
+      fecha: "2026-11-08",
+      vendio: true,
+      items: [{ tipo: "b20", cantidad: 0, precioUnitario: 3500 }],
+      subscriptionAttribution: {
+        subscriptionId: "c1-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 4,
+      },
+    };
+
+    const resetResult = resetClientSubscription({
+      subscription: subNov,
+      client,
+      visits: [visitAttributed],
+      now: new Date("2026-11-15T14:00:00.000Z"),
+    });
+
+    expect(resetResult.subscription).toMatchObject({
+      id: "c1-2026-11",
+      cantidadConsumida: 0,
+      cantidadRestante: 6,
+      estadoPago: "pendiente",
+      fechaReinicio: "2026-11-15T14:00:00.000Z",
+    });
+    expect(resetResult.subscription.reciboPago).toBeUndefined();
+    expect(resetResult.client).toMatchObject({
+      id: "c1",
+      abonoCancelado: false,
+      subscriptionSummary: {
+        subscriptionId: "c1-2026-11",
+        cantidadConsumida: 0,
+        cantidadRestante: 6,
+        estadoPago: "pendiente",
+      },
+    });
+    expect(resetResult.visits[0].subscriptionAttribution).toBeNull();
+
+    const subOct = {
+      ...subNov,
+      id: "c1-2026-10",
+      periodo: "2026-10",
+    };
+    const removed = removeClientSubscription({
+      client: resetResult.client,
+      subscriptions: [subOct, resetResult.subscription],
+      visits: [visitAttributed],
+      period: "2026-11",
+    });
+
+    expect(removed.client).toMatchObject({
+      id: "c1",
+      subscriptionSummary: null,
+      abonoCancelado: true,
+    });
+    expect(removed.subscriptions.map((s) => s.id)).toEqual(["c1-2026-10"]);
+    expect(removed.visits[0].subscriptionAttribution).toBeNull();
+
+    // Con abonoCancelado: true, no sintetiza ni renueva automáticamente desde meses anteriores
+    expect(
+      resolveClientSubscriptionForPeriod({
+        client: removed.client,
+        subscriptions: removed.subscriptions,
+        period: "2026-11",
+        now: new Date("2026-11-16T10:00:00.000Z"),
+      })
+    ).toBeNull();
+
+    const afterCancelRenewal = renewMonthlySubscriptions({
+      clients: [removed.client],
+      subscriptions: removed.subscriptions,
+      visits: [],
+      now: new Date("2026-11-16T10:00:00.000Z"),
+    });
+    expect(afterCancelRenewal.renewed).toEqual([]);
+    expect(afterCancelRenewal.clients[0].subscriptionSummary).toBeNull();
+
+    // Al volver a asignarle un abono nuevo, limpia abonoCancelado: false
+    const clientToReassign = { ...removed.client };
+    const newSub = createSubscription({
+      client: clientToReassign,
+      promotion: promos[1],
+      subscriptions: removed.subscriptions,
+      now: new Date("2026-11-20T10:00:00.000Z"),
+    });
+    expect(clientToReassign.abonoCancelado).toBe(false);
+    expect(newSub).toMatchObject({
+      id: "c1-2026-11",
+      cantidadX20: 8,
+      cantidadConsumida: 0,
+      cantidadRestante: 8,
+    });
+  });
+
+  it("tras reiniciar un abono no vuelve a descontar visitas previas al reinicio pero sí reconcilia entregas posteriores", () => {
+    expect(() => resetClientSubscription({ subscription: null })).toThrow(
+      /abono a reiniciar/i
+    );
+
+    const client = {
+      id: "c1",
+      nombre: "Laura",
+      maquinaFrioCalor: true,
+      deudaAcumulada: 0,
+    };
+    const subNov = {
+      id: "c1-2026-11",
+      clienteId: "c1",
+      periodo: "2026-11",
+      promocionId: "p6",
+      promocionNombre: "Plan 6",
+      cantidadX20: 6,
+      cantidadConsumida: 3,
+      cantidadRestante: 3,
+      precioMensual: 15000,
+      estadoPago: "pendiente",
+    };
+    const visitBeforeReset = {
+      id: "v-antes",
+      clienteId: "c1",
+      fecha: "2026-11-10",
+      timestamp: Date.parse("2026-11-10T11:00:00.000Z"),
+      vendio: true,
+      items: [{ tipo: "b20", cantidad: 2, precioUnitario: 3500 }],
+      total: 7000,
+      metodoPago: "efectivo",
+      pagos: { efectivo: 7000 },
+      deudaGenerada: 0,
+      subscriptionAttribution: null,
+    };
+    const visitAfterReset = {
+      id: "v-despues",
+      clienteId: "c1",
+      fecha: "2026-11-16",
+      timestamp: Date.parse("2026-11-16T11:00:00.000Z"),
+      vendio: true,
+      items: [{ tipo: "b20", cantidad: 2, precioUnitario: 3500 }],
+      total: 7000,
+      metodoPago: "efectivo",
+      pagos: { efectivo: 7000 },
+      deudaGenerada: 0,
+      subscriptionAttribution: null,
+    };
+
+    const reset = resetClientSubscription({
+      subscription: subNov,
+      client,
+      visits: [visitBeforeReset, visitAfterReset],
+      now: new Date("2026-11-15T14:00:00.000Z"),
+    });
+
+    const reconciled = renewMonthlySubscriptions({
+      clients: [reset.client],
+      subscriptions: [reset.subscription],
+      visits: reset.visits,
+      now: new Date("2026-11-16T15:00:00.000Z"),
+    });
+
+    expect(reconciled.reconciledVisits).toEqual(["v-despues"]);
+    expect(reconciled.subscriptions[0]).toMatchObject({
+      id: "c1-2026-11",
+      cantidadConsumida: 2,
+      cantidadRestante: 4,
+    });
   });
 });

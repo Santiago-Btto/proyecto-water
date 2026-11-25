@@ -39,6 +39,10 @@ export function upsertPromotion(promotions = [], promotion) {
   return next;
 }
 
+export function deletePromotion(promotions = [], promotionId) {
+  return (promotions || []).filter((p) => p.id !== promotionId);
+}
+
 export function getPeriod(now = new Date()) {
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, "0");
@@ -63,6 +67,9 @@ export function createSubscription({ client, promotion, subscriptions = [], now 
   const selection = canSelectSubscription({ client, subscriptions, now });
   if (!selection.ok) throw new Error(selection.error);
   if (!promotion?.activo || !validatePromotion(promotion).ok) throw new Error("La promoción no está disponible.");
+  if (client && typeof client === "object" && client.abonoCancelado) {
+    client.abonoCancelado = false;
+  }
   const periodo = getPeriod(now);
   return {
     id: `${client.id}-${periodo}`,
@@ -136,7 +143,7 @@ export function resolveClientSubscriptionForPeriod({
   period,
   now = new Date(),
 } = {}) {
-  if (!client?.id) return null;
+  if (!client?.id || client?.abonoCancelado === true) return null;
   const targetPeriod = String(period || getPeriod(now));
   const clientSubscriptions = subscriptions
     .filter((subscription) => subscription?.clienteId === client.id)
@@ -206,18 +213,33 @@ export function renewMonthlySubscriptions({
       };
     }
 
+    const resetTimeMs = updatedSub?.fechaReinicio
+      ? Date.parse(updatedSub.fechaReinicio)
+      : NaN;
+
     const candidateIndices = nextVisits
       .map((visit, index) => ({ visit, index }))
-      .filter(
-        ({ visit }) =>
-          visit?.clienteId === client.id &&
-          String(visit.fecha || "").slice(0, 7) === period &&
-          visit.vendio &&
-          !visit.subscriptionAttribution &&
-          (visit.items || []).some(
+      .filter(({ visit }) => {
+        if (
+          visit?.clienteId !== client.id ||
+          String(visit.fecha || "").slice(0, 7) !== period ||
+          !visit.vendio ||
+          visit.subscriptionAttribution ||
+          !(visit.items || []).some(
             (item) => item.tipo === "b20" && Number(item.cantidad) > 0
           )
-      )
+        ) {
+          return false;
+        }
+        if (Number.isFinite(resetTimeMs)) {
+          const visitTimeMs =
+            Number(visit.timestamp) > 0
+              ? Number(visit.timestamp)
+              : Date.parse(visit.fecha || "");
+          return Number.isFinite(visitTimeMs) && visitTimeMs > resetTimeMs;
+        }
+        return true;
+      })
       .sort(
         (a, b) =>
           String(a.visit.fecha || "").localeCompare(String(b.visit.fecha || "")) ||
@@ -304,7 +326,7 @@ export function renewMonthlySubscriptions({
   }
 
   const nextClients = clients.map((client) => {
-    if (!client?.maquinaFrioCalor) return client;
+    if (!client?.maquinaFrioCalor || client?.abonoCancelado === true) return client;
     const clientSubscriptions = subscriptionsByClient.get(client.id) || [];
     if (!client.subscriptionSummary?.subscriptionId && clientSubscriptions.length === 0) {
       return client;
@@ -426,6 +448,91 @@ export function recordSubscriptionPayment(subscription, { metodo, now = new Date
     ...subscription,
     estadoPago: "pagada",
     reciboPago: { monto: Number(subscription.precioMensual), metodo, fecha: now.toISOString() },
+  };
+}
+
+export function resetClientSubscription({
+  subscription,
+  client = null,
+  visits = [],
+  now = new Date(),
+} = {}) {
+  if (!subscription) {
+    throw new Error("No se encontró el abono a reiniciar.");
+  }
+  const { reciboPago, ...rest } = subscription;
+  const quota = Number(subscription.cantidadX20) || 0;
+  const resetSub = {
+    ...rest,
+    cantidadConsumida: 0,
+    cantidadRestante: quota,
+    estadoPago: "pendiente",
+    fechaReinicio: now.toISOString(),
+  };
+
+  const updatedVisits = (visits || []).map((visit) =>
+    visit?.subscriptionAttribution?.subscriptionId === subscription.id
+      ? { ...visit, subscriptionAttribution: null }
+      : visit
+  );
+
+  const updatedClient = client
+    ? {
+        ...client,
+        abonoCancelado: false,
+        subscriptionSummary: subscriptionSummaryFrom(resetSub),
+      }
+    : null;
+
+  return {
+    subscription: resetSub,
+    client: updatedClient,
+    visits: updatedVisits,
+  };
+}
+
+export function removeClientSubscription({
+  client,
+  subscriptions = [],
+  visits = [],
+  period = getPeriod(),
+} = {}) {
+  if (!client?.id) {
+    throw new Error("No se encontró el cliente.");
+  }
+  const targetPeriod = String(period || getPeriod());
+  const summarySubId = client.subscriptionSummary?.subscriptionId || null;
+  const removedIds = new Set();
+  if (summarySubId) removedIds.add(summarySubId);
+  removedIds.add(`${client.id}-${targetPeriod}`);
+
+  const nextSubscriptions = (subscriptions || []).filter((item) => {
+    const shouldRemove =
+      item?.clienteId === client.id &&
+      (item.periodo === targetPeriod || item.id === summarySubId);
+    if (shouldRemove && item?.id) {
+      removedIds.add(item.id);
+    }
+    return !shouldRemove;
+  });
+
+  const nextVisits = (visits || []).map((visit) =>
+    visit?.subscriptionAttribution?.subscriptionId &&
+    removedIds.has(visit.subscriptionAttribution.subscriptionId)
+      ? { ...visit, subscriptionAttribution: null }
+      : visit
+  );
+
+  const updatedClient = {
+    ...client,
+    subscriptionSummary: null,
+    abonoCancelado: true,
+  };
+
+  return {
+    client: updatedClient,
+    subscriptions: nextSubscriptions,
+    visits: nextVisits,
   };
 }
 
