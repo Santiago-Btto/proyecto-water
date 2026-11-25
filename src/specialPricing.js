@@ -19,17 +19,18 @@ export function resolveClientUnitPrice(client, product, normalPrice) {
   return validSpecialPrice(special) ? Number(special) : Number(normalPrice) || 0;
 }
 
-export function chargeableVisitTotal(items, coveredX20 = 0) {
+export function chargeableVisitTotal(items, coveredX20 = 0, productKey = "b20") {
   const total = items.reduce(
     (sum, item) => sum + (Number(item.cantidad) || 0) * (Number(item.precioUnitario) || 0),
     0
   );
-  const b20 = items.find((item) => item.tipo === "b20");
+  const targetKey = productKey === "b12" ? "b12" : "b20";
+  const targetItem = items.find((item) => item.tipo === targetKey);
   const covered = Math.min(
     Math.max(0, Number(coveredX20) || 0),
-    Math.max(0, Number(b20?.cantidad) || 0)
+    Math.max(0, Number(targetItem?.cantidad) || 0)
   );
-  return Math.max(0, total - covered * (Number(b20?.precioUnitario) || 0));
+  return Math.max(0, total - covered * (Number(targetItem?.precioUnitario) || 0));
 }
 
 export function isComplimentaryVisit(visit) {

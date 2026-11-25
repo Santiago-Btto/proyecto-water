@@ -28,6 +28,7 @@ import {
   totalStreetDebt,
 } from "./operationalIntegrity";
 import {
+  SUBSCRIPTION_CONTAINER_TYPES,
   SUBSCRIPTION_QUOTAS,
   changeSubscriptionPromotion,
   canSelectSubscription,
@@ -46,6 +47,9 @@ import {
   splitX20Delivery,
   subscriptionMetrics,
   subscriptionPeriodMetrics,
+  subscriptionProductFullLabel,
+  subscriptionProductKey,
+  subscriptionProductShortLabel,
   subscriptionSummaryFrom,
   subscriptionUsageHistory,
   upsertPromotion,
@@ -197,6 +201,7 @@ const CATEGORIAS_GASTO = [
   { key: "combustible", label: "Combustible", tone: "warning" },
   { key: "mantenimiento", label: "Mantenimiento", tone: "danger" },
   { key: "compras", label: "Compras", tone: "accent" },
+  { key: "carga", label: "Carga", tone: "accent" },
   { key: "sueldos", label: "Sueldos", tone: "success" },
   { key: "servicios", label: "Servicios", tone: "muted" },
   { key: "seguros", label: "Seguros", tone: "accent" },
@@ -1652,6 +1657,7 @@ function AdminGate({ config, onUnlock, onBack, onSetPin }) {
 function AdminSuscripciones({ db, mutate }) {
   const [nombre, setNombre] = useState("");
   const [cantidadX20, setCantidadX20] = useState("4");
+  const [productoKey, setProductoKey] = useState("b20");
   const [precioMensual, setPrecioMensual] = useState("");
   const [error, setError] = useState("");
   const [okMsg, setOkMsg] = useState("");
@@ -1659,6 +1665,7 @@ function AdminSuscripciones({ db, mutate }) {
   const [planPersonalizadoClienteId, setPlanPersonalizadoClienteId] =
     useState(null);
   const [customCantidad, setCustomCantidad] = useState("6");
+  const [customProductoKey, setCustomProductoKey] = useState("b20");
   const [customPrecio, setCustomPrecio] = useState("");
   const [remitoTarget, setRemitoTarget] = useState(null);
   const periodoActual = getPeriod();
@@ -1672,11 +1679,13 @@ function AdminSuscripciones({ db, mutate }) {
   function savePromotion() {
     const cantNum = Number(String(cantidadX20).trim());
     const precioNum = parsearImporteLimpio(precioMensual);
+    const shortLabel = subscriptionProductShortLabel({ productoKey });
     const promotion = {
       id: uid(),
-      nombre: (nombre || "").trim() || `Plan ${cantNum} bidones 20L`,
+      nombre: (nombre || "").trim() || `Plan ${cantNum} bidones ${shortLabel}`,
       cantidadX20: cantNum,
       precioMensual: precioNum,
+      productoKey,
       activo: true,
     };
     const validation = validatePromotion(promotion);
@@ -1694,11 +1703,13 @@ function AdminSuscripciones({ db, mutate }) {
   function crearYAsignarPlanPersonalizado(client, currentSubscription) {
     const cantNum = Number(String(customCantidad).trim());
     const precioNum = parsearImporteLimpio(customPrecio);
+    const shortLabel = subscriptionProductShortLabel({ productoKey: customProductoKey });
     const promotion = {
       id: uid(),
-      nombre: `Plan ${cantNum} bidones (${client.nombre})`,
+      nombre: `Plan ${cantNum} bidones ${shortLabel} (${client.nombre})`,
       cantidadX20: cantNum,
       precioMensual: precioNum,
+      productoKey: customProductoKey,
       activo: true,
     };
     const validation = validatePromotion(promotion);
@@ -1753,7 +1764,7 @@ function AdminSuscripciones({ db, mutate }) {
       setPlanPersonalizadoClienteId(null);
       setCustomPrecio("");
       setError("");
-      setOkMsg(`Plan de ${cantNum}×20L asignado a ${client.nombre} ✓`);
+      setOkMsg(`Plan de ${cantNum}×${shortLabel} asignado a ${client.nombre} ✓`);
     } catch (cause) {
       setError(cause.message);
     }
@@ -1877,7 +1888,29 @@ function AdminSuscripciones({ db, mutate }) {
   return <div className="space-y-3">
     <Card><div className="font-bold text-sm mb-2">Promociones de máquina F/C</div>
       <Field label="Nombre (opcional)"><Input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Ej. Plan 6 bidones o Plan empresa" /></Field>
-      <Field label="Cantidad rápida o personalizada de bidones 20L">
+      <Field label="Tipo de bidón del plan">
+        <div className="flex gap-1.5">
+          {SUBSCRIPTION_CONTAINER_TYPES.map((tipo) => {
+            const activo = productoKey === tipo.key;
+            return (
+              <button
+                key={tipo.key}
+                type="button"
+                onClick={() => setProductoKey(tipo.key)}
+                className="flex-1 px-3 py-1.5 rounded-lg text-xs font-bold"
+                style={{
+                  background: activo ? C.primary : C.bg,
+                  color: activo ? "#fff" : C.ink,
+                  border: `1px solid ${activo ? C.primary : C.border}`,
+                }}
+              >
+                {tipo.label}
+              </button>
+            );
+          })}
+        </div>
+      </Field>
+      <Field label={`Cantidad rápida o personalizada de bidones ${subscriptionProductShortLabel({ productoKey })}`}>
         <div className="flex flex-wrap gap-1.5 mb-2">
           {SUBSCRIPTION_QUOTAS.map((n) => {
             const activo = Number(cantidadX20) === n;
@@ -1893,14 +1926,14 @@ function AdminSuscripciones({ db, mutate }) {
                   border: `1px solid ${activo ? C.primary : C.border}`,
                 }}
               >
-                {n}×20L
+                {n}×{subscriptionProductShortLabel({ productoKey })}
               </button>
             );
           })}
         </div>
         <div className="grid grid-cols-2 gap-2">
           <div>
-            <div className="text-[10px] font-semibold mb-1" style={{ color: C.muted }}>Bidones 20L (cualquier cantidad)</div>
+            <div className="text-[10px] font-semibold mb-1" style={{ color: C.muted }}>Bidones {subscriptionProductShortLabel({ productoKey })} (cualquier cantidad)</div>
             <Input
               type="number"
               inputMode="numeric"
@@ -1930,7 +1963,7 @@ function AdminSuscripciones({ db, mutate }) {
       {(db.promotions || []).map((promotion) => (
         <div key={promotion.id} className="flex items-center justify-between gap-2 text-xs mt-3">
           <span>
-            {promotion.nombre}: {promotion.cantidadX20}×20L · {formatMoney(promotion.precioMensual)}
+            {promotion.nombre}: {promotion.cantidadX20}×{subscriptionProductShortLabel(promotion)} · {formatMoney(promotion.precioMensual)}
           </span>
           <div className="flex items-center gap-3">
             <button
@@ -1982,6 +2015,7 @@ function AdminSuscripciones({ db, mutate }) {
               promotion.id !== current.promocionId &&
               !(
                 Number(promotion.cantidadX20) === Number(current.cantidadX20) &&
+                subscriptionProductKey(promotion) === subscriptionProductKey(current) &&
                 (promotion.nombre === current.promocionNombre ||
                   Number(promotion.precioMensual) === Number(current.precioMensual))
               )
@@ -2024,12 +2058,12 @@ function AdminSuscripciones({ db, mutate }) {
           <div className="text-xs my-1" style={{ color: C.muted }}>{view.label}</div>
           {selectable.ok && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
             <div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>Asignar plan de abono</div>
-            {promocionesActivas.length > 0 ? <div className="flex flex-wrap gap-2">{promocionesActivas.map((promotion) => <button key={promotion.id} onClick={() => selectSubscription(client, promotion)} className="text-xs font-semibold" style={{ color: C.primary }}>Asignar {promotion.nombre} ({promotion.cantidadX20}×20L)</button>)}</div> : <div className="text-xs" style={{ color: C.muted }}>Creá o activá una promoción arriba o armá un plan personalizado acá abajo.</div>}
+            {promocionesActivas.length > 0 ? <div className="flex flex-wrap gap-2">{promocionesActivas.map((promotion) => <button key={promotion.id} onClick={() => selectSubscription(client, promotion)} className="text-xs font-semibold" style={{ color: C.primary }}>Asignar {promotion.nombre} ({promotion.cantidadX20}×{subscriptionProductShortLabel(promotion)})</button>)}</div> : <div className="text-xs" style={{ color: C.muted }}>Creá o activá una promoción arriba o armá un plan personalizado acá abajo.</div>}
           </div>}
         </> : <>
-          <div className="text-xs mt-1" style={{ color: C.muted }}>{view.period} · {view.label} · {view.consumed}/{current.cantidadX20} entregados · quedan {view.remaining}</div>
+          <div className="text-xs mt-1" style={{ color: C.muted }}>{view.period} · {view.label} · {view.consumed}/{current.cantidadX20}×{subscriptionProductShortLabel(current)} entregados · quedan {view.remaining}</div>
           {current.estadoPago !== "pagada" && <div className="mt-1"><button className="text-xs font-semibold mr-2" onClick={() => pay(current, "efectivo")} style={{ color: C.primary }}>Cobrar efectivo</button><button className="text-xs font-semibold" onClick={() => pay(current, "mercadopago")} style={{ color: C.primary }}>Cobrar Mercado Pago</button></div>}
-          {promocionesParaCambio.length > 0 && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}><div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>Cambiar plan de abono</div><div className="flex flex-wrap gap-2">{promocionesParaCambio.map((promotion) => <button key={promotion.id} onClick={() => changePlan(current, promotion)} className="text-xs font-semibold" style={{ color: C.primary }}>Cambiar a {promotion.nombre} ({promotion.cantidadX20}×20L)</button>)}</div></div>}
+          {promocionesParaCambio.length > 0 && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}><div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>Cambiar plan de abono</div><div className="flex flex-wrap gap-2">{promocionesParaCambio.map((promotion) => <button key={promotion.id} onClick={() => changePlan(current, promotion)} className="text-xs font-semibold" style={{ color: C.primary }}>Cambiar a {promotion.nombre} ({promotion.cantidadX20}×{subscriptionProductShortLabel(promotion)})</button>)}</div></div>}
           <div className="mt-2 pt-2 flex flex-wrap gap-2" style={{ borderTop: `1px solid ${C.border}` }}>
             <button
               type="button"
@@ -2058,6 +2092,7 @@ function AdminSuscripciones({ db, mutate }) {
               onClick={() => {
                 setPlanPersonalizadoClienteId(client.id);
                 setCustomCantidad(String(current?.cantidadX20 || 6));
+                setCustomProductoKey(subscriptionProductKey(current));
                 setCustomPrecio(String(current?.precioMensual || ""));
               }}
               className="text-xs font-bold"
@@ -2070,6 +2105,26 @@ function AdminSuscripciones({ db, mutate }) {
               <div className="text-[11px] font-bold mb-2" style={{ color: C.primary }}>
                 Plan personalizado para {client.nombre}
               </div>
+              <div className="flex gap-1.5 mb-2">
+                {SUBSCRIPTION_CONTAINER_TYPES.map((tipo) => {
+                  const activo = customProductoKey === tipo.key;
+                  return (
+                    <button
+                      key={tipo.key}
+                      type="button"
+                      onClick={() => setCustomProductoKey(tipo.key)}
+                      className="flex-1 px-2.5 py-1.5 rounded-lg text-xs font-bold"
+                      style={{
+                        background: activo ? C.primary : C.surface,
+                        color: activo ? "#fff" : C.ink,
+                        border: `1px solid ${activo ? C.primary : C.border}`,
+                      }}
+                    >
+                      {tipo.label}
+                    </button>
+                  );
+                })}
+              </div>
               <div className="grid grid-cols-2 gap-2 mb-2">
                 <Input
                   type="number"
@@ -2077,7 +2132,7 @@ function AdminSuscripciones({ db, mutate }) {
                   min="1"
                   value={customCantidad}
                   onChange={(e) => setCustomCantidad(e.target.value)}
-                  placeholder="Bidones 20L"
+                  placeholder={`Bidones ${subscriptionProductShortLabel({ productoKey: customProductoKey })}`}
                 />
                 <Input
                   type="number"
@@ -3069,7 +3124,7 @@ function AdminDashboard({ db, mutate }) {
                             <div className="font-bold truncate">{client?.nombre || visit.clienteNombre || "Cliente eliminado"}</div>
                             <div style={{ color: C.muted }}>{fechaLegible(visit.fecha)}</div>
                           </div>
-                          <Badge tone="accent">{quantity} × Bidón 20 L</Badge>
+                          <Badge tone="accent">{quantity} × {subscriptionProductFullLabel(visit.subscriptionAttribution)}</Badge>
                         </div>
                       );
                     })}
@@ -3432,7 +3487,7 @@ function AdminDashboard({ db, mutate }) {
 
                       {v.subscriptionAttribution && (
                         <div className="text-xs mt-2" style={{ color: C.primary }}>
-                          Abono: {Number(v.subscriptionAttribution.cantidadX20) || 0}× Bidón 20 L
+                          Abono: {Number(v.subscriptionAttribution.cantidadX20) || 0}× {subscriptionProductFullLabel(v.subscriptionAttribution)}
                         </div>
                       )}
 
@@ -8997,6 +9052,9 @@ function VisitaSheet({
   });
   const currentSubscription = subscriptionPorAtribucion || subscriptionDelPeriodo;
   const tieneAbonoActivo = !!currentSubscription;
+  const productoAbonoKey = subscriptionProductKey(
+    currentSubscription || visitaInicial?.subscriptionAttribution
+  );
   const {
     esEdicion,
     initialB20Quantity,
@@ -9029,10 +9087,10 @@ const deudaBase = Number(cliente.deudaAcumulada) || 0;
 
       return {
         tipo: p.key,
-        // Al editar una visita (tanto repartidor como admin), el selector de 20L
+        // Al editar una visita (tanto repartidor como admin), el selector del producto del abono
         // inicia con el total entregado en esa visita (excedente + bidones del abono).
         cantidad:
-          p.key === "b20"
+          p.key === productoAbonoKey
             ? initialB20Quantity
             : Number(anterior?.cantidad) || 0,
         // Al editar conservamos el precio que tenía la visita original.
@@ -9187,7 +9245,7 @@ const [montoDeuda, setMontoDeuda] = useState(
   const [mostrarProductosAdicionales, setMostrarProductosAdicionales] =
     useState(() =>
       (visitaInicial?.items || []).some(
-        (item) => item.tipo !== "b20" && Number(item.cantidad) > 0
+        (item) => item.tipo !== productoAbonoKey && Number(item.cantidad) > 0
       )
     );
 
@@ -9255,14 +9313,14 @@ useEffect(() => {
 
   const total = totalPedido(items);
   const modoAbono = tieneAbonoActivo;
-  const b20Quantity = Number(items.find((item) => item.tipo === "b20")?.cantidad) || 0;
-  const precioB20Visita = items.find((item) => item.tipo === "b20")?.precioUnitario || 0;
+  const b20Quantity = Number(items.find((item) => item.tipo === productoAbonoKey)?.cantidad) || 0;
+  const precioB20Visita = items.find((item) => item.tipo === productoAbonoKey)?.precioUnitario || 0;
   const quotaPreview = splitX20Delivery({ quantity: b20Quantity, subscription: subscriptionParaCorreccion, unitPrice: precioB20Visita });
   const quotaFeedback = deliveryQuotaFeedback({ quantity: b20Quantity, subscription: subscriptionParaCorreccion, unitPrice: precioB20Visita, mutationError: errorStock });
   const subscriptionAttributionFinal = quotaPreview.attribution;
-  const totalVentaNormal = chargeableVisitTotal(items, quotaPreview.covered);
+  const totalVentaNormal = chargeableVisitTotal(items, quotaPreview.covered, productoAbonoKey);
   const tieneOtrosProductos = items.some(
-    (item) => item.tipo !== "b20" && Number(item.cantidad) > 0
+    (item) => item.tipo !== productoAbonoKey && Number(item.cantidad) > 0
   );
   const tieneVentaNormalEnAbono = quotaPreview.excess > 0 || tieneOtrosProductos;
   const registraVenta = modoAbono
@@ -9484,7 +9542,7 @@ const ajusteDeudaManual =
       fecha: visitaInicial?.fecha || hoyISO(),
       diaSemana: visitaInicial?.diaSemana || diaSemanaHoy(),
       vendio: registraVenta,
-      items: registraVenta ? items.map((item) => item.tipo === "b20" ? { ...item, cantidad: quotaPreview.excess } : item) : [],
+      items: registraVenta ? items.map((item) => item.tipo === productoAbonoKey ? { ...item, cantidad: quotaPreview.excess } : item) : [],
       subscriptionAttribution: subscriptionAttributionFinal,
       extrasPrestados: {
         b20: Number(extrasPrestados.b20) || 0,
@@ -9912,7 +9970,7 @@ deudaCobrada: deudaCobradaFinal,
                                             <span className="text-xs" style={{ color: C.mutedLight }}>·</span>
                                           )}
                                           <span className="text-xs font-semibold">
-                                            {bidonesDeAbono}× 20L
+                                            {bidonesDeAbono}× {subscriptionProductShortLabel(v.subscriptionAttribution)}
                                           </span>
                                           <Badge tone="accent">Abono</Badge>
                                         </>
@@ -10266,7 +10324,7 @@ deudaCobrada: deudaCobradaFinal,
           )}
           <div className="flex flex-col gap-2 mb-3">
             {PRODUCTOS.filter(
-              (p) => !modoAbono || p.key === "b20" || mostrarProductosAdicionales
+              (p) => !modoAbono || p.key === productoAbonoKey || mostrarProductosAdicionales
             ).map((p) => {
               const idx = PRODUCTOS.findIndex((item) => item.key === p.key);
               const cant = items[idx].cantidad;
@@ -10276,12 +10334,12 @@ deudaCobrada: deudaCobradaFinal,
                   <div className="flex items-center justify-between">
                     <div>
                       <div className="text-sm font-semibold">
-                        {modoAbono && p.key === "b20"
-                          ? "Bidón 20 L · entrega de abono"
+                        {modoAbono && p.key === productoAbonoKey
+                          ? `${p.label} · entrega de abono`
                           : p.label}
                       </div>
 
-                      {(!modoAbono || p.key !== "b20") && <div
+                      {(!modoAbono || p.key !== productoAbonoKey) && <div
                         className="text-xs font-mono"
                         style={{
                           color: C.mutedLight,

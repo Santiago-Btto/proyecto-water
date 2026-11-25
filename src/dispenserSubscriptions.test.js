@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  SUBSCRIPTION_CONTAINER_TYPES,
   changeSubscriptionPromotion,
   canSelectSubscription,
   clientSubscriptionSummaryView,
@@ -19,6 +20,9 @@ import {
   splitX20Delivery,
   subscriptionMetrics,
   subscriptionPeriodMetrics,
+  subscriptionProductFullLabel,
+  subscriptionProductKey,
+  subscriptionProductShortLabel,
   subscriptionSummaryFrom,
   subscriptionUsageHistory,
   upsertPromotion,
@@ -1026,3 +1030,296 @@ describe("subscription UI boundaries", () => {
     });
   });
 });
+
+describe("12L (b12) subscription plans support", () => {
+  it("exports SUBSCRIPTION_CONTAINER_TYPES and product label helpers", () => {
+    expect(SUBSCRIPTION_CONTAINER_TYPES).toEqual([
+      { key: "b20", label: "Bidón 20L", corto: "20L" },
+      { key: "b12", label: "Bidón 12L", corto: "12L" },
+    ]);
+
+    expect(subscriptionProductKey(null)).toBe("b20");
+    expect(subscriptionProductKey({ productoKey: "b20" })).toBe("b20");
+    expect(subscriptionProductKey({ productoKey: "b12" })).toBe("b12");
+
+    expect(subscriptionProductShortLabel({})).toBe("20L");
+    expect(subscriptionProductShortLabel({ productoKey: "b12" })).toBe("12L");
+
+    expect(subscriptionProductFullLabel({})).toBe("Bidón 20 L");
+    expect(subscriptionProductFullLabel({ productoKey: "b12" })).toBe("Bidón 12 L");
+  });
+
+  it("validates, snapshots, and creates 12L promotions and subscriptions while preserving 20L backwards compatibility", () => {
+    expect(
+      validatePromotion({ cantidadX20: 6, precioMensual: 12000, productoKey: "b12" })
+    ).toEqual({ ok: true });
+    expect(
+      validatePromotion({ cantidadX20: 6, precioMensual: 12000, productoKey: "sifon" })
+    ).toEqual({
+      ok: false,
+      error: "Elegí Bidón 20L o Bidón 12L para la promoción.",
+    });
+
+    const promo12 = {
+      id: "p12-6",
+      nombre: "Plan 6 bidones 12L",
+      cantidadX20: 6,
+      precioMensual: 12000,
+      productoKey: "b12",
+      activo: true,
+    };
+    const snapshot12 = createPromotionSnapshot(promo12);
+    expect(snapshot12).toEqual({
+      promocionId: "p12-6",
+      promocionNombre: "Plan 6 bidones 12L",
+      cantidadX20: 6,
+      precioMensual: 12000,
+      productoKey: "b12",
+    });
+
+    const client = { id: "c-12", nombre: "Marta", maquinaFrioCalor: true };
+    const sub12 = createSubscription({
+      client,
+      promotion: promo12,
+      now: new Date("2026-11-05T10:00:00.000Z"),
+    });
+    expect(sub12).toMatchObject({
+      id: "c-12-2026-11",
+      clienteId: "c-12",
+      periodo: "2026-11",
+      promocionId: "p12-6",
+      cantidadX20: 6,
+      precioMensual: 12000,
+      productoKey: "b12",
+      cantidadConsumida: 0,
+      cantidadRestante: 6,
+    });
+    expect(subscriptionSummaryFrom(sub12)).toEqual({
+      subscriptionId: "c-12-2026-11",
+      periodo: "2026-11",
+      estadoPago: "pendiente",
+      promocionId: "p12-6",
+      promocionNombre: "Plan 6 bidones 12L",
+      cantidadConsumida: 0,
+      cantidadRestante: 6,
+      productoKey: "b12",
+    });
+  });
+
+  it("splits, edits, and formats 12L subscription deliveries with and without excess", () => {
+    const sub12 = {
+      id: "c-12-2026-11",
+      clienteId: "c-12",
+      periodo: "2026-11",
+      promocionId: "p12-6",
+      promocionNombre: "Plan 6×12L",
+      cantidadX20: 6,
+      cantidadConsumida: 4,
+      cantidadRestante: 2,
+      precioMensual: 12000,
+      productoKey: "b12",
+      estadoPago: "pendiente",
+    };
+
+    const splitCovered = splitX20Delivery({
+      quantity: 2,
+      subscription: sub12,
+      unitPrice: 2500,
+    });
+    expect(splitCovered).toEqual({
+      covered: 2,
+      excess: 0,
+      ordinaryAmount: 0,
+      attribution: {
+        subscriptionId: "c-12-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 2,
+        productoKey: "b12",
+      },
+    });
+
+    const splitWithExcess = splitX20Delivery({
+      quantity: 3,
+      subscription: sub12,
+      unitPrice: 2500,
+    });
+    expect(splitWithExcess).toEqual({
+      covered: 2,
+      excess: 1,
+      ordinaryAmount: 2500,
+      attribution: {
+        subscriptionId: "c-12-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 2,
+        productoKey: "b12",
+      },
+    });
+
+    const visita12 = {
+      id: "v-12",
+      clienteId: "c-12",
+      fecha: "2026-11-12",
+      vendio: true,
+      items: [
+        { tipo: "b20", cantidad: 0, precioUnitario: 3500 },
+        { tipo: "b12", cantidad: 1, precioUnitario: 2500 },
+      ],
+      subscriptionAttribution: splitWithExcess.attribution,
+    };
+
+    const prep12 = prepareSubscriptionVisitEdition({
+      visitaInicial: visita12,
+      currentSubscription: { ...sub12, cantidadConsumida: 6, cantidadRestante: 0 },
+    });
+    expect(prep12.productKey).toBe("b12");
+    expect(prep12.initialB20Quantity).toBe(3);
+    expect(prep12.cantidadAtribuidaOriginal).toBe(2);
+    expect(prep12.subscriptionForCalculation).toMatchObject({
+      cantidadConsumida: 4,
+      cantidadRestante: 2,
+    });
+
+    const catalogo = [
+      { key: "b20", corto: "20L" },
+      { key: "b12", corto: "12L" },
+      { key: "sifon", corto: "Sifón" },
+    ];
+    expect(formatVisitProductsText(visita12, catalogo)).toBe("2× 12L (Abono), 1× 12L");
+  });
+
+  it("renews monthly and reconciles current-period b12 visits for a 12L subscription", () => {
+    const client12 = {
+      id: "c-12",
+      nombre: "Marta",
+      maquinaFrioCalor: true,
+      deudaAcumulada: 5000,
+      subscriptionSummary: {
+        subscriptionId: "c-12-2026-10",
+        periodo: "2026-10",
+        cantidadConsumida: 6,
+        cantidadRestante: 0,
+        productoKey: "b12",
+      },
+    };
+    const octoberSub12 = {
+      id: "c-12-2026-10",
+      clienteId: "c-12",
+      periodo: "2026-10",
+      promocionId: "p12-6",
+      promocionNombre: "Plan 6×12L",
+      cantidadX20: 6,
+      cantidadConsumida: 6,
+      cantidadRestante: 0,
+      precioMensual: 12000,
+      productoKey: "b12",
+      estadoPago: "pagada",
+    };
+    const visitNov12 = {
+      id: "v-nov-12l",
+      clienteId: "c-12",
+      fecha: "2026-11-03",
+      vendio: true,
+      items: [
+        { tipo: "b20", cantidad: 0, precioUnitario: 3500 },
+        { tipo: "b12", cantidad: 2, precioUnitario: 2500 },
+      ],
+      total: 5000,
+      metodoPago: "deuda",
+      pagos: {},
+      deudaGenerada: 5000,
+      deudaCobrada: 0,
+      subscriptionAttribution: null,
+    };
+
+    const result = renewMonthlySubscriptions({
+      clients: [client12],
+      subscriptions: [octoberSub12],
+      visits: [visitNov12],
+      now: new Date("2026-11-03T15:00:00.000Z"),
+    });
+
+    expect(result.renewed).toEqual(["c-12"]);
+    expect(result.reconciledVisits).toEqual(["v-nov-12l"]);
+    expect(result.subscriptions[1]).toMatchObject({
+      id: "c-12-2026-11",
+      periodo: "2026-11",
+      productoKey: "b12",
+      cantidadConsumida: 2,
+      cantidadRestante: 4,
+    });
+    expect(result.clients[0]).toMatchObject({
+      id: "c-12",
+      deudaAcumulada: 0,
+      subscriptionSummary: {
+        subscriptionId: "c-12-2026-11",
+        periodo: "2026-11",
+        productoKey: "b12",
+        cantidadConsumida: 2,
+        cantidadRestante: 4,
+      },
+    });
+    expect(result.visits[0]).toMatchObject({
+      id: "v-nov-12l",
+      total: 0,
+      metodoPago: null,
+      deudaGenerada: 0,
+      subscriptionAttribution: {
+        subscriptionId: "c-12-2026-11",
+        periodo: "2026-11",
+        cantidadX20: 2,
+        productoKey: "b12",
+      },
+    });
+    expect(result.visits[0].items.find((i) => i.tipo === "b12").cantidad).toBe(0);
+  });
+
+  it("allows changing between 20L and 12L plans with the same quota and updates summary productKey", () => {
+    const plan6x20 = {
+      id: "p6-20",
+      nombre: "Plan 6×20L",
+      cantidadX20: 6,
+      precioMensual: 15000,
+      activo: true,
+    };
+    const plan6x12 = {
+      id: "p6-12",
+      nombre: "Plan 6×12L",
+      cantidadX20: 6,
+      precioMensual: 12000,
+      productoKey: "b12",
+      activo: true,
+    };
+    const sub20 = {
+      id: "c1-2026-11",
+      clienteId: "c1",
+      periodo: "2026-11",
+      ...createPromotionSnapshot(plan6x20),
+      cantidadConsumida: 2,
+      cantidadRestante: 4,
+      estadoPago: "pendiente",
+    };
+
+    const switchedTo12 = changeSubscriptionPromotion({
+      subscription: sub20,
+      promotion: plan6x12,
+    });
+    expect(switchedTo12).toMatchObject({
+      promocionId: "p6-12",
+      promocionNombre: "Plan 6×12L",
+      cantidadX20: 6,
+      precioMensual: 12000,
+      productoKey: "b12",
+      cantidadConsumida: 2,
+      cantidadRestante: 4,
+    });
+
+    const switchedBackTo20 = changeSubscriptionPromotion({
+      subscription: switchedTo12,
+      promotion: plan6x20,
+    });
+    expect(switchedBackTo20.productoKey).toBeUndefined();
+    expect(subscriptionProductKey(switchedBackTo20)).toBe("b20");
+    expect(subscriptionSummaryFrom(switchedBackTo20).productoKey).toBeUndefined();
+  });
+});
+

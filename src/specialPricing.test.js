@@ -30,13 +30,19 @@ describe("precios especiales por cliente", () => {
     expect(cliente.preciosEspeciales).toEqual({ b20: "0", sifon: "900" });
   });
 
-  it("cobra solo el excedente del abono al precio especial y también los extras", () => {
+  it("cobra solo el excedente del abono al precio especial y también los extras (20L o 12L)", () => {
     const items = [
       { tipo: "b20", cantidad: 5, precioUnitario: 3000 },
       { tipo: "sifon", cantidad: 1, precioUnitario: 1200 },
     ];
     expect(chargeableVisitTotal(items, 2)).toBe(10200);
     expect(chargeableVisitTotal(items, 0)).toBe(16200);
+
+    const items12 = [
+      { tipo: "b20", cantidad: 1, precioUnitario: 3500 },
+      { tipo: "b12", cantidad: 3, precioUnitario: 2500 },
+    ];
+    expect(chargeableVisitTotal(items12, 2, "b12")).toBe(6000);
   });
 
   it("no cobra el agua gratis pero sí el sifón que acompaña la entrega", () => {

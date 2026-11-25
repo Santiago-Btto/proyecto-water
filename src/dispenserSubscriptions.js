@@ -1,6 +1,28 @@
 export const SUBSCRIPTION_QUOTAS = [4, 6, 8, 10, 12];
+export const SUBSCRIPTION_CONTAINER_TYPES = [
+  { key: "b20", label: "Bidón 20L", corto: "20L" },
+  { key: "b12", label: "Bidón 12L", corto: "12L" },
+];
 
-export function validatePromotion({ cantidadX20, precioMensual } = {}) {
+export function subscriptionProductKey(record) {
+  return record?.productoKey === "b12" ? "b12" : "b20";
+}
+
+export function subscriptionProductShortLabel(record) {
+  return subscriptionProductKey(record) === "b12" ? "12L" : "20L";
+}
+
+export function subscriptionProductFullLabel(record) {
+  return subscriptionProductKey(record) === "b12" ? "Bidón 12 L" : "Bidón 20 L";
+}
+
+export function validatePromotion({ cantidadX20, precioMensual, productoKey = "b20" } = {}) {
+  if (!["b20", "b12"].includes(productoKey)) {
+    return {
+      ok: false,
+      error: "Elegí Bidón 20L o Bidón 12L para la promoción.",
+    };
+  }
   const cant = Number(cantidadX20);
   if (!Number.isInteger(cant) || cant < 1) {
     return {
@@ -20,6 +42,7 @@ export function createPromotionSnapshot(promotion) {
     promocionNombre: promotion.nombre,
     cantidadX20: Number(promotion.cantidadX20),
     precioMensual: Number(promotion.precioMensual),
+    ...(promotion?.productoKey === "b12" ? { productoKey: "b12" } : {}),
   };
 }
 
@@ -92,6 +115,7 @@ export function subscriptionSummaryFrom(subscription) {
     promocionNombre: subscription.promocionNombre,
     cantidadConsumida: Number(subscription.cantidadConsumida) || 0,
     cantidadRestante: Math.max(0, Number(subscription.cantidadX20) - (Number(subscription.cantidadConsumida) || 0)),
+    ...(subscription?.productoKey === "b12" ? { productoKey: "b12" } : {}),
   };
 }
 
@@ -132,6 +156,7 @@ function isSameSubscriptionSummary(currentSummary, nextSummary) {
     currentSummary.estadoPago === nextSummary.estadoPago &&
     currentSummary.promocionId === nextSummary.promocionId &&
     currentSummary.promocionNombre === nextSummary.promocionNombre &&
+    subscriptionProductKey(currentSummary) === subscriptionProductKey(nextSummary) &&
     Number(currentSummary.cantidadConsumida || 0) === Number(nextSummary.cantidadConsumida || 0) &&
     Number(currentSummary.cantidadRestante || 0) === Number(nextSummary.cantidadRestante || 0)
   );
@@ -188,6 +213,7 @@ export function renewMonthlySubscriptions({
   function reconcileClientVisits(client, subscription) {
     let updatedSub = subscription;
     let debtDelta = 0;
+    const targetProductKey = subscriptionProductKey(subscription);
 
     const attributedTotal = nextVisits
       .filter(
@@ -226,7 +252,7 @@ export function renewMonthlySubscriptions({
           !visit.vendio ||
           visit.subscriptionAttribution ||
           !(visit.items || []).some(
-            (item) => item.tipo === "b20" && Number(item.cantidad) > 0
+            (item) => item.tipo === targetProductKey && Number(item.cantidad) > 0
           )
         ) {
           return false;
@@ -248,7 +274,7 @@ export function renewMonthlySubscriptions({
 
     candidateIndices.forEach(({ index }) => {
       const visit = nextVisits[index];
-      const b20Item = (visit.items || []).find((item) => item.tipo === "b20");
+      const b20Item = (visit.items || []).find((item) => item.tipo === targetProductKey);
       const requested = Number(b20Item?.cantidad) || 0;
       const unitPrice = Number(b20Item?.precioUnitario) || 0;
       const split = splitX20Delivery({
@@ -270,7 +296,7 @@ export function renewMonthlySubscriptions({
       };
 
       const nextItems = (visit.items || []).map((item) =>
-        item.tipo === "b20" ? { ...item, cantidad: split.excess } : item
+        item.tipo === targetProductKey ? { ...item, cantidad: split.excess } : item
       );
       const nextTotal = nextItems.reduce(
         (sum, item) =>
@@ -424,10 +450,11 @@ export function changeSubscriptionPromotion({ subscription, promotion }) {
     throw new Error("La promoción elegida no está disponible.");
   }
 
+  const { productoKey: _prevProductoKey, ...restSubscription } = subscription;
   const cantidadConsumida = Math.max(0, Number(subscription.cantidadConsumida) || 0);
   const cantidadRestante = Math.max(0, Number(promotion.cantidadX20) - cantidadConsumida);
   const next = {
-    ...subscription,
+    ...restSubscription,
     ...createPromotionSnapshot(promotion),
     cantidadConsumida,
     cantidadRestante,
@@ -545,7 +572,14 @@ export function splitX20Delivery({ quantity, subscription, unitPrice }) {
     covered,
     excess,
     ordinaryAmount: excess * (Number(unitPrice) || 0),
-    attribution: covered ? { subscriptionId: subscription.id, periodo: subscription.periodo, cantidadX20: covered } : null,
+    attribution: covered
+      ? {
+          subscriptionId: subscription.id,
+          periodo: subscription.periodo,
+          cantidadX20: covered,
+          ...(subscription?.productoKey === "b12" ? { productoKey: "b12" } : {}),
+        }
+      : null,
   };
 }
 
@@ -554,8 +588,11 @@ export function prepareSubscriptionVisitEdition({
   currentSubscription = null,
 } = {}) {
   const esEdicion = Boolean(visitaInicial);
-  const anteriorB20 = (visitaInicial?.items || []).find(
-    (it) => it.tipo === "b20"
+  const productKey = subscriptionProductKey(
+    currentSubscription || visitaInicial?.subscriptionAttribution
+  );
+  const anteriorItem = (visitaInicial?.items || []).find(
+    (it) => it.tipo === productKey
   );
   const cantidadAtribuidaOriginal =
     esEdicion &&
@@ -565,7 +602,7 @@ export function prepareSubscriptionVisitEdition({
       ? Number(visitaInicial?.subscriptionAttribution?.cantidadX20) || 0
       : 0;
   const initialB20Quantity =
-    (Number(anteriorB20?.cantidad) || 0) +
+    (Number(anteriorItem?.cantidad) || 0) +
     (esEdicion
       ? Number(visitaInicial?.subscriptionAttribution?.cantidadX20) || 0
       : 0);
@@ -587,6 +624,7 @@ export function prepareSubscriptionVisitEdition({
 
   return {
     esEdicion,
+    productKey,
     initialB20Quantity,
     cantidadAtribuidaOriginal,
     subscriptionForCalculation,
@@ -631,7 +669,9 @@ export function formatVisitProductsText(
   const parts = [];
   const abonoB20 = Number(visita?.subscriptionAttribution?.cantidadX20) || 0;
   if (abonoB20 > 0) {
-    parts.push(`${abonoB20}× 20L (Abono)`);
+    parts.push(
+      `${abonoB20}× ${subscriptionProductShortLabel(visita.subscriptionAttribution)} (Abono)`
+    );
   }
 
   (visita?.items || []).forEach((it) => {
