@@ -46,6 +46,12 @@ import {
   installmentPlanProgress,
 } from "./installmentExpenses";
 import {
+  METODOS_PAGO_GASTO,
+  metodoPagoDeGasto,
+  obtenerDetalleMedidorDashboard,
+  resumenGastosPorMetodoPago,
+} from "./dashboardPaymentBreakdowns";
+import {
   CLIENTES_POR_BLOQUE,
   clientesVisiblesEnRecorrido,
   siguienteLimiteVisible,
@@ -640,8 +646,17 @@ function exportarVisitasCSV(db) {
 }
 
 function exportarGastosCSV(db) {
-  const headers = ["Fecha", "Concepto", "Monto"];
-  const rows = db.gastos.slice().sort((a, b) => a.fecha.localeCompare(b.fecha) || (a.timestamp || 0) - (b.timestamp || 0)).map((g) => [fechaLegible(g.fecha), g.concepto, g.monto]);
+  const headers = ["Fecha", "Concepto", "Categoría", "Medio de pago", "Monto"];
+  const rows = db.gastos
+    .slice()
+    .sort((a, b) => a.fecha.localeCompare(b.fecha) || (a.timestamp || 0) - (b.timestamp || 0))
+    .map((g) => [
+      fechaLegible(g.fecha),
+      g.concepto,
+      categoriaDeGasto(g.categoria).label,
+      metodoPagoDeGasto(g.metodoPago).label,
+      g.monto,
+    ]);
   descargarCSV(`gastos_${hoyISO()}.csv`, headers, rows);
 }
 
@@ -1037,16 +1052,56 @@ function Badge({ children, tone = "muted" }) {
 }
 
 /* Elemento "medidor de agua" — la firma visual de la app */
-function Meter({ label, value, unit }) {
+function Meter({ label, value, unit, onClick, active = false, hint = "Tocar para ver quiénes" }) {
+  const clickable = typeof onClick === "function";
   return (
-    <div className="rounded-2xl p-3 flex-1" style={{ background: C.primaryDark, minWidth: 128 }}>
-      <div className="text-xs font-bold uppercase tracking-wider mb-1" style={{ color: C.accentSoft, opacity: 0.75 }}>
-        {label}
+    <div
+      onClick={onClick}
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={
+        clickable
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
+      className={`rounded-2xl p-3 flex-1 ${clickable ? "active:scale-95 transition" : ""}`}
+      style={{
+        background: C.primaryDark,
+        minWidth: 128,
+        cursor: clickable ? "pointer" : "default",
+        border: active ? `2px solid ${C.accent}` : "2px solid transparent",
+        boxShadow: active ? `0 0 0 2px ${C.accentSoft}` : "none",
+      }}
+    >
+      <div className="flex items-center justify-between gap-1 mb-1">
+        <div className="text-xs font-bold uppercase tracking-wider" style={{ color: C.accentSoft, opacity: 0.75 }}>
+          {label}
+        </div>
+        {clickable && (
+          <ChevronRight
+            size={13}
+            color={C.accent}
+            style={{
+              transform: active ? "rotate(90deg)" : "rotate(0deg)",
+              transition: "transform 0.2s",
+            }}
+          />
+        )}
       </div>
       <div className="font-mono font-bold text-lg tabular-nums" style={{ color: "#fff", letterSpacing: "0.02em" }}>
         {value}
         {unit && <span className="text-xs font-semibold ml-1" style={{ color: C.accent }}>{unit}</span>}
       </div>
+      {clickable && (
+        <div className="text-[10px] mt-1 font-semibold" style={{ color: C.accentSoft, opacity: active ? 1 : 0.65 }}>
+          {active ? "Ocultar detalle" : hint}
+        </div>
+      )}
     </div>
   );
 }
@@ -1619,7 +1674,12 @@ function AdminDashboard({ db, mutate }) {
   const [mostrarCalendario, setMostrarCalendario] = useState(false);
   const [mostrarVisitas, setMostrarVisitas] = useState(false);
   const [mostrarAbonos, setMostrarAbonos] = useState(false);
+  const [medidorDetalleTipo, setMedidorDetalleTipo] = useState(null);
   const [visitaEditandoId, setVisitaEditandoId] = useState(null);
+
+  function toggleMedidorDetalle(tipo) {
+    setMedidorDetalleTipo((actual) => (actual === tipo ? null : tipo));
+  }
 
   const visitaEditando = db.visitas.find((visit) => visit.id === visitaEditandoId) || null;
   const clienteDeVisitaEditando = visitaEditando
@@ -1811,6 +1871,20 @@ const totalBultosVendidos = PRODUCTOS.reduce(
     0
   );
 
+  const detalleMedidorActivo = useMemo(
+    () =>
+      medidorDetalleTipo
+        ? obtenerDetalleMedidorDashboard({
+            tipo: medidorDetalleTipo,
+            visitas: visitasFiltradas,
+            clientes: db.clientes,
+            repartidores: db.config.repartidores,
+            productosCatalogo: PRODUCTOS,
+          })
+        : null,
+    [medidorDetalleTipo, visitasFiltradas, db.clientes, db.config.repartidores]
+  );
+
   const preciosSinConfigurar = Object.values(db.config.precios).some((p) => !p);
   const esHoy = rango === "hoy";
 
@@ -1946,11 +2020,111 @@ const totalBultosVendidos = PRODUCTOS.reduce(
       </div>
 
       <div className="flex flex-wrap gap-2 mb-4">
-        <Meter label="Facturado" value={formatMoney(facturado)} />
-        <Meter label="Efectivo" value={formatMoney(efectivo)} />
-        <Meter label="Mercado Pago" value={formatMoney(mp)} />
-        <Meter label="Fiado generado" value={formatMoney(fiado)} />
+        <Meter
+          label="Facturado"
+          value={formatMoney(facturado)}
+          active={medidorDetalleTipo === "facturado"}
+          onClick={() => toggleMedidorDetalle("facturado")}
+        />
+        <Meter
+          label="Efectivo"
+          value={formatMoney(efectivo)}
+          active={medidorDetalleTipo === "efectivo"}
+          onClick={() => toggleMedidorDetalle("efectivo")}
+        />
+        <Meter
+          label="Mercado Pago"
+          value={formatMoney(mp)}
+          active={medidorDetalleTipo === "mercadopago"}
+          onClick={() => toggleMedidorDetalle("mercadopago")}
+        />
+        <Meter
+          label="Fiado generado"
+          value={formatMoney(fiado)}
+          active={medidorDetalleTipo === "fiado"}
+          onClick={() => toggleMedidorDetalle("fiado")}
+        />
       </div>
+
+      {detalleMedidorActivo && medidorDetalleTipo !== "plata_en_la_calle" && (
+        <Card className="mb-4" style={{ border: `1.5px solid ${C.accent}` }}>
+          <div className="flex items-start justify-between gap-2 mb-2.5">
+            <div>
+              <div
+                className="text-xs font-extrabold uppercase tracking-wide"
+                style={{ color: C.primary }}
+              >
+                {detalleMedidorActivo.titulo}
+              </div>
+              <div className="text-[10px] mt-0.5" style={{ color: C.muted }}>
+                {etiquetaRango} · {detalleMedidorActivo.items.length} registro
+                {detalleMedidorActivo.items.length !== 1 ? "s" : ""} · Total{" "}
+                {formatMoney(detalleMedidorActivo.total)}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setMedidorDetalleTipo(null)}
+              className="text-xs font-bold px-2 py-1 rounded-lg"
+              style={{ background: C.bg, color: C.muted }}
+            >
+              Cerrar
+            </button>
+          </div>
+
+          {detalleMedidorActivo.items.length === 0 ? (
+            <div className="text-xs text-center py-3" style={{ color: C.mutedLight }}>
+              No hay registros en este medio para {etiquetaRango.toLowerCase()}.
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {detalleMedidorActivo.items.map((item) => (
+                <div
+                  key={item.id}
+                  onClick={() => item.visitaId && setVisitaEditandoId(item.visitaId)}
+                  className="rounded-xl px-3 py-2.5 flex items-center justify-between gap-3"
+                  style={{
+                    background: C.bg,
+                    border: `1px solid ${C.border}`,
+                    cursor: item.visitaId ? "pointer" : "default",
+                  }}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="font-bold text-xs truncate">
+                      {item.clienteNombre}
+                    </div>
+                    <div className="text-[11px] mt-0.5" style={{ color: C.ink }}>
+                      {item.detalle}
+                    </div>
+                    <div className="text-[10px] mt-0.5" style={{ color: C.muted }}>
+                      {fechaLegible(item.fecha)} · {item.repartidorNombre}
+                    </div>
+                  </div>
+                  <div className="text-right flex-shrink-0">
+                    <div
+                      className="font-mono font-extrabold text-sm"
+                      style={{
+                        color:
+                          medidorDetalleTipo === "fiado" ? C.danger : C.primary,
+                      }}
+                    >
+                      {formatMoney(item.monto)}
+                    </div>
+                    {item.visitaId && (
+                      <div
+                        className="text-[10px] font-semibold"
+                        style={{ color: C.primary }}
+                      >
+                        Ver visita ›
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* =====================================================
           PLATA EN LA CALLE
@@ -1959,11 +2133,13 @@ const totalBultosVendidos = PRODUCTOS.reduce(
           ===================================================== */}
       <Card
         className="mb-4"
+        onClick={() => toggleMedidorDetalle("plata_en_la_calle")}
         style={{
           background: deudaTotalClientes > 0 ? C.dangerBg : C.successBg,
           border: `1px solid ${
             deudaTotalClientes > 0 ? C.danger : C.success
           }`,
+          cursor: "pointer",
         }}
       >
         <div className="flex items-start justify-between gap-3">
@@ -1988,19 +2164,85 @@ const totalBultosVendidos = PRODUCTOS.reduce(
               className="text-[10px] mt-0.5"
               style={{ color: C.mutedLight }}
             >
-              Este valor es actual y no cambia con el filtro del período.
+              Tocar para {medidorDetalleTipo === "plata_en_la_calle" ? "ocultar" : "ver"} quiénes deben · No cambia con el filtro del período.
             </div>
           </div>
 
-          <div
-            className="font-mono font-extrabold text-2xl text-right"
-            style={{
-              color: deudaTotalClientes > 0 ? C.danger : C.success,
-            }}
-          >
-            {formatMoney(deudaTotalClientes)}
+          <div className="flex items-center gap-1.5">
+            <div
+              className="font-mono font-extrabold text-2xl text-right"
+              style={{
+                color: deudaTotalClientes > 0 ? C.danger : C.success,
+              }}
+            >
+              {formatMoney(deudaTotalClientes)}
+            </div>
+            <ChevronRight
+              size={18}
+              color={deudaTotalClientes > 0 ? C.danger : C.success}
+              style={{
+                transform:
+                  medidorDetalleTipo === "plata_en_la_calle"
+                    ? "rotate(90deg)"
+                    : "rotate(0deg)",
+                transition: "transform 0.2s",
+              }}
+            />
           </div>
         </div>
+
+        {detalleMedidorActivo && medidorDetalleTipo === "plata_en_la_calle" && (
+          <div
+            className="mt-3 pt-3 flex flex-col gap-2"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              borderTop: `1px solid ${
+                deudaTotalClientes > 0 ? C.danger : C.success
+              }`,
+            }}
+          >
+            {detalleMedidorActivo.items.length === 0 ? (
+              <div className="text-xs text-center py-2" style={{ color: C.muted }}>
+                Ningún cliente registra deuda pendiente actualmente.
+              </div>
+            ) : (
+              detalleMedidorActivo.items.map((item) => (
+                <div
+                  key={item.id}
+                  className="rounded-xl px-3 py-2 flex items-center justify-between gap-3"
+                  style={{
+                    background: C.surface,
+                    border: `1px solid ${C.border}`,
+                  }}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="font-bold text-xs truncate">
+                      {item.clienteNombre}
+                    </div>
+                    <div className="text-[10px] mt-0.5" style={{ color: C.muted }}>
+                      {item.repartidorNombre}
+                      {item.diasTexto ? ` · ${item.diasTexto}` : ""}
+                    </div>
+                    {item.direccion && (
+                      <div
+                        className="text-[10px] truncate"
+                        style={{ color: C.mutedLight }}
+                      >
+                        {item.direccion}
+                      </div>
+                    )}
+                  </div>
+                  <div
+                    className="font-mono font-extrabold text-sm flex-shrink-0"
+                    style={{ color: C.danger }}
+                  >
+                    {formatMoney(item.monto)}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
       </Card>
 
       <Card
@@ -2619,19 +2861,25 @@ const totalBultosVendidos = PRODUCTOS.reduce(
         </Card>
       ) : (
         <div className="flex flex-col gap-2 mb-4">
-          {gastosFiltrados.map((g) => (
-            <Card key={g.id} className="flex items-center justify-between gap-3">
-              <div>
-                <div className="font-bold text-sm">{g.concepto}</div>
-                <div className="text-[10px]" style={{ color: C.mutedLight }}>
-                  {fechaLegible(g.fecha)}
+          {gastosFiltrados.map((g) => {
+            const medio = metodoPagoDeGasto(g.metodoPago);
+            return (
+              <Card key={g.id} className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <div className="font-bold text-sm">{g.concepto}</div>
+                    <Badge tone={medio.tone}>{medio.corto}</Badge>
+                  </div>
+                  <div className="text-[10px] mt-0.5" style={{ color: C.mutedLight }}>
+                    {fechaLegible(g.fecha)}
+                  </div>
                 </div>
-              </div>
-              <div className="font-mono font-extrabold" style={{ color: C.danger }}>
-                -{formatMoney(g.monto)}
-              </div>
-            </Card>
-          ))}
+                <div className="font-mono font-extrabold" style={{ color: C.danger }}>
+                  -{formatMoney(g.monto)}
+                </div>
+              </Card>
+            );
+          })}
         </div>
       )}
 
@@ -4547,6 +4795,7 @@ function AdminGastos({ db, mutate }) {
   const [concepto, setConcepto] = useState("");
   const [monto, setMonto] = useState("");
   const [categoria, setCategoria] = useState("otros");
+  const [metodoPago, setMetodoPago] = useState("efectivo");
   const [cantidadCuotas, setCantidadCuotas] = useState("2");
   const [periodoInicioCuotas, setPeriodoInicioCuotas] = useState(() => hoyISO().slice(0, 7));
   const [errorCuotas, setErrorCuotas] = useState("");
@@ -4561,6 +4810,7 @@ function AdminGastos({ db, mutate }) {
       concepto: concepto.trim(),
       monto: Number(monto),
       categoria,
+      metodoPago,
       fecha: hoyISO(),
       timestamp: Date.now(),
     });
@@ -4568,6 +4818,7 @@ function AdminGastos({ db, mutate }) {
     setConcepto("");
     setMonto("");
     setCategoria("otros");
+    setMetodoPago("efectivo");
     setSheet(false);
   }
 
@@ -4577,6 +4828,7 @@ function AdminGastos({ db, mutate }) {
         id: uid(),
         concepto,
         categoria,
+        metodoPago,
         montoCuota: monto,
         cuotasTotales: cantidadCuotas,
         periodoInicio: periodoInicioCuotas,
@@ -4595,6 +4847,7 @@ function AdminGastos({ db, mutate }) {
       setCantidadCuotas("2");
       setPeriodoInicioCuotas(hoyISO().slice(0, 7));
       setCategoria("otros");
+      setMetodoPago("efectivo");
       setErrorCuotas("");
       setSheet(false);
     } catch (error) {
@@ -4660,6 +4913,11 @@ function AdminGastos({ db, mutate }) {
             0
           ),
       })).filter((categoriaActual) => categoriaActual.total > 0),
+    [gastosFiltrados]
+  );
+
+  const resumenPorMetodoPago = useMemo(
+    () => resumenGastosPorMetodoPago(gastosFiltrados),
     [gastosFiltrados]
   );
 
@@ -4757,12 +5015,16 @@ function AdminGastos({ db, mutate }) {
           <div className="flex flex-col gap-2">
             {planesEnCuotas.map((plan) => {
               const progreso = installmentPlanProgress(plan, db.gastos);
+              const medioPlan = metodoPagoDeGasto(plan.metodoPago || "efectivo");
               return (
                 <div key={plan.id} className="rounded-xl px-3 py-2" style={{ background: C.soft }}>
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className="text-sm font-bold truncate">{plan.concepto}</div>
-                      <div className="text-[10px]" style={{ color: C.muted }}>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <div className="text-sm font-bold truncate">{plan.concepto}</div>
+                        <Badge tone={medioPlan.tone}>{medioPlan.corto}</Badge>
+                      </div>
+                      <div className="text-[10px] mt-0.5" style={{ color: C.muted }}>
                         {formatMoney(plan.montoCuota)} por mes · {progreso.generated}/{progreso.total} cuotas registradas
                       </div>
                     </div>
@@ -4779,6 +5041,37 @@ function AdminGastos({ db, mutate }) {
                 </div>
               );
             })}
+          </div>
+        </Card>
+      )}
+
+      {resumenPorMetodoPago.length > 0 && (
+        <Card className="mb-4">
+          <div
+            className="text-xs font-extrabold uppercase tracking-wide mb-2"
+            style={{ color: C.muted }}
+          >
+            Por medio de pago · {etiquetaRango}
+          </div>
+          <div className="flex flex-col gap-2">
+            {resumenPorMetodoPago.map((metodoActual) => (
+              <div
+                key={metodoActual.key}
+                className="flex items-center justify-between gap-3 text-xs"
+              >
+                <div className="flex items-center gap-1.5">
+                  <Badge tone={metodoActual.tone}>
+                    {metodoActual.label}
+                  </Badge>
+                  <span className="text-[10px]" style={{ color: C.mutedLight }}>
+                    ({metodoActual.cantidad})
+                  </span>
+                </div>
+                <div className="font-mono font-bold" style={{ color: C.danger }}>
+                  -{formatMoney(metodoActual.total)}
+                </div>
+              </div>
+            ))}
           </div>
         </Card>
       )}
@@ -4877,6 +5170,9 @@ function AdminGastos({ db, mutate }) {
                           <Badge tone={categoriaDeGasto(g.categoria).tone}>
                             {categoriaDeGasto(g.categoria).label}
                           </Badge>
+                          <Badge tone={metodoPagoDeGasto(g.metodoPago).tone}>
+                            {metodoPagoDeGasto(g.metodoPago).corto}
+                          </Badge>
                           {g.cuotaPlanId && (
                             <Badge tone="muted">
                               Cuota {g.cuotaNumero}/{g.cuotasTotales}
@@ -4942,6 +5238,28 @@ function AdminGastos({ db, mutate }) {
                 </option>
               ))}
             </select>
+          </Field>
+          <Field label="Medio de pago">
+            <div className="grid grid-cols-2 gap-2">
+              {METODOS_PAGO_GASTO.map((metodo) => {
+                const activo = metodoPago === metodo.key;
+                return (
+                  <button
+                    key={metodo.key}
+                    type="button"
+                    onClick={() => setMetodoPago(metodo.key)}
+                    className="rounded-xl px-3 py-2.5 text-xs font-bold text-left"
+                    style={{
+                      background: activo ? C.primary : C.bg,
+                      color: activo ? "#fff" : C.ink,
+                      border: `1px solid ${activo ? C.primary : C.border}`,
+                    }}
+                  >
+                    {metodo.label}
+                  </button>
+                );
+              })}
+            </div>
           </Field>
           <Field label={sheet === "cuotas" ? "Monto de cada cuota" : "Monto"}>
             <Input

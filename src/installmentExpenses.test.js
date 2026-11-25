@@ -52,4 +52,59 @@ describe("installment expenses", () => {
     expect(secondSync.generated).toEqual([]);
     expect(secondSync.expenses).toHaveLength(1);
   });
+
+  it("stores and propagates metodoPago from the installment plan to each generated expense", () => {
+    const plan = createInstallmentPlan({
+      id: "tarjeta-2",
+      concepto: "Cubiertas",
+      categoria: "mantenimiento",
+      metodoPago: "tarjeta",
+      montoCuota: 45000,
+      cuotasTotales: 2,
+      periodoInicio: "2026-09",
+    });
+
+    expect(plan.metodoPago).toBe("tarjeta");
+
+    const result = generateInstallmentExpenses({
+      plans: [plan],
+      expenses: [],
+      currentPeriod: "2026-10",
+    });
+
+    expect(result.generated.map((expense) => expense.metodoPago)).toEqual([
+      "tarjeta",
+      "tarjeta",
+    ]);
+  });
+
+  it("defaults metodoPago to efectivo when omitted in plan or legacy plan", () => {
+    const defaultPlan = createInstallmentPlan({
+      id: "plan-default",
+      concepto: "Herramientas",
+      montoCuota: 10000,
+      cuotasTotales: 1,
+      periodoInicio: "2026-10",
+    });
+
+    expect(defaultPlan.metodoPago).toBe("efectivo");
+
+    const legacyPlanWithoutMethod = {
+      id: "legacy-1",
+      concepto: "Plan viejo",
+      categoria: "otros",
+      montoCuota: 8000,
+      cuotasTotales: 1,
+      periodoInicio: "2026-10",
+      activo: true,
+    };
+
+    const result = generateInstallmentExpenses({
+      plans: [legacyPlanWithoutMethod],
+      expenses: [],
+      currentPeriod: "2026-10",
+    });
+
+    expect(result.generated[0].metodoPago).toBe("efectivo");
+  });
 });
