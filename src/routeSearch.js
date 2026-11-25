@@ -165,3 +165,36 @@ export function filtrarYAgruparClientesOtrosDias({
     totalFiltrados: clientesOrdenados.length,
   };
 }
+
+export function agruparClientesPorDiaDeReparto({
+  clientes = [],
+  textoBusqueda = "",
+} = {}) {
+  const texto = textoNormalizado(textoBusqueda);
+  const clientesFiltrados = (clientes || [])
+    .filter((cliente) => coincideBusquedaCliente(cliente, texto))
+    .slice()
+    .sort((a, b) => (a.nombre || "").localeCompare(b.nombre || ""));
+
+  const gruposPorDia = DIAS_SEMANA.map((dia) => {
+    const clientesDelDia = ordenarClientesEnGrupoPorDia(
+      clientesFiltrados.filter((c) => (c.diasVisita || []).includes(dia)),
+      dia
+    );
+    return {
+      dia,
+      clientes: clientesDelDia,
+    };
+  });
+
+  const clientesSinDia = clientesFiltrados.filter(
+    (c) => !Array.isArray(c.diasVisita) || c.diasVisita.length === 0
+  );
+
+  return {
+    clientesFiltrados,
+    gruposPorDia,
+    clientesSinDia,
+  };
+}
+

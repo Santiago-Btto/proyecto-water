@@ -1,8 +1,12 @@
-export const SUBSCRIPTION_QUOTAS = [4, 6, 8, 10];
+export const SUBSCRIPTION_QUOTAS = [4, 6, 8, 10, 12];
 
 export function validatePromotion({ cantidadX20, precioMensual } = {}) {
-  if (!SUBSCRIPTION_QUOTAS.includes(Number(cantidadX20))) {
-    return { ok: false, error: "La promoción debe incluir 4, 6, 8 o 10 bidones de 20L." };
+  const cant = Number(cantidadX20);
+  if (!Number.isInteger(cant) || cant < 1) {
+    return {
+      ok: false,
+      error: "La promoción debe incluir al menos 1 bidón entero de 20L.",
+    };
   }
   if (!(Number(precioMensual) > 0)) {
     return { ok: false, error: "El precio mensual debe ser mayor que cero." };

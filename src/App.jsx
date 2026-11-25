@@ -27,7 +27,27 @@ import {
   submitVisit,
   totalStreetDebt,
 } from "./operationalIntegrity";
-import { changeSubscriptionPromotion, canSelectSubscription, clientSubscriptionSummaryView, createSubscription, deliveryQuotaFeedback, formatVisitProductsText, getPeriod, prepareSubscriptionVisitEdition, recordSubscriptionPayment, renewMonthlySubscriptions, resolveClientSubscriptionForPeriod, splitX20Delivery, subscriptionMetrics, subscriptionPeriodMetrics, subscriptionSummaryFrom, subscriptionUsageHistory, upsertPromotion, validatePromotion } from "./dispenserSubscriptions";
+import {
+  SUBSCRIPTION_QUOTAS,
+  changeSubscriptionPromotion,
+  canSelectSubscription,
+  clientSubscriptionSummaryView,
+  createSubscription,
+  deliveryQuotaFeedback,
+  formatVisitProductsText,
+  getPeriod,
+  prepareSubscriptionVisitEdition,
+  recordSubscriptionPayment,
+  renewMonthlySubscriptions,
+  resolveClientSubscriptionForPeriod,
+  splitX20Delivery,
+  subscriptionMetrics,
+  subscriptionPeriodMetrics,
+  subscriptionSummaryFrom,
+  subscriptionUsageHistory,
+  upsertPromotion,
+  validatePromotion,
+} from "./dispenserSubscriptions";
 import { isDashboardDateInRange } from "./dashboardCalendarFilters";
 import {
   MENDOZA_DEPARTMENTS,
@@ -35,7 +55,12 @@ import {
   formatClientAddress,
   isMendozaDepartment,
 } from "./mendozaDepartments";
-import { summarizeClientsWithDebt } from "./clientDebtSummary";
+import {
+  DIAS_REPARTO_DEUDA,
+  SIN_DIA_ASIGNADO_LABEL,
+  groupClientsWithDebtByRoute,
+  summarizeClientsWithDebt,
+} from "./clientDebtSummary";
 import { chargeableVisitTotal, clientSpecialPriceEntries, isComplimentaryVisit, resolveClientUnitPrice, savedSpecialPrices } from "./specialPricing";
 import {
   createInstallmentPlan,
@@ -53,6 +78,7 @@ import {
   ubicarClienteEnDia,
 } from "./dayRouteOrdering";
 import {
+  agruparClientesPorDiaDeReparto,
   buscarClientesParaRepartidor,
   filtrarYAgruparClientesOtrosDias,
 } from "./routeSearch";
@@ -77,6 +103,21 @@ import {
   stockInventarioDeRepartidor,
   stockInventarioVacio,
 } from "./stockInventory";
+import {
+  calcularResumenBultosVendidos,
+  formatearNumeroBultos,
+} from "./sodaBulkCalculation";
+import {
+  buildFullExtraContainersReturn,
+  convertExtraContainersToPermanent,
+  getPendingExtraContainersAlert,
+} from "./containerLoanAlerts";
+import {
+  buildRemitoPrintableHtml,
+  buildRemitoWhatsAppMessage,
+  createRemitoFrioCalor,
+} from "./remitoFrioCalor";
+import { buildClientCalendarReminderUrl } from "./googleCalendarLink";
 
 /* ============================================================
    TOKENS DE DISEÑO
@@ -1052,6 +1093,283 @@ function BrandMark({ size = 22, color = C.accent }) {
   return <Droplet size={size} color={color} fill={color} fillOpacity={0.18} strokeWidth={2.2} />;
 }
 
+function pasarExtrasAPermanentesEnDb(db, mutate, clienteId) {
+  if (!clienteId) return null;
+  const next = clone(db);
+  const idx = (next.clientes || []).findIndex((c) => c.id === clienteId);
+  if (idx < 0) return null;
+  next.clientes[idx] = convertExtraContainersToPermanent(next.clientes[idx]);
+  mutate(next);
+  return next.clientes[idx];
+}
+
+function FirmaCanvas({ onChange }) {
+  const canvasRef = useRef(null);
+  const dibujandoRef = useRef(false);
+  const [firmado, setFirmado] = useState(false);
+
+  function obtenerCoordenadas(e) {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / (rect.width || 1);
+    const scaleY = canvas.height / (rect.height || 1);
+    const punto = e.touches && e.touches[0] ? e.touches[0] : e;
+    return {
+      x: (punto.clientX - rect.left) * scaleX,
+      y: (punto.clientY - rect.top) * scaleY,
+    };
+  }
+
+  function iniciarTrazo(e) {
+    if (e.cancelable) e.preventDefault();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const { x, y } = obtenerCoordenadas(e);
+    dibujandoRef.current = true;
+    ctx.strokeStyle = "#082C38";
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+  }
+
+  function moverTrazo(e) {
+    if (!dibujandoRef.current) return;
+    if (e.cancelable) e.preventDefault();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const { x, y } = obtenerCoordenadas(e);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    if (!firmado) setFirmado(true);
+  }
+
+  function terminarTrazo() {
+    if (!dibujandoRef.current) return;
+    dibujandoRef.current = false;
+    const canvas = canvasRef.current;
+    if (canvas && onChange) {
+      onChange(canvas.toDataURL("image/png"));
+    }
+  }
+
+  function limpiarFirma() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    setFirmado(false);
+    if (onChange) onChange("");
+  }
+
+  return (
+    <div>
+      <div
+        className="rounded-2xl overflow-hidden"
+        style={{
+          border: `1.5px dashed ${C.primary}`,
+          background: "#FFFFFF",
+          touchAction: "none",
+        }}
+      >
+        <canvas
+          ref={canvasRef}
+          width={560}
+          height={180}
+          style={{ width: "100%", height: 140, display: "block", touchAction: "none" }}
+          onMouseDown={iniciarTrazo}
+          onMouseMove={moverTrazo}
+          onMouseUp={terminarTrazo}
+          onMouseLeave={terminarTrazo}
+          onTouchStart={iniciarTrazo}
+          onTouchMove={moverTrazo}
+          onTouchEnd={terminarTrazo}
+        />
+      </div>
+      <div className="flex items-center justify-between mt-1.5">
+        <span className="text-[10px]" style={{ color: C.muted }}>
+          {firmado
+            ? "Firma capturada ✓"
+            : "Firmá con el dedo o mouse dentro del recuadro"}
+        </span>
+        {firmado && (
+          <button
+            type="button"
+            onClick={limpiarFirma}
+            className="text-xs font-bold"
+            style={{ color: C.danger }}
+          >
+            Borrar firma
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RemitoFrioCalorSheet({
+  cliente,
+  subscription = null,
+  visita = null,
+  repartidorNombre = "Agua Lukas",
+  cantidadInicialBidones = 0,
+  montoInicial = 0,
+  onClose,
+}) {
+  const [detalleEquipo, setDetalleEquipo] = useState(
+    "Dispenser Frío/Calor en comodato"
+  );
+  const [cantidadBidones20L, setCantidadBidones20L] = useState(
+    Number(cantidadInicialBidones) ||
+      Number(visita?.subscriptionAttribution?.cantidadX20) ||
+      0
+  );
+  const [monto, setMonto] = useState(
+    Number(montoInicial) || Number(subscription?.precioMensual) || 0
+  );
+  const [observaciones, setObservaciones] = useState(visita?.notas || "");
+  const [firmaDataUrl, setFirmaDataUrl] = useState("");
+
+  const remito = useMemo(
+    () =>
+      createRemitoFrioCalor({
+        cliente,
+        visita,
+        subscription,
+        repartidorNombre,
+        detalleEquipo,
+        cantidadBidones20L,
+        monto,
+        observaciones,
+        firmaDataUrl,
+        fecha: visita?.fecha || hoyISO(),
+      }),
+    [
+      cliente,
+      visita,
+      subscription,
+      repartidorNombre,
+      detalleEquipo,
+      cantidadBidones20L,
+      monto,
+      observaciones,
+      firmaDataUrl,
+    ]
+  );
+
+  function abrirOImprimirRemito() {
+    const html = buildRemitoPrintableHtml(remito);
+    const win = window.open("", "_blank");
+    if (win && win.document) {
+      win.document.open();
+      win.document.write(html);
+      win.document.close();
+      return;
+    }
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${remito.numeroRemito || "remito_frio_calor"}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function enviarPorWhatsApp() {
+    const msg = buildRemitoWhatsAppMessage(remito);
+    const baseWa = urlWhatsApp(cliente?.telefono);
+    const targetUrl = baseWa
+      ? `${baseWa}?text=${encodeURIComponent(msg)}`
+      : `https://wa.me/?text=${encodeURIComponent(msg)}`;
+    window.open(targetUrl, "_blank", "noopener,noreferrer");
+  }
+
+  return (
+    <Sheet
+      title={`Remito Frío/Calor · ${cliente?.nombre || ""}`}
+      onClose={onClose}
+      closeOnBackdrop={false}
+    >
+      <Card className="mb-3" style={{ background: C.accentSoft, border: "none" }}>
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-extrabold" style={{ color: C.primary }}>
+            {remito.numeroRemito}
+          </div>
+          <div className="text-xs font-semibold" style={{ color: C.muted }}>
+            {remito.fechaLegible}
+          </div>
+        </div>
+        <div className="text-xs mt-1 font-semibold">{remito.clienteNombre}</div>
+        <div className="text-[11px]" style={{ color: C.muted }}>
+          {remito.clienteDireccion} · {remito.planNombre}
+        </div>
+      </Card>
+
+      <Field label="Detalle del equipo / entrega">
+        <Input
+          value={detalleEquipo}
+          onChange={(e) => setDetalleEquipo(e.target.value)}
+          placeholder="Dispenser Frío/Calor en comodato"
+        />
+      </Field>
+
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Bidones 20L entregados">
+          <Input
+            type="number"
+            inputMode="numeric"
+            min="0"
+            value={cantidadBidones20L}
+            onChange={(e) => setCantidadBidones20L(e.target.value)}
+          />
+        </Field>
+        <Field label="Importe ($)">
+          <Input
+            type="number"
+            inputMode="decimal"
+            min="0"
+            value={monto}
+            onChange={(e) => setMonto(e.target.value)}
+          />
+        </Field>
+      </div>
+
+      <Field label="Observaciones del remito">
+        <Textarea
+          rows={2}
+          value={observaciones}
+          onChange={(e) => setObservaciones(e.target.value)}
+          placeholder="Ej: Equipo instalado en cocina, comodato mensual..."
+        />
+      </Field>
+
+      <Field label="Firma de conformidad del cliente">
+        <FirmaCanvas onChange={setFirmaDataUrl} />
+      </Field>
+
+      <div className="flex flex-col gap-2 mt-3">
+        <Btn full icon={Download} onClick={abrirOImprimirRemito}>
+          Generar / Imprimir Remito (PDF)
+        </Btn>
+        <Btn
+          full
+          variant="subtle"
+          icon={MessageCircle}
+          onClick={enviarPorWhatsApp}
+        >
+          Enviar remito por WhatsApp
+        </Btn>
+      </div>
+    </Sheet>
+  );
+}
+
 /* ============================================================
    PANTALLA: SELECCIÓN DE PERFIL
    ============================================================ */
@@ -1277,16 +1595,105 @@ function AdminSuscripciones({ db, mutate }) {
   const [cantidadX20, setCantidadX20] = useState("4");
   const [precioMensual, setPrecioMensual] = useState("");
   const [error, setError] = useState("");
+  const [okMsg, setOkMsg] = useState("");
   const [historialAbierto, setHistorialAbierto] = useState(null);
+  const [planPersonalizadoClienteId, setPlanPersonalizadoClienteId] =
+    useState(null);
+  const [customCantidad, setCustomCantidad] = useState("6");
+  const [customPrecio, setCustomPrecio] = useState("");
+  const [remitoTarget, setRemitoTarget] = useState(null);
   const periodoActual = getPeriod();
   const metrics = subscriptionMetrics((db.subscriptions || []).filter((subscription) => subscription.periodo === periodoActual));
 
+  function parsearImporteLimpio(valor) {
+    const limpio = String(valor ?? "").replace(/[^\d]/g, "");
+    return Number(limpio) || 0;
+  }
+
   function savePromotion() {
-    const promotion = { id: uid(), nombre: nombre || `${cantidadX20} bidones 20L`, cantidadX20: Number(cantidadX20), precioMensual: Number(precioMensual), activo: true };
+    const cantNum = Number(String(cantidadX20).trim());
+    const precioNum = parsearImporteLimpio(precioMensual);
+    const promotion = {
+      id: uid(),
+      nombre: (nombre || "").trim() || `Plan ${cantNum} bidones 20L`,
+      cantidadX20: cantNum,
+      precioMensual: precioNum,
+      activo: true,
+    };
     const validation = validatePromotion(promotion);
-    if (!validation.ok) return setError(validation.error);
+    if (!validation.ok) {
+      setOkMsg("");
+      return setError(validation.error);
+    }
     mutate({ ...db, promotions: upsertPromotion(db.promotions || [], promotion) });
-    setNombre(""); setPrecioMensual(""); setError("");
+    setNombre("");
+    setPrecioMensual("");
+    setError("");
+    setOkMsg("Promoción creada ✓");
+  }
+
+  function crearYAsignarPlanPersonalizado(client, currentSubscription) {
+    const cantNum = Number(String(customCantidad).trim());
+    const precioNum = parsearImporteLimpio(customPrecio);
+    const promotion = {
+      id: uid(),
+      nombre: `Plan ${cantNum} bidones (${client.nombre})`,
+      cantidadX20: cantNum,
+      precioMensual: precioNum,
+      activo: true,
+    };
+    const validation = validatePromotion(promotion);
+    if (!validation.ok) {
+      setOkMsg("");
+      return setError(validation.error);
+    }
+
+    try {
+      const nextPromotions = upsertPromotion(db.promotions || [], promotion);
+      let nextSubscriptions = (db.subscriptions || []).slice();
+      let targetSub;
+
+      if (currentSubscription) {
+        targetSub = changeSubscriptionPromotion({
+          subscription: currentSubscription,
+          promotion,
+        });
+        const exists = nextSubscriptions.some(
+          (item) => item.id === currentSubscription.id
+        );
+        nextSubscriptions = exists
+          ? nextSubscriptions.map((item) =>
+              item.id === currentSubscription.id ? targetSub : item
+            )
+          : [...nextSubscriptions, targetSub];
+      } else {
+        targetSub = createSubscription({
+          client,
+          promotion,
+          subscriptions: nextSubscriptions,
+        });
+        nextSubscriptions = [...nextSubscriptions, targetSub];
+      }
+
+      const nextClients = db.clientes.map((item) =>
+        item.id === client.id
+          ? { ...item, subscriptionSummary: subscriptionSummaryFrom(targetSub) }
+          : item
+      );
+
+      mutate({
+        ...db,
+        promotions: nextPromotions,
+        subscriptions: nextSubscriptions,
+        clientes: nextClients,
+      });
+      setPlanPersonalizadoClienteId(null);
+      setCustomPrecio("");
+      setError("");
+      setOkMsg(`Plan de ${cantNum}×20L asignado a ${client.nombre} ✓`);
+    } catch (cause) {
+      setError(cause.message);
+    }
   }
 
   function selectSubscription(client, promotion) {
@@ -1294,6 +1701,7 @@ function AdminSuscripciones({ db, mutate }) {
       const subscription = createSubscription({ client, promotion, subscriptions: db.subscriptions || [] });
       const clients = db.clientes.map((item) => item.id === client.id ? { ...item, subscriptionSummary: subscriptionSummaryFrom(subscription) } : item);
       mutate({ ...db, clientes: clients, subscriptions: [...(db.subscriptions || []), subscription] });
+      setError("");
     } catch (cause) { setError(cause.message); }
   }
 
@@ -1327,9 +1735,57 @@ function AdminSuscripciones({ db, mutate }) {
 
   return <div className="space-y-3">
     <Card><div className="font-bold text-sm mb-2">Promociones de máquina F/C</div>
-      <Field label="Nombre"><Input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Ej. Plan 6 bidones" /></Field>
-      <div className="flex gap-2"><Field label="Bidones 20L"><select value={cantidadX20} onChange={(e) => setCantidadX20(e.target.value)} className="rounded-xl px-2 py-2.5 text-sm" style={{ border: `1px solid ${C.border}` }}>{[4, 6, 8, 10].map((n) => <option key={n}>{n}</option>)}</select></Field><Field label="Total mensual"><Input type="number" value={precioMensual} onChange={(e) => setPrecioMensual(e.target.value)} /></Field></div>
-      {error && <div className="text-xs mb-2" style={{ color: C.danger }}>{error}</div>}<Btn size="sm" onClick={savePromotion} icon={Save}>Guardar promoción</Btn>
+      <Field label="Nombre (opcional)"><Input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Ej. Plan 6 bidones o Plan empresa" /></Field>
+      <Field label="Cantidad rápida o personalizada de bidones 20L">
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          {SUBSCRIPTION_QUOTAS.map((n) => {
+            const activo = Number(cantidadX20) === n;
+            return (
+              <button
+                key={n}
+                type="button"
+                onClick={() => setCantidadX20(String(n))}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold"
+                style={{
+                  background: activo ? C.primary : C.bg,
+                  color: activo ? "#fff" : C.ink,
+                  border: `1px solid ${activo ? C.primary : C.border}`,
+                }}
+              >
+                {n}×20L
+              </button>
+            );
+          })}
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <div className="text-[10px] font-semibold mb-1" style={{ color: C.muted }}>Bidones 20L (cualquier cantidad)</div>
+            <Input
+              type="number"
+              inputMode="numeric"
+              min="1"
+              step="1"
+              value={cantidadX20}
+              onChange={(e) => setCantidadX20(e.target.value)}
+              placeholder="Ej: 5"
+            />
+          </div>
+          <div>
+            <div className="text-[10px] font-semibold mb-1" style={{ color: C.muted }}>Total mensual ($)</div>
+            <Input
+              type="number"
+              inputMode="numeric"
+              min="1"
+              value={precioMensual}
+              onChange={(e) => setPrecioMensual(e.target.value)}
+              placeholder="Ej: 18000"
+            />
+          </div>
+        </div>
+      </Field>
+      {error && <div className="text-xs font-semibold mb-2" style={{ color: C.danger }}>{error}</div>}
+      {okMsg && <div className="text-xs font-semibold mb-2" style={{ color: C.success }}>{okMsg}</div>}
+      <Btn size="sm" onClick={savePromotion} icon={Save}>Guardar promoción</Btn>
       {(db.promotions || []).map((promotion) => <div key={promotion.id} className="flex justify-between text-xs mt-3"><span>{promotion.nombre}: {promotion.cantidadX20}×20L · {formatMoney(promotion.precioMensual)}</span><button onClick={() => mutate({ ...db, promotions: upsertPromotion(db.promotions, { ...promotion, activo: !promotion.activo }) })} style={{ color: C.primary }}>{promotion.activo ? "Desactivar" : "Activar"}</button></div>)}
     </Card>
     <Card><div className="font-bold text-sm mb-2">Resumen de suscripciones · {periodoActual}</div><div className="text-xs" style={{ color: C.muted }}>Pagado {formatMoney(metrics.paidTotal)} · Pendiente {formatMoney(metrics.pendingTotal)} · Vencido {formatMoney(metrics.overdueTotal)} · Cupo restante {metrics.remainingTotal}</div><div className="text-[10px] mt-2" style={{ color: C.muted }}>Los abonos se renuevan automáticamente al comenzar cada mes.</div></Card>
@@ -1358,25 +1814,119 @@ function AdminSuscripciones({ db, mutate }) {
         : [];
       const history = subscriptionUsageHistory({ clientId: client.id, subscriptions: db.subscriptions || [], visits: db.visitas || [] });
       const open = historialAbierto === client.id;
+      const creandoPersonalizado = planPersonalizadoClienteId === client.id;
+      const rep = (db.config.repartidores || []).find((r) => r.id === client.repartidorId);
+
       return <Card key={client.id}>
-        <div className="font-bold text-sm">{client.nombre}</div>
+        <div className="flex items-start justify-between gap-2">
+          <div className="font-bold text-sm">{client.nombre}</div>
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              onClick={() => setRemitoTarget({ client, subscription: current, repartidorNombre: rep?.nombre || "Agua Lukas" })}
+              className="px-2.5 py-1 rounded-lg text-[11px] font-bold"
+              style={{ background: C.accentSoft, color: C.primary }}
+            >
+              Remito y Firma F/C
+            </button>
+            <a
+              href={buildClientCalendarReminderUrl({
+                cliente: client,
+                fechaISO: hoyISO(),
+                motivo: "Abono y mantenimiento Frío/Calor",
+              })}
+              target="_blank"
+              rel="noreferrer"
+              className="px-2.5 py-1 rounded-lg text-[11px] font-bold inline-flex items-center gap-1"
+              style={{ background: C.bg, color: C.primary, border: `1px solid ${C.border}` }}
+            >
+              <CalendarDays size={12} />
+              Calendar
+            </a>
+          </div>
+        </div>
         {!current ? <>
           <div className="text-xs my-1" style={{ color: C.muted }}>{view.label}</div>
           {selectable.ok && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
             <div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>Asignar plan de abono</div>
-            {promocionesActivas.length > 0 ? promocionesActivas.map((promotion) => <button key={promotion.id} onClick={() => selectSubscription(client, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>Asignar {promotion.nombre} ({promotion.cantidadX20}×20L)</button>) : <div className="text-xs" style={{ color: C.muted }}>Creá o activá una promoción arriba para asignarla</div>}
+            {promocionesActivas.length > 0 ? <div className="flex flex-wrap gap-2">{promocionesActivas.map((promotion) => <button key={promotion.id} onClick={() => selectSubscription(client, promotion)} className="text-xs font-semibold" style={{ color: C.primary }}>Asignar {promotion.nombre} ({promotion.cantidadX20}×20L)</button>)}</div> : <div className="text-xs" style={{ color: C.muted }}>Creá o activá una promoción arriba o armá un plan personalizado acá abajo.</div>}
           </div>}
         </> : <>
-          <div className="text-xs" style={{ color: C.muted }}>{view.period} · {view.label} · {view.consumed}/{current.cantidadX20} entregados · quedan {view.remaining}</div>
-          {current.estadoPago !== "pagada" && <div className="mt-1"><button className="text-xs mr-2" onClick={() => pay(current, "efectivo")} style={{ color: C.primary }}>Cobrar efectivo</button><button className="text-xs" onClick={() => pay(current, "mercadopago")} style={{ color: C.primary }}>Cobrar Mercado Pago</button></div>}
-          {promocionesParaCambio.length > 0 && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}><div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>Cambiar plan de abono</div>{promocionesParaCambio.map((promotion) => <button key={promotion.id} onClick={() => changePlan(current, promotion)} className="text-xs mr-2" style={{ color: C.primary }}>Cambiar a {promotion.nombre} ({promotion.cantidadX20}×20L)</button>)}</div>}
+          <div className="text-xs mt-1" style={{ color: C.muted }}>{view.period} · {view.label} · {view.consumed}/{current.cantidadX20} entregados · quedan {view.remaining}</div>
+          {current.estadoPago !== "pagada" && <div className="mt-1"><button className="text-xs font-semibold mr-2" onClick={() => pay(current, "efectivo")} style={{ color: C.primary }}>Cobrar efectivo</button><button className="text-xs font-semibold" onClick={() => pay(current, "mercadopago")} style={{ color: C.primary }}>Cobrar Mercado Pago</button></div>}
+          {promocionesParaCambio.length > 0 && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}><div className="text-[10px] font-bold mb-1" style={{ color: C.muted }}>Cambiar plan de abono</div><div className="flex flex-wrap gap-2">{promocionesParaCambio.map((promotion) => <button key={promotion.id} onClick={() => changePlan(current, promotion)} className="text-xs font-semibold" style={{ color: C.primary }}>Cambiar a {promotion.nombre} ({promotion.cantidadX20}×20L)</button>)}</div></div>}
         </>}
+
+        <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
+          {!creandoPersonalizado ? (
+            <button
+              type="button"
+              onClick={() => {
+                setPlanPersonalizadoClienteId(client.id);
+                setCustomCantidad(String(current?.cantidadX20 || 6));
+                setCustomPrecio(String(current?.precioMensual || ""));
+              }}
+              className="text-xs font-bold"
+              style={{ color: C.primary }}
+            >
+              + Crear plan personalizado para este cliente
+            </button>
+          ) : (
+            <div className="rounded-xl p-2.5" style={{ background: C.bg }}>
+              <div className="text-[11px] font-bold mb-2" style={{ color: C.primary }}>
+                Plan personalizado para {client.nombre}
+              </div>
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <Input
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  value={customCantidad}
+                  onChange={(e) => setCustomCantidad(e.target.value)}
+                  placeholder="Bidones 20L"
+                />
+                <Input
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  value={customPrecio}
+                  onChange={(e) => setCustomPrecio(e.target.value)}
+                  placeholder="Precio mensual $"
+                />
+              </div>
+              <div className="flex gap-2">
+                <Btn
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setPlanPersonalizadoClienteId(null)}
+                >
+                  Cancelar
+                </Btn>
+                <Btn
+                  size="sm"
+                  onClick={() => crearYAsignarPlanPersonalizado(client, current)}
+                >
+                  Crear y asignar plan
+                </Btn>
+              </div>
+            </div>
+          )}
+        </div>
+
         {history.length > 0 && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.border}` }}>
           <button className="w-full flex items-center justify-between text-xs font-bold" onClick={() => setHistorialAbierto(open ? null : client.id)} style={{ color: C.primary }}><span>Historial de consumo</span><ChevronRight size={15} style={{ transform: open ? "rotate(90deg)" : "none" }} /></button>
           {open && <div className="mt-2 space-y-2">{history.map((subscription) => <div key={subscription.id} className="rounded-lg p-2 text-xs" style={{ background: C.soft }}><div className="font-bold">{subscription.periodo} · {subscription.promocionNombre || `${subscription.cantidadX20} bidones`}</div><div style={{ color: C.muted }}>{subscription.cantidadConsumida}/{subscription.cantidadX20} entregados · quedan {Math.max(0, Number(subscription.cantidadX20) - Number(subscription.cantidadConsumida || 0))} · {subscription.estadoPago === "pagada" ? "Pagado" : subscription.estadoPago === "vencida" ? "Vencido" : "Pendiente"}</div>{subscription.deliveries.length > 0 ? <div className="mt-1" style={{ color: C.muted }}>{subscription.deliveries.map((delivery, index) => <div key={`${delivery.fecha}-${index}`}>{String(delivery.fecha || "").split("T")[0]} · {delivery.cantidadX20} bidón{delivery.cantidadX20 === 1 ? "" : "es"}</div>)}</div> : <div className="mt-1" style={{ color: C.muted }}>Sin entregas registradas.</div>}</div>)}</div>}
         </div>}
       </Card>;
     })}
+    {remitoTarget && (
+      <RemitoFrioCalorSheet
+        cliente={remitoTarget.client}
+        subscription={remitoTarget.subscription}
+        repartidorNombre={remitoTarget.repartidorNombre}
+        onClose={() => setRemitoTarget(null)}
+      />
+    )}
   </div>;
 }
 
@@ -1771,36 +2321,17 @@ function AdminDashboard({ db, mutate }) {
   const movimientosExtras = resumenExtrasVisitas(visitasFiltradas);
 
   // ======================================================
-// BULTOS VENDIDOS EN EL PERÍODO SELECCIONADO
-// Solo cuenta productos de visitas donde hubo venta.
-// No mezcla envases prestados, retirados ni permanentes.
-// ======================================================
-const bultosVendidos = useMemo(() => {
-  const resultado = {};
+  // BULTOS VENDIDOS EN EL PERÍODO SELECCIONADO
+  // Solo cuenta productos de visitas donde hubo venta.
+  // Para sifón: 6 unidades = 1 bulto.
+  // ======================================================
+  const resumenBultosVendidos = useMemo(
+    () => calcularResumenBultosVendidos(visitasFiltradas, PRODUCTOS),
+    [visitasFiltradas]
+  );
 
-  PRODUCTOS.forEach((p) => {
-    resultado[p.key] = 0;
-  });
-
-  visitasFiltradas.forEach((visita) => {
-    if (!visita.vendio) return;
-
-    (visita.items || []).forEach((item) => {
-      if (!(item.tipo in resultado)) return;
-
-      resultado[item.tipo] +=
-        Number(item.cantidad) || 0;
-    });
-  });
-
-  return resultado;
-}, [visitasFiltradas]);
-
-const totalBultosVendidos = PRODUCTOS.reduce(
-  (total, producto) =>
-    total + (Number(bultosVendidos[producto.key]) || 0),
-  0
-);
+  const bultosVendidos = resumenBultosVendidos.bultosPorProducto;
+  const totalBultosVendidos = resumenBultosVendidos.totalBultos;
 
   const deudaTotalClientes = totalStreetDebt(db.clientes);
   const envasesEnCalle = db.clientes.reduce(
@@ -2238,56 +2769,56 @@ const totalBultosVendidos = PRODUCTOS.reduce(
         className="font-mono font-extrabold text-xl"
         style={{ color: "#fff" }}
       >
-        {totalBultosVendidos}
+        {resumenBultosVendidos.totalBultosFormateado}
       </div>
     </div>
   </div>
 
   <div className="grid grid-cols-2 gap-2">
     {PRODUCTOS.map((p) => {
-      const cantidad =
-        Number(bultosVendidos[p.key]) || 0;
+      const detalle = resumenBultosVendidos.detallePorProducto[p.key] || {
+        unidades: 0,
+        bultos: 0,
+        textoPrincipal: "0",
+        subtexto: null,
+      };
+      const tieneVenta = detalle.unidades > 0;
 
       return (
         <div
           key={p.key}
           className="rounded-xl px-3 py-2.5 flex items-center justify-between gap-2"
           style={{
-            background:
-              cantidad > 0
-                ? C.accentSoft
-                : C.bg,
-            border: `1px solid ${
-              cantidad > 0
-                ? C.accent
-                : C.border
-            }`,
+            background: tieneVenta ? C.accentSoft : C.bg,
+            border: `1px solid ${tieneVenta ? C.accent : C.border}`,
           }}
         >
           <div className="min-w-0">
             <div
               className="text-[10px] font-bold truncate"
               style={{
-                color:
-                  cantidad > 0
-                    ? C.primary
-                    : C.muted,
+                color: tieneVenta ? C.primary : C.muted,
               }}
             >
               {p.label}
             </div>
+            {detalle.subtexto && (
+              <div
+                className="text-[9px] truncate mt-0.5"
+                style={{ color: C.muted }}
+              >
+                {detalle.subtexto}
+              </div>
+            )}
           </div>
 
           <div
             className="font-mono font-extrabold text-lg flex-shrink-0"
             style={{
-              color:
-                cantidad > 0
-                  ? C.primary
-                  : C.mutedLight,
+              color: tieneVenta ? C.primary : C.mutedLight,
             }}
           >
-            {cantidad}
+            {detalle.textoPrincipal}
           </div>
         </div>
       );
@@ -2372,6 +2903,7 @@ const totalBultosVendidos = PRODUCTOS.reduce(
             const mpr = vr.reduce((s, v) => s + (Number(v.pagos?.mercadopago) || 0), 0);
             const fiadoRep = vr.reduce((s, v) => s + (Number(v.deudaGenerada) || 0), 0);
             const actividad = ef + mpr + fiadoRep;
+            const bultosRep = calcularResumenBultosVendidos(vr, PRODUCTOS);
 
             return (
               <Card key={r.id}>
@@ -2385,13 +2917,16 @@ const totalBultosVendidos = PRODUCTOS.reduce(
                   </div>
                 </div>
                 <div className="text-[10px] mb-1.5" style={{ color: C.mutedLight }}>
-                  Facturado {formatMoney(fact)} · {vr.length} visita{vr.length !== 1 ? "s" : ""}
+                  Facturado {formatMoney(fact)} · {vr.length} visita{vr.length !== 1 ? "s" : ""} · {bultosRep.totalBultosFormateado} bultos
                 </div>
                 <div className="flex gap-1.5 flex-wrap">
                   <Badge tone="success">Efectivo {formatMoney(ef)}</Badge>
                   <Badge tone="accent">MP {formatMoney(mpr)}</Badge>
                   <Badge tone={fiadoRep > 0 ? "danger" : "muted"}>
                     Fiado generado {formatMoney(fiadoRep)}
+                  </Badge>
+                  <Badge tone="accent">
+                    Bultos: {bultosRep.totalBultosFormateado}
                   </Badge>
                 </div>
               </Card>
@@ -2657,6 +3192,9 @@ const totalBultosVendidos = PRODUCTOS.reduce(
           )}
           subscriptions={db.subscriptions || []}
           modoCorreccionAdministrativa
+          onPasarExtrasAPermanentes={(clienteId) =>
+            pasarExtrasAPermanentesEnDb(db, mutate, clienteId)
+          }
           onClose={() => setVisitaEditandoId(null)}
           onGuardar={guardarCorreccion}
         />
@@ -3097,6 +3635,8 @@ function AdminClientes({ db, mutate }) {
   const [detalleId, setDetalleId] = useState(null);
   const [ordenLista, setOrdenLista] = useState("nombre");
   const [mostrarDeudores, setMostrarDeudores] = useState(false);
+  const [filtroDeudaRepartidor, setFiltroDeudaRepartidor] = useState("todos");
+  const [filtroDeudaDia, setFiltroDeudaDia] = useState("todos");
   const [mostrarEspeciales, setMostrarEspeciales] = useState(false);
   const [diasAbiertos, setDiasAbiertos] = useState(
     () => new Set([diaSemanaHoy()])
@@ -3142,6 +3682,21 @@ function AdminClientes({ db, mutate }) {
     : null;
 
   const { clients: clientesConDeuda, total: totalDeudas } = summarizeClientsWithDebt(db.clientes);
+  const fiadoPorReparto = useMemo(
+    () =>
+      groupClientsWithDebtByRoute({
+        clientes: db.clientes,
+        repartidores: db.config.repartidores,
+        repartidorId: filtroDeudaRepartidor,
+        dia: filtroDeudaDia,
+      }),
+    [
+      db.clientes,
+      db.config.repartidores,
+      filtroDeudaRepartidor,
+      filtroDeudaDia,
+    ]
+  );
   const clientesEspeciales = db.clientes
     .filter((cliente) => clientSpecialPriceEntries(cliente).length > 0)
     .sort((a, b) => a.nombre.localeCompare(b.nombre));
@@ -3375,7 +3930,7 @@ function guardarCliente(f) {
           >
             <div>
               <div className="text-xs font-extrabold uppercase tracking-wide" style={{ color: C.danger }}>
-                Clientes con deudas
+                Clientes con deudas (fiado por reparto)
               </div>
               <div className="text-[10px] mt-0.5" style={{ color: C.muted }}>
                 {clientesConDeuda.length} cliente{clientesConDeuda.length !== 1 ? "s" : ""} · Total {formatMoney(totalDeudas)}
@@ -3385,24 +3940,111 @@ function guardarCliente(f) {
           </button>
 
           {mostrarDeudores && (
-            <div className="mt-3 pt-2 flex flex-col gap-2" style={{ borderTop: `1px solid ${C.danger}` }}>
-              {clientesConDeuda.map((cliente) => (
-                <button
-                  key={cliente.id}
-                  type="button"
-                  onClick={() => setDetalleId(cliente.id)}
-                  className="w-full rounded-xl px-3 py-2 flex items-center justify-between gap-3 text-left"
-                  style={{ background: C.surface, border: `1px solid ${C.border}` }}
-                >
-                  <div className="min-w-0">
-                    <div className="text-sm font-bold truncate">{cliente.nombre}</div>
-                    <div className="text-[10px] truncate" style={{ color: C.muted }}>{cliente.direccion || "Sin dirección"}</div>
+            <div className="mt-3 pt-2 flex flex-col gap-2.5" style={{ borderTop: `1px solid ${C.danger}` }}>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-[10px] font-bold uppercase mb-1" style={{ color: C.muted }}>
+                    Repartidor
                   </div>
-                  <div className="font-mono font-extrabold text-sm flex-shrink-0" style={{ color: C.danger }}>
-                    {formatMoney(cliente.deudaAcumulada)}
+                  <select
+                    value={filtroDeudaRepartidor}
+                    onChange={(e) => setFiltroDeudaRepartidor(e.target.value)}
+                    className="w-full rounded-xl px-2.5 py-2 text-xs font-bold outline-none"
+                    style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.ink }}
+                  >
+                    <option value="todos">Todos los repartos</option>
+                    {db.config.repartidores.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.nombre}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase mb-1" style={{ color: C.muted }}>
+                    Día de reparto
                   </div>
-                </button>
-              ))}
+                  <select
+                    value={filtroDeudaDia}
+                    onChange={(e) => setFiltroDeudaDia(e.target.value)}
+                    className="w-full rounded-xl px-2.5 py-2 text-xs font-bold outline-none"
+                    style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.ink }}
+                  >
+                    <option value="todos">Todos los días</option>
+                    {DIAS_REPARTO_DEUDA.map((dia) => (
+                      <option key={dia} value={dia}>
+                        {dia}
+                      </option>
+                    ))}
+                    <option value={SIN_DIA_ASIGNADO_LABEL}>
+                      {SIN_DIA_ASIGNADO_LABEL}
+                    </option>
+                  </select>
+                </div>
+              </div>
+
+              {(filtroDeudaRepartidor !== "todos" || filtroDeudaDia !== "todos") && (
+                <div className="flex items-center justify-between text-xs px-1">
+                  <span style={{ color: C.muted }}>
+                    Total filtrado ({fiadoPorReparto.totalClientesFiltrados} cliente{fiadoPorReparto.totalClientesFiltrados !== 1 ? "s" : ""})
+                  </span>
+                  <span className="font-mono font-extrabold" style={{ color: C.danger }}>
+                    {formatMoney(fiadoPorReparto.totalDeudaFiltrada)}
+                  </span>
+                </div>
+              )}
+
+              {fiadoPorReparto.grupos.length === 0 ? (
+                <div className="text-xs text-center py-2" style={{ color: C.muted }}>
+                  No hay clientes con fiado para el reparto/día seleccionado.
+                </div>
+              ) : (
+                fiadoPorReparto.grupos.map((grupo) => (
+                  <div key={grupo.dia} className="flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between px-1 pt-1">
+                      <span className="text-[11px] font-extrabold uppercase tracking-wide" style={{ color: C.danger }}>
+                        {grupo.dia} ({grupo.clientes.length})
+                      </span>
+                      <span className="font-mono text-xs font-bold" style={{ color: C.danger }}>
+                        Subtotal {formatMoney(grupo.subtotalDeuda)}
+                      </span>
+                    </div>
+
+                    {grupo.clientes.map((cliente) => (
+                      <button
+                        key={`${grupo.dia}-${cliente.id}`}
+                        type="button"
+                        onClick={() => setDetalleId(cliente.id)}
+                        className="w-full rounded-xl px-3 py-2 flex items-center justify-between gap-3 text-left"
+                        style={{ background: C.surface, border: `1px solid ${C.border}` }}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {cliente.ordenEnDia !== null && (
+                              <span
+                                className="px-1.5 py-0.5 rounded text-[10px] font-extrabold flex-shrink-0"
+                                style={{ background: C.primaryDark, color: "#fff" }}
+                              >
+                                Orden {cliente.ordenEnDia}
+                              </span>
+                            )}
+                            <span className="text-sm font-bold truncate">{cliente.nombre}</span>
+                            {cliente.repartidorNombre && (
+                              <Badge tone="muted">{cliente.repartidorNombre}</Badge>
+                            )}
+                          </div>
+                          <div className="text-[10px] truncate mt-0.5" style={{ color: C.muted }}>
+                            {formatClientAddress(cliente.direccion, cliente.departamento) || "Sin dirección"}
+                          </div>
+                        </div>
+                        <div className="font-mono font-extrabold text-sm flex-shrink-0" style={{ color: C.danger }}>
+                          {formatMoney(cliente.deudaAcumulada)}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ))
+              )}
             </div>
           )}
         </Card>
@@ -3811,6 +4453,20 @@ function guardarCliente(f) {
 const NOMBRES_MES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
 
 function ClienteHistorial({ cliente, db, onBack, onEditar }) {
+  const [mostrarRemitoFC, setMostrarRemitoFC] = useState(false);
+  const alertaExtras = getPendingExtraContainersAlert(
+    cliente,
+    PRODUCTOS_RETORNABLES
+  );
+  const rep = (db.config?.repartidores || []).find(
+    (r) => r.id === cliente.repartidorId
+  );
+  const currentSubscription = resolveClientSubscriptionForPeriod({
+    client: cliente,
+    subscriptions: db.subscriptions || [],
+    period: getPeriod(),
+  });
+
   const visitas = db.visitas
     .filter((v) => v.clienteId === cliente.id)
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -3864,7 +4520,47 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
               <span>WhatsApp · {cliente.telefono}</span>
             </a>
           )}
+
+          <button
+            type="button"
+            onClick={() => setMostrarRemitoFC(true)}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
+            style={{ background: C.accentSoft, color: C.primary }}
+          >
+            <ClipboardList size={13} />
+            <span>Remito y Firma F/C</span>
+          </button>
+
+          <a
+            href={buildClientCalendarReminderUrl({
+              cliente,
+              fechaISO: hoyISO(),
+              motivo: "Reparto de agua",
+            })}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
+            style={{ background: C.bg, color: C.primary, border: `1px solid ${C.border}` }}
+          >
+            <CalendarDays size={13} />
+            <span>Agendar en Google Calendar</span>
+          </a>
         </div>
+
+        {alertaExtras.hasPendingExtras && (
+          <div
+            className="rounded-xl px-3 py-2 mt-2 text-xs font-bold"
+            style={{
+              background: C.warningBg,
+              border: `1px solid ${C.warning}`,
+              color: C.warning,
+            }}
+          >
+            ⚠️ Envase prestado pendiente: {alertaExtras.summaryText} · Seguirá
+            alertando en próximas visitas hasta ser devuelto o pasar a
+            permanente.
+          </div>
+        )}
 
         {cliente.deudaAcumulada > 0 && (
           <div
@@ -3979,6 +4675,14 @@ function ClienteHistorial({ cliente, db, onBack, onEditar }) {
             </div>
           );
         })
+      )}
+      {mostrarRemitoFC && (
+        <RemitoFrioCalorSheet
+          cliente={cliente}
+          subscription={currentSubscription}
+          repartidorNombre={rep?.nombre || "Agua Lukas"}
+          onClose={() => setMostrarRemitoFC(false)}
+        />
       )}
     </div>
   );
@@ -5612,24 +6316,140 @@ function RepartidorClientes({ db, mutate, repartidor }) {
   const [sheet, setSheet] = useState(null);
   const [busca, setBusca] = useState("");
   const [detalleId, setDetalleId] = useState(null);
+  const [mostrarDeudores, setMostrarDeudores] = useState(false);
+  const [filtroDeudaDia, setFiltroDeudaDia] = useState("todos");
+  const [diasAbiertos, setDiasAbiertos] = useState(
+    () => new Set([diaSemanaHoy()])
+  );
+  const [clientePedidoHoy, setClientePedidoHoy] = useState(null);
+  const [visitaEditandoHoy, setVisitaEditandoHoy] = useState(null);
+
+  const hoy = diaSemanaHoy();
+  const fechaHoy = hoyISO();
+
+  function toggleDia(dia) {
+    setDiasAbiertos((prev) => {
+      const siguiente = new Set(prev);
+      if (siguiente.has(dia)) siguiente.delete(dia);
+      else siguiente.add(dia);
+      return siguiente;
+    });
+  }
 
   // Base completa de clientes de este repartidor.
-  // El historial solo puede abrirse para clientes que le pertenecen.
-  const clientesDelRepartidor = db.clientes
-    .filter((c) => c.repartidorId === repartidor.id);
+  const clientesDelRepartidor = useMemo(
+    () => db.clientes.filter((c) => c.repartidorId === repartidor.id),
+    [db.clientes, repartidor.id]
+  );
 
-  const misClientes = clientesDelRepartidor
-    .filter((c) => {
-      const texto = busca.toLowerCase();
-      const nombre = (c.nombre || "").toLowerCase();
-      const direccion = (c.direccion || "").toLowerCase();
-      return nombre.includes(texto) || direccion.includes(texto);
-    })
-    .sort((a, b) => (a.nombre || "").localeCompare(b.nombre || ""));
+  // Visitas de hoy para saber si ya tiene pedido cargado hoy.
+  const visitaHoyPorCliente = useMemo(() => {
+    const mapa = new Map();
+    (db.visitas || [])
+      .filter((v) => v.repartidorId === repartidor.id && v.fecha === fechaHoy)
+      .slice()
+      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+      .forEach((v) => mapa.set(v.clienteId, v));
+    return mapa;
+  }, [db.visitas, repartidor.id, fechaHoy]);
+
+  const {
+    clientesFiltrados: misClientes,
+    gruposPorDia,
+    clientesSinDia,
+  } = useMemo(
+    () =>
+      agruparClientesPorDiaDeReparto({
+        clientes: clientesDelRepartidor,
+        textoBusqueda: busca,
+      }),
+    [clientesDelRepartidor, busca]
+  );
+
+  const fiadoMisClientes = useMemo(
+    () =>
+      groupClientsWithDebtByRoute({
+        clientes: clientesDelRepartidor,
+        repartidores: db.config.repartidores,
+        repartidorId: repartidor.id,
+        dia: filtroDeudaDia,
+      }),
+    [clientesDelRepartidor, db.config.repartidores, repartidor.id, filtroDeudaDia]
+  );
+
+  const totalFiadoMio = useMemo(
+    () =>
+      clientesDelRepartidor.reduce(
+        (acc, c) => acc + (Math.max(0, Number(c.deudaAcumulada) || 0)),
+        0
+      ),
+    [clientesDelRepartidor]
+  );
+
+  const cantidadDeudoresMios = useMemo(
+    () =>
+      clientesDelRepartidor.filter((c) => Number(c.deudaAcumulada) > 0).length,
+    [clientesDelRepartidor]
+  );
 
   const clienteDetalle = detalleId
     ? clientesDelRepartidor.find((c) => c.id === detalleId)
     : null;
+
+  function abrirPedidoDirecto(cliente) {
+    const visitaExistente = visitaHoyPorCliente.get(cliente.id) || null;
+    setClientePedidoHoy(cliente);
+    setVisitaEditandoHoy(visitaExistente);
+  }
+
+  function clienteAntesDeVisitaLocal(cliente, visita) {
+    if (!visita) return cliente;
+    const copia = clone(cliente);
+    copia.deudaAcumulada = Math.max(
+      0,
+      (copia.deudaAcumulada || 0) -
+        (visita.ajusteDeudaManual || 0) -
+        (visita.deudaGenerada || 0) +
+        (visita.deudaCobrada || 0)
+    );
+    copia.envasesExtra = aplicarDeltaEnvases(
+      envasesExtraDe(copia),
+      calcularDeltaExtras(visita),
+      -1
+    );
+    copia.envasesPermanentes = aplicarRetiroPermanentes(
+      envasesPermanentesDe(copia),
+      visita.permanentesRetirados,
+      -1
+    );
+    return copia;
+  }
+
+  function stockAntesDeVisitaLocal(visita) {
+    const actual = {
+      ...stockVacio(),
+      ...stockDeRepartidor(db, repartidor.id),
+    };
+    if (!visita) return actual;
+    const deltaAnterior = calcularDeltaStockEnvases(visita);
+    PRODUCTOS_RETORNABLES.forEach((p) => {
+      actual[p.key] = (actual[p.key] || 0) + (deltaAnterior[p.key] || 0);
+    });
+    return actual;
+  }
+
+  function guardarVisitaDirecta(nuevaVisita) {
+    const result = applyDeliveryVisitMutation({
+      state: db,
+      visit: nuevaVisita,
+      mutate,
+    });
+    if (result.ok) {
+      setClientePedidoHoy(null);
+      setVisitaEditandoHoy(null);
+    }
+    return result;
+  }
 
   function guardar(f) {
     const next = clone(db);
@@ -5640,8 +6460,6 @@ function RepartidorClientes({ db, mutate, repartidor }) {
       const i = next.clientes.findIndex((c) => c.id === f.id);
       if (i < 0) return;
 
-      // Seguridad adicional: el repartidor solo puede modificar
-      // un cliente que siga asignado a su perfil.
       if (next.clientes[i].repartidorId !== repartidor.id) return;
 
       const actualizado = {
@@ -5692,8 +6510,163 @@ function RepartidorClientes({ db, mutate, repartidor }) {
     setSheet(null);
   }
 
-  // Al tocar un cliente, primero mostramos su historial.
-  // Desde ahí el repartidor todavía puede entrar a Editar.
+  function renderTarjetaClienteRepartidor(c, diaGrupo = null) {
+    const visitaHoy = visitaHoyPorCliente.get(c.id);
+    const yaVisitadoHoy = !!visitaHoy;
+    const ordenDelDia = diaGrupo ? ordenClienteEnDia(c, diaGrupo) : Infinity;
+    const alertaExtras = getPendingExtraContainersAlert(
+      c,
+      PRODUCTOS_RETORNABLES
+    );
+
+    return (
+      <Card
+        key={`${diaGrupo || "sin-dia"}-${c.id}`}
+        onClick={() => setDetalleId(c.id)}
+        style={{ cursor: "pointer" }}
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {Number.isFinite(ordenDelDia) && (
+                <span
+                  className="px-2 py-0.5 rounded-md text-[10px] font-bold flex-shrink-0"
+                  style={{
+                    background: C.primaryDark,
+                    color: "#fff",
+                  }}
+                >
+                  Orden {ordenDelDia}
+                </span>
+              )}
+              <div className="font-bold text-sm">{c.nombre}</div>
+              {yaVisitadoHoy && <Badge tone="success">Visitado hoy</Badge>}
+            </div>
+
+            <a
+              href={urlGoogleMaps(c.direccion, c.departamento)}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="text-xs flex items-center gap-1 w-fit mt-0.5"
+              style={{ color: C.primary }}
+            >
+              <MapPin size={12} />
+              <span>{formatClientAddress(c.direccion, c.departamento)}</span>
+            </a>
+
+            {c.telefono && (
+              <a
+                href={urlWhatsApp(c.telefono)}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="text-xs mt-1 flex items-center gap-1 w-fit"
+                style={{ color: C.success }}
+              >
+                <MessageCircle size={12} />
+                <span>{c.telefono}</span>
+              </a>
+            )}
+
+            {alertaExtras.hasPendingExtras && (
+              <div
+                className="rounded-xl px-2.5 py-1.5 mt-2 text-[11px] font-bold"
+                style={{
+                  background: C.warningBg,
+                  border: `1px solid ${C.warning}`,
+                  color: C.warning,
+                }}
+              >
+                ⚠️ Envase prestado pendiente: {alertaExtras.summaryText} ·
+                Reclamar devolución o pasar a permanente
+              </div>
+            )}
+
+            {c.deudaAcumulada > 0 && (
+              <div
+                className="rounded-xl px-3 py-2 mt-2"
+                style={{
+                  background: C.dangerBg,
+                  border: `1px solid ${C.danger}`,
+                }}
+              >
+                <div
+                  className="text-[10px] font-extrabold uppercase tracking-wide"
+                  style={{ color: C.danger }}
+                >
+                  Saldo pendiente
+                </div>
+                <div
+                  className="font-mono font-extrabold text-base"
+                  style={{ color: C.danger }}
+                >
+                  {formatMoney(c.deudaAcumulada)}
+                </div>
+              </div>
+            )}
+
+            <div className="flex flex-wrap gap-1 mt-1.5">
+              {(c.diasVisita || []).map((d) => (
+                <Badge key={d} tone={d === hoy ? "success" : "accent"}>
+                  {d.slice(0, 3)}
+                </Badge>
+              ))}
+
+              {totalEnvasesPrestados(envasesPermanentesDe(c)) > 0 && (
+                <Badge tone="accent">
+                  Permanentes: {textoEnvasesPrestados(envasesPermanentesDe(c))}
+                </Badge>
+              )}
+
+              {totalEnvasesPrestados(envasesExtraDe(c)) > 0 && (
+                <Badge tone="warning">
+                  Extra: {textoEnvasesPrestados(envasesExtraDe(c))}
+                </Badge>
+              )}
+
+              {c.maquinaFrioCalor && <Badge tone="accent">Máquina F/C</Badge>}
+            </div>
+
+            <div
+              className="flex flex-wrap items-center gap-2 mt-2.5 pt-2"
+              style={{ borderTop: `1px solid ${C.border}` }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={() => abrirPedidoDirecto(c)}
+                className="px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5"
+                style={{
+                  background: yaVisitadoHoy ? C.accentSoft : C.primary,
+                  color: yaVisitadoHoy ? C.primary : "#fff",
+                }}
+              >
+                <Plus size={14} />
+                {yaVisitadoHoy ? "Editar visita de hoy" : "Agregar pedido hoy"}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setDetalleId(c.id)}
+                className="px-2.5 py-1.5 rounded-xl text-xs font-semibold"
+                style={{
+                  background: C.bg,
+                  color: C.primary,
+                  border: `1px solid ${C.border}`,
+                }}
+              >
+                Historial / Editar
+              </button>
+            </div>
+          </div>
+
+          <ChevronRight size={18} color={C.mutedLight} />
+        </div>
+      </Card>
+    );
+  }
+
   if (clienteDetalle) {
     return (
       <div>
@@ -5724,6 +6697,14 @@ function RepartidorClientes({ db, mutate, repartidor }) {
     );
   }
 
+  const clienteActualSheet = clientePedidoHoy
+    ? db.clientes.find((c) => c.id === clientePedidoHoy.id) || clientePedidoHoy
+    : null;
+  const clienteParaVisitaSheet =
+    clienteActualSheet && visitaEditandoHoy
+      ? clienteAntesDeVisitaLocal(clienteActualSheet, visitaEditandoHoy)
+      : clienteActualSheet;
+
   return (
     <div>
       <div className="flex gap-2 mb-3">
@@ -5736,10 +6717,19 @@ function RepartidorClientes({ db, mutate, repartidor }) {
           <input
             value={busca}
             onChange={(e) => setBusca(e.target.value)}
-            placeholder="Buscar cliente…"
-            className="w-full rounded-xl pl-8 pr-3 py-2.5 text-sm outline-none"
+            placeholder="Buscar cliente de cualquier día para agregar pedido…"
+            className="w-full rounded-xl pl-8 pr-8 py-2.5 text-sm outline-none"
             style={{ background: C.surface, border: `1px solid ${C.border}` }}
           />
+          {busca && (
+            <button
+              type="button"
+              onClick={() => setBusca("")}
+              style={{ position: "absolute", right: 9, top: 10 }}
+            >
+              <X size={16} color={C.muted} />
+            </button>
+          )}
         </div>
 
         <Btn icon={Plus} onClick={() => setSheet("nuevo")}>
@@ -5747,13 +6737,157 @@ function RepartidorClientes({ db, mutate, repartidor }) {
         </Btn>
       </div>
 
+      {cantidadDeudoresMios > 0 && (
+        <Card
+          className="mb-3"
+          style={{ background: C.dangerBg, border: `1px solid ${C.danger}` }}
+        >
+          <button
+            type="button"
+            onClick={() => setMostrarDeudores((abierto) => !abierto)}
+            className="w-full flex items-center justify-between gap-3 text-left"
+          >
+            <div>
+              <div
+                className="text-xs font-extrabold uppercase tracking-wide"
+                style={{ color: C.danger }}
+              >
+                Fiado de mis clientes por reparto
+              </div>
+              <div className="text-[10px] mt-0.5" style={{ color: C.muted }}>
+                {cantidadDeudoresMios} cliente
+                {cantidadDeudoresMios !== 1 ? "s" : ""} · Total{" "}
+                {formatMoney(totalFiadoMio)}
+              </div>
+            </div>
+            <ChevronRight
+              size={18}
+              color={C.danger}
+              style={{
+                transform: mostrarDeudores ? "rotate(90deg)" : "rotate(0deg)",
+                transition: "transform 0.2s",
+              }}
+            />
+          </button>
+
+          {mostrarDeudores && (
+            <div
+              className="mt-3 pt-2 flex flex-col gap-2"
+              style={{ borderTop: `1px solid ${C.danger}` }}
+            >
+              <div>
+                <div
+                  className="text-[10px] font-bold uppercase mb-1"
+                  style={{ color: C.muted }}
+                >
+                  Filtrar por día de reparto
+                </div>
+                <select
+                  value={filtroDeudaDia}
+                  onChange={(e) => setFiltroDeudaDia(e.target.value)}
+                  className="w-full rounded-xl px-2.5 py-2 text-xs font-bold outline-none"
+                  style={{
+                    background: C.surface,
+                    border: `1px solid ${C.border}`,
+                    color: C.ink,
+                  }}
+                >
+                  <option value="todos">Todos mis días</option>
+                  {DIAS_REPARTO_DEUDA.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                  <option value={SIN_DIA_ASIGNADO_LABEL}>
+                    {SIN_DIA_ASIGNADO_LABEL}
+                  </option>
+                </select>
+              </div>
+
+              {fiadoMisClientes.grupos.map((grupo) => (
+                <div key={grupo.dia} className="flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between px-1 pt-1">
+                    <span
+                      className="text-[11px] font-extrabold uppercase tracking-wide"
+                      style={{ color: C.danger }}
+                    >
+                      {grupo.dia} ({grupo.clientes.length})
+                    </span>
+                    <span
+                      className="font-mono text-xs font-bold"
+                      style={{ color: C.danger }}
+                    >
+                      Subtotal {formatMoney(grupo.subtotalDeuda)}
+                    </span>
+                  </div>
+
+                  {grupo.clientes.map((c) => (
+                    <div
+                      key={`deuda-rep-${grupo.dia}-${c.id}`}
+                      className="w-full rounded-xl px-3 py-2 flex items-center justify-between gap-2"
+                      style={{
+                        background: C.surface,
+                        border: `1px solid ${C.border}`,
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setDetalleId(c.id)}
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {c.ordenEnDia !== null && (
+                            <span
+                              className="px-1.5 py-0.5 rounded text-[10px] font-extrabold"
+                              style={{ background: C.primaryDark, color: "#fff" }}
+                            >
+                              Orden {c.ordenEnDia}
+                            </span>
+                          )}
+                          <span className="text-sm font-bold truncate">
+                            {c.nombre}
+                          </span>
+                        </div>
+                        <div
+                          className="text-[10px] truncate"
+                          style={{ color: C.muted }}
+                        >
+                          {formatClientAddress(c.direccion, c.departamento)}
+                        </div>
+                      </button>
+
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <div
+                          className="font-mono font-extrabold text-sm"
+                          style={{ color: C.danger }}
+                        >
+                          {formatMoney(c.deudaAcumulada)}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => abrirPedidoDirecto(c)}
+                          className="px-2 py-1 rounded-lg text-[10px] font-bold"
+                          style={{ background: C.primary, color: "#fff" }}
+                        >
+                          Pedido
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
+
       {misClientes.length === 0 ? (
         <EmptyState
           icon={Users}
           title={busca ? "Sin resultados" : "Todavía no tenés clientes"}
           text={
             busca
-              ? "Probá con otro nombre o dirección."
+              ? "Probá con otro nombre, dirección o departamento."
               : "Agregá tu primer cliente para que aparezca en tu recorrido."
           }
           action={
@@ -5765,103 +6899,113 @@ function RepartidorClientes({ db, mutate, repartidor }) {
           }
         />
       ) : (
-        <div className="flex flex-col gap-2">
-          {misClientes.map((c) => (
-            <Card
-              key={c.id}
-              onClick={() => setDetalleId(c.id)}
-              style={{ cursor: "pointer" }}
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0 flex-1">
-                  <div className="font-bold text-sm">{c.nombre}</div>
+        <div className="flex flex-col gap-3">
+          {gruposPorDia.map(({ dia, clientes: clientesDia }) => {
+            if (clientesDia.length === 0) return null;
+            const abierto = busca.trim() ? true : diasAbiertos.has(dia);
+            const esHoy = dia === hoy;
 
-                  <a
-                    href={urlGoogleMaps(c.direccion, c.departamento)}
-                    target="_blank"
-                    rel="noreferrer"
-                    onClick={(e) => e.stopPropagation()}
-                    className="text-xs flex items-center gap-1 w-fit"
-                    style={{ color: C.primary }}
-                  >
-                    <MapPin size={12} />
-                    <span>{formatClientAddress(c.direccion, c.departamento)}</span>
-                  </a>
-
-                  {c.telefono && (
-                    <a
-                      href={urlWhatsApp(c.telefono)}
-                      target="_blank"
-                      rel="noreferrer"
-                      onClick={(e) => e.stopPropagation()}
-                      className="text-xs mt-1 flex items-center gap-1 w-fit"
-                      style={{ color: C.success }}
-                    >
-                      <MessageCircle size={12} />
-                      <span>{c.telefono}</span>
-                    </a>
-                  )}
-
-                  {c.deudaAcumulada > 0 && (
+            return (
+              <div key={dia}>
+                <button
+                  type="button"
+                  onClick={() => toggleDia(dia)}
+                  className="w-full rounded-xl px-3 py-3 flex items-center justify-between"
+                  style={{
+                    background: esHoy ? C.accentSoft : C.surface,
+                    border: `1px solid ${esHoy ? C.accent : C.border}`,
+                  }}
+                >
+                  <div className="flex items-center gap-2">
                     <div
-                      className="rounded-xl px-3 py-2 mt-2"
+                      className="w-8 h-8 rounded-lg flex items-center justify-center font-extrabold text-xs"
                       style={{
-                        background: C.dangerBg,
-                        border: `1px solid ${C.danger}`,
+                        background: esHoy ? C.primary : C.bg,
+                        color: esHoy ? "#fff" : C.primary,
                       }}
                     >
-                      <div
-                        className="text-[10px] font-extrabold uppercase tracking-wide"
-                        style={{ color: C.danger }}
-                      >
-                        Saldo pendiente
+                      {dia.slice(0, 3)}
+                    </div>
+
+                    <div className="text-left">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-sm">
+                          Reparto {dia}
+                        </span>
+                        {esHoy && <Badge tone="accent">Hoy</Badge>}
                       </div>
-                      <div
-                        className="font-mono font-extrabold text-base"
-                        style={{ color: C.danger }}
-                      >
-                        {formatMoney(c.deudaAcumulada)}
+                      <div className="text-[10px]" style={{ color: C.muted }}>
+                        {clientesDia.length} cliente
+                        {clientesDia.length !== 1 ? "s" : ""} · en orden de
+                        recorrido
                       </div>
                     </div>
-                  )}
-
-                  <div className="flex flex-wrap gap-1 mt-1.5">
-                    {(c.diasVisita || []).map((d) => (
-                      <Badge key={d} tone="accent">
-                        {d.slice(0, 3)}
-                      </Badge>
-                    ))}
-
-                    {totalEnvasesPrestados(envasesPermanentesDe(c)) > 0 && (
-                      <Badge tone="accent">
-                        Permanentes: {textoEnvasesPrestados(envasesPermanentesDe(c))}
-                      </Badge>
-                    )}
-
-                    {totalEnvasesPrestados(envasesExtraDe(c)) > 0 && (
-                      <Badge tone="warning">
-                        Extra: {textoEnvasesPrestados(envasesExtraDe(c))}
-                      </Badge>
-                    )}
-
-                    {c.maquinaFrioCalor && (
-                      <Badge tone="accent">Máquina F/C</Badge>
-                    )}
                   </div>
 
-                  <div
-                    className="text-[10px] mt-2 font-semibold"
-                    style={{ color: C.primary }}
-                  >
-                    Tocar para ver historial de compras
-                  </div>
-                </div>
+                  <ChevronRight
+                    size={18}
+                    color={C.muted}
+                    style={{
+                      transform: abierto ? "rotate(90deg)" : "rotate(0deg)",
+                      transition: "transform 0.2s",
+                    }}
+                  />
+                </button>
 
-                <ChevronRight size={18} color={C.mutedLight} />
+                {abierto && (
+                  <div className="flex flex-col gap-2 mt-2">
+                    {clientesDia.map((c) =>
+                      renderTarjetaClienteRepartidor(c, dia)
+                    )}
+                  </div>
+                )}
               </div>
-            </Card>
-          ))}
+            );
+          })}
+
+          {clientesSinDia.length > 0 && (
+            <div>
+              <div
+                className="text-xs font-bold uppercase tracking-wide mb-2"
+                style={{ color: C.danger }}
+              >
+                Sin día asignado ({clientesSinDia.length})
+              </div>
+              <div className="flex flex-col gap-2">
+                {clientesSinDia.map((c) =>
+                  renderTarjetaClienteRepartidor(c, null)
+                )}
+              </div>
+            </div>
+          )}
         </div>
+      )}
+
+      {clienteParaVisitaSheet && (
+        <VisitaSheet
+          cliente={clienteParaVisitaSheet}
+          visitaInicial={visitaEditandoHoy}
+          precios={db.config.precios}
+          stockActivo={db.config.stockActivo}
+          stockRepartidor={stockAntesDeVisitaLocal(visitaEditandoHoy)}
+          historialVisitas={db.visitas.filter(
+            (v) => v.clienteId === clienteParaVisitaSheet.id
+          )}
+          subscriptions={db.subscriptions || []}
+          onPasarExtrasAPermanentes={(clienteId) => {
+            const actualizado = pasarExtrasAPermanentesEnDb(
+              db,
+              mutate,
+              clienteId
+            );
+            if (actualizado) setClientePedidoHoy(actualizado);
+          }}
+          onClose={() => {
+            setClientePedidoHoy(null);
+            setVisitaEditandoHoy(null);
+          }}
+          onGuardar={guardarVisitaDirecta}
+        />
       )}
 
       {sheet && (
@@ -6430,8 +7574,31 @@ function RepartidorRecorrido({
                             className="text-[10px] mt-1.5 font-semibold"
                             style={{ color: C.warning }}
                           >
-                            No corresponde al recorrido de hoy. Tocar para
-                            registrar una visita extraordinaria.
+                            No corresponde al recorrido de hoy. Podés agregarle
+                            un pedido extraordinario acá mismo.
+                          </div>
+                        )}
+
+                        {getPendingExtraContainersAlert(
+                          c,
+                          PRODUCTOS_RETORNABLES
+                        ).hasPendingExtras && (
+                          <div
+                            className="rounded-xl px-2.5 py-1.5 mt-1.5 text-[11px] font-bold"
+                            style={{
+                              background: C.warningBg,
+                              border: `1px solid ${C.warning}`,
+                              color: C.warning,
+                            }}
+                          >
+                            ⚠️ Envase prestado pendiente:{" "}
+                            {
+                              getPendingExtraContainersAlert(
+                                c,
+                                PRODUCTOS_RETORNABLES
+                              ).summaryText
+                            }{" "}
+                            · Reclamar devolución o pasar a permanente
                           </div>
                         )}
 
@@ -6466,6 +7633,35 @@ function RepartidorRecorrido({
                             </Badge>
                           )}
                         </div>
+
+                        {!esDeOtroRepartidor && (
+                          <div
+                            className="mt-2 pt-2"
+                            style={{ borderTop: `1px solid ${C.border}` }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              onClick={() =>
+                                yaVisitadoHoy
+                                  ? abrirVisitaExistente(c)
+                                  : abrirNuevaVisita(c)
+                              }
+                              className="px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5"
+                              style={{
+                                background: yaVisitadoHoy
+                                  ? C.accentSoft
+                                  : C.primary,
+                                color: yaVisitadoHoy ? C.primary : "#fff",
+                              }}
+                            >
+                              <Plus size={14} />
+                              {yaVisitadoHoy
+                                ? "Editar visita de hoy"
+                                : "Agregar pedido hoy"}
+                            </button>
+                          </div>
+                        )}
                       </div>
 
                       <div
@@ -7014,6 +8210,14 @@ function RepartidorRecorrido({
             (v) => v.clienteId === clienteParaSheet.id
           )}
           subscriptions={db.subscriptions || []}
+          onPasarExtrasAPermanentes={(clienteId) => {
+            const actualizado = pasarExtrasAPermanentesEnDb(
+              db,
+              mutate,
+              clienteId
+            );
+            if (actualizado) setActivo(actualizado);
+          }}
           onClose={() => {
             setActivo(null);
             setVisitaEditando(null);
@@ -7068,6 +8272,10 @@ function ClienteVisitaCard({
   const permanentes = envasesPermanentesDe(cliente);
   const extras = envasesExtraDe(cliente);
   const tieneAbonoActivo = !!cliente.subscriptionSummary?.subscriptionId;
+  const alertaExtras = getPendingExtraContainersAlert(
+    cliente,
+    PRODUCTOS_RETORNABLES
+  );
 
   const ordenDelDia = ordenClienteEnDia(cliente, diaOrden);
   const tieneOrden = Number.isFinite(ordenDelDia);
@@ -7137,6 +8345,20 @@ function ClienteVisitaCard({
             <MapPin size={12} />
             <span>{formatClientAddress(cliente.direccion, cliente.departamento)}</span>
           </a>
+
+          {alertaExtras.hasPendingExtras && (
+            <div
+              className="rounded-xl px-2.5 py-1.5 mt-2 text-[11px] font-bold"
+              style={{
+                background: C.warningBg,
+                border: `1px solid ${C.warning}`,
+                color: C.warning,
+              }}
+            >
+              ⚠️ Envase prestado pendiente: {alertaExtras.summaryText} ·
+              Reclamar devolución o pasar a permanente
+            </div>
+          )}
 
           {cliente.deudaAcumulada > 0 && (
             <div
@@ -7284,11 +8506,26 @@ function VisitaSheet({
   historialVisitas = [],
   subscriptions = [],
   modoCorreccionAdministrativa = false,
+  onPasarExtrasAPermanentes = null,
   onClose,
   onGuardar,
 }) {
-  const permanentes = envasesPermanentesDe(cliente);
-  const saldoActual = envasesExtraDe(cliente);
+  const [extrasConvertidosLocal, setExtrasConvertidosLocal] = useState(false);
+  const [mostrarRemitoFC, setMostrarRemitoFC] = useState(false);
+  const clienteEfectivo = useMemo(
+    () =>
+      extrasConvertidosLocal
+        ? convertExtraContainersToPermanent(cliente)
+        : cliente,
+    [cliente, extrasConvertidosLocal]
+  );
+  const permanentes = envasesPermanentesDe(clienteEfectivo);
+  const saldoActual = envasesExtraDe(clienteEfectivo);
+  const alertaExtrasPendientes = useMemo(
+    () =>
+      getPendingExtraContainersAlert(clienteEfectivo, PRODUCTOS_RETORNABLES),
+    [clienteEfectivo]
+  );
   const periodoVisita = (visitaInicial?.fecha || hoyISO()).slice(0, 7);
   const subscriptionPorAtribucion = visitaInicial?.subscriptionAttribution?.subscriptionId
     ? subscriptions.find(
@@ -7480,6 +8717,7 @@ const [montoDeuda, setMontoDeuda] = useState(
   const fechaVolverSabado =
     visitaInicial?.volverSabadoFecha ||
     proximoSabadoISO(visitaInicial?.fecha || hoyISO());
+  const [fechaCalendar, setFechaCalendar] = useState(fechaVolverSabado);
 
   const [errorStock, setErrorStock] = useState("");
   const [guardando, setGuardando] = useState(false);
@@ -7912,6 +9150,75 @@ deudaCobrada: deudaCobradaFinal,
           </div>
         </Card>
       )}
+
+      {alertaExtrasPendientes.hasPendingExtras && (
+        <Card
+          className="mb-3"
+          style={{
+            background: C.warningBg,
+            border: `1.5px solid ${C.warning}`,
+          }}
+        >
+          <div
+            className="text-xs font-extrabold uppercase tracking-wide"
+            style={{ color: C.warning }}
+          >
+            ⚠️ Alerta: Envases prestados pendientes (
+            {alertaExtrasPendientes.summaryText})
+          </div>
+          <div className="text-[11px] mt-1" style={{ color: C.ink }}>
+            Este cliente tiene envases prestados de una visita anterior. Seguirá
+            alertando en próximas visitas hasta que los devuelva o pasen a
+            permanentes.
+          </div>
+          <div className="flex flex-wrap gap-2 mt-2.5">
+            <button
+              type="button"
+              onClick={() => {
+                const devolucionCompleta =
+                  buildFullExtraContainersReturn(clienteEfectivo);
+                setExtrasRetirados(devolucionCompleta);
+                setExtrasTocados(
+                  new Set(PRODUCTOS_RETORNABLES.map((p) => p.key))
+                );
+                setMostrarExtras(true);
+              }}
+              className="px-3 py-1.5 rounded-xl text-xs font-bold"
+              style={{ background: C.success, color: "#fff" }}
+            >
+              Marcar devueltos hoy
+            </button>
+            {onPasarExtrasAPermanentes && (
+              <button
+                type="button"
+                onClick={() => {
+                  onPasarExtrasAPermanentes(cliente.id);
+                  setExtrasConvertidosLocal(true);
+                }}
+                className="px-3 py-1.5 rounded-xl text-xs font-bold"
+                style={{
+                  background: C.primary,
+                  color: "#fff",
+                }}
+              >
+                Pasar a permanentes
+              </button>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {extrasConvertidosLocal && (
+        <Card
+          className="mb-3"
+          style={{ background: C.successBg, border: `1px solid ${C.success}` }}
+        >
+          <div className="text-xs font-bold" style={{ color: C.success }}>
+            ✓ Los envases prestados pasaron a permanentes.
+          </div>
+        </Card>
+      )}
+
       <div className="flex flex-wrap gap-2 mb-3">
         {cliente.direccion && (
           <a
@@ -7938,6 +9245,16 @@ deudaCobrada: deudaCobradaFinal,
             <span>WhatsApp · {cliente.telefono}</span>
           </a>
         )}
+
+        <button
+          type="button"
+          onClick={() => setMostrarRemitoFC(true)}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
+          style={{ background: C.accentSoft, color: C.primary }}
+        >
+          <ClipboardList size={13} />
+          <span>Remito y Firma F/C</span>
+        </button>
       </div>
 
       {(totalEnvasesPrestados(permanentes) > 0 ||
@@ -8759,6 +10076,46 @@ deudaCobrada: deudaCobradaFinal,
       )}
 
       {/* =====================================================
+          GOOGLE CALENDAR · RECORDATORIO DE VISITA / RECLAMO
+          ===================================================== */}
+      <Card className="mb-3" style={{ background: C.bg }}>
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <div className="flex items-center gap-1.5">
+            <CalendarDays size={15} color={C.primary} />
+            <span className="text-xs font-bold" style={{ color: C.primary }}>
+              Agendar recordatorio en Google Calendar
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Input
+            type="date"
+            value={fechaCalendar}
+            onChange={(e) => setFechaCalendar(e.target.value)}
+            className="text-xs"
+            style={{ background: C.surface }}
+          />
+          <a
+            href={buildClientCalendarReminderUrl({
+              cliente: clienteEfectivo,
+              fechaISO: fechaCalendar,
+              motivo: volverSabado
+                ? "Volver el sábado · Reparto"
+                : "Reparto de agua",
+              notas,
+            })}
+            target="_blank"
+            rel="noreferrer"
+            className="px-3 py-2.5 rounded-xl text-xs font-bold whitespace-nowrap inline-flex items-center gap-1.5"
+            style={{ background: C.primary, color: "#fff" }}
+          >
+            <CalendarDays size={14} />
+            Agendar
+          </a>
+        </div>
+      </Card>
+
+      {/* =====================================================
           SALDO FINAL DE LA CUENTA
           Se actualiza en tiempo real antes de guardar.
           ===================================================== */}
@@ -9075,6 +10432,17 @@ deudaCobrada: deudaCobradaFinal,
             <span>{errorStock}</span>
           </div>
         </Card>
+      )}
+
+      {mostrarRemitoFC && (
+        <RemitoFrioCalorSheet
+          cliente={clienteEfectivo}
+          subscription={currentSubscription}
+          visita={visitaInicial}
+          cantidadInicialBidones={b20Quantity}
+          montoInicial={modoAbono ? totalVentaNormal : total}
+          onClose={() => setMostrarRemitoFC(false)}
+        />
       )}
     </Sheet>
   );

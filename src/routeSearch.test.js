@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  agruparClientesPorDiaDeReparto,
   buscarClientesParaRepartidor,
   filtrarYAgruparClientesOtrosDias,
 } from "./routeSearch";
@@ -215,4 +216,68 @@ describe("clientes de otros días del repartidor", () => {
     ]);
   });
 });
+
+describe("división de reparto del repartidor por día y orden de recorrido", () => {
+  const clientesRepartidor = [
+    {
+      id: "c-lun-2",
+      nombre: "Zulma",
+      direccion: "Mitre 200",
+      departamento: "Ciudad",
+      diasVisita: ["Lunes"],
+      ordenPorDia: { Lunes: 2 },
+    },
+    {
+      id: "c-lun-1",
+      nombre: "Ana",
+      direccion: "San Martín 100",
+      departamento: "Godoy Cruz",
+      diasVisita: ["Lunes", "Jueves"],
+      ordenPorDia: { Lunes: 1, Jueves: 3 },
+    },
+    {
+      id: "c-jue-1",
+      nombre: "Bruno",
+      direccion: "Colón 50",
+      departamento: "Guaymallén",
+      diasVisita: ["Jueves"],
+      ordenPorDia: { Jueves: 1 },
+    },
+    {
+      id: "c-sin-dia",
+      nombre: "Mario",
+      direccion: "Las Heras 900",
+      departamento: "Las Heras",
+      diasVisita: [],
+    },
+  ];
+
+  it("divide los clientes por día de reparto y los ordena según su orden en cada día", () => {
+    const res = agruparClientesPorDiaDeReparto({
+      clientes: clientesRepartidor,
+      textoBusqueda: "",
+    });
+
+    expect(res.clientesFiltrados).toHaveLength(4);
+    const lunes = res.gruposPorDia.find((g) => g.dia === "Lunes");
+    expect(lunes.clientes.map((c) => c.id)).toEqual(["c-lun-1", "c-lun-2"]);
+
+    const jueves = res.gruposPorDia.find((g) => g.dia === "Jueves");
+    expect(jueves.clientes.map((c) => c.id)).toEqual(["c-jue-1", "c-lun-1"]);
+
+    expect(res.clientesSinDia.map((c) => c.id)).toEqual(["c-sin-dia"]);
+  });
+
+  it("filtra por nombre, dirección o departamento conservando la división por día", () => {
+    const res = agruparClientesPorDiaDeReparto({
+      clientes: clientesRepartidor,
+      textoBusqueda: "guaymallén",
+    });
+
+    expect(res.clientesFiltrados.map((c) => c.id)).toEqual(["c-jue-1"]);
+    const jueves = res.gruposPorDia.find((g) => g.dia === "Jueves");
+    expect(jueves.clientes.map((c) => c.id)).toEqual(["c-jue-1"]);
+  });
+});
+
 

@@ -23,13 +23,20 @@ import {
 } from "./dispenserSubscriptions";
 
 describe("promotion validation", () => {
-  it("accepts the supported boundary quotas with a positive inclusive price", () => {
+  it("accepts any positive integer quota of 20L bottles with a positive monthly price", () => {
+    expect(validatePromotion({ cantidadX20: 1, precioMensual: 1000 })).toEqual({ ok: true });
+    expect(validatePromotion({ cantidadX20: 3, precioMensual: 1000 })).toEqual({ ok: true });
     expect(validatePromotion({ cantidadX20: 4, precioMensual: 1000 })).toEqual({ ok: true });
+    expect(validatePromotion({ cantidadX20: 5, precioMensual: 2500 })).toEqual({ ok: true });
     expect(validatePromotion({ cantidadX20: 10, precioMensual: 5000 })).toEqual({ ok: true });
+    expect(validatePromotion({ cantidadX20: 12, precioMensual: 18000 })).toEqual({ ok: true });
+    expect(validatePromotion({ cantidadX20: 20, precioMensual: 30000 })).toEqual({ ok: true });
   });
 
-  it("rejects an unsupported quota and a non-positive monthly price", () => {
-    expect(validatePromotion({ cantidadX20: 5, precioMensual: 1000 }).ok).toBe(false);
+  it("rejects zero, negative, or non-integer quotas and a non-positive monthly price", () => {
+    expect(validatePromotion({ cantidadX20: 0, precioMensual: 1000 }).ok).toBe(false);
+    expect(validatePromotion({ cantidadX20: -4, precioMensual: 1000 }).ok).toBe(false);
+    expect(validatePromotion({ cantidadX20: 2.5, precioMensual: 1000 }).ok).toBe(false);
     expect(validatePromotion({ cantidadX20: 6, precioMensual: 0 }).ok).toBe(false);
   });
 
@@ -43,16 +50,16 @@ describe("promotion validation", () => {
 });
 
 describe("promotion administration", () => {
-  it("creates, edits, activates, and deactivates promotions without rewriting snapshots", () => {
-    const created = upsertPromotion([], { id: "p1", nombre: "Cuatro", cantidadX20: 4, precioMensual: 4000, activo: true });
-    expect(created[0]).toMatchObject({ id: "p1", activo: true });
-    const edited = upsertPromotion(created, { ...created[0], precioMensual: 4500, activo: false });
-    expect(edited[0]).toMatchObject({ precioMensual: 4500, activo: false });
-    expect(createPromotionSnapshot(created[0]).precioMensual).toBe(4000);
+  it("creates, edits, activates, and deactivates promotions with any custom quota without rewriting snapshots", () => {
+    const created = upsertPromotion([], { id: "p1", nombre: "Cinco personalizado", cantidadX20: 5, precioMensual: 12000, activo: true });
+    expect(created[0]).toMatchObject({ id: "p1", cantidadX20: 5, activo: true });
+    const edited = upsertPromotion(created, { ...created[0], precioMensual: 14500, activo: false });
+    expect(edited[0]).toMatchObject({ precioMensual: 14500, activo: false });
+    expect(createPromotionSnapshot(created[0]).precioMensual).toBe(12000);
   });
 
   it("refuses invalid promotions before they can be persisted", () => {
-    expect(() => upsertPromotion([], { id: "bad", cantidadX20: 3, precioMensual: 1000, activo: true })).toThrow(/4, 6, 8 o 10/i);
+    expect(() => upsertPromotion([], { id: "bad", cantidadX20: 0, precioMensual: 1000, activo: true })).toThrow(/bidón|bidones/i);
   });
 });
 
@@ -187,7 +194,7 @@ describe("subscription corrections", () => {
   it("rejects missing subscription or inactive/invalid promotions", () => {
     expect(() => changeSubscriptionPromotion({ subscription: null, promotion: plan6 })).toThrow(/abono/i);
     expect(() => changeSubscriptionPromotion({ subscription, promotion: { ...plan6, activo: false } })).toThrow(/disponible/i);
-    expect(() => changeSubscriptionPromotion({ subscription, promotion: { ...plan6, cantidadX20: 5 } })).toThrow(/disponible/i);
+    expect(() => changeSubscriptionPromotion({ subscription, promotion: { ...plan6, cantidadX20: 0 } })).toThrow(/disponible/i);
   });
 });
 
