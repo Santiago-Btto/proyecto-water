@@ -58,6 +58,7 @@ import {
 import {
   DIAS_REPARTO_DEUDA,
   SIN_DIA_ASIGNADO_LABEL,
+  calcularLiquidacionVisitaConDeuda,
   groupClientsWithDebtByRoute,
   summarizeClientsWithDebt,
 } from "./clientDebtSummary";
@@ -8672,7 +8673,8 @@ const deudaBase = Number(cliente.deudaAcumulada) || 0;
     return Math.max(
       0,
       (visitaInicial.total || 0) -
-        (visitaInicial.deudaGenerada || 0)
+        (visitaInicial.deudaGenerada || 0) +
+        (visitaInicial.deudaCobrada || 0)
     );
   });
 
@@ -8816,19 +8818,6 @@ useEffect(() => {
       : "efectivo"
     : metodoPago;
 
-  const pagadoFinal =
-    modoAbono
-      ? metodoPagoFinal === "deuda"
-        ? 0
-        : montoPagado === null
-          ? totalVentaNormal
-          : Math.max(0, Number(montoPagado) || 0)
-      : montoPagado === null
-      ? total
-      : Math.max(0, Number(montoPagado) || 0);
-
-  const restante = Math.max(0, (modoAbono ? totalVentaNormal : total) - pagadoFinal);
-
   // ==========================================================
   // DEUDA / FIADO DE ESTA VISITA
   //
@@ -8845,35 +8834,40 @@ useEffect(() => {
   const saldoBaseEditado = modoAbono
     ? deudaBase
     : Math.max(
-    0,
-    Number(saldoPendienteManual) || 0
-  );
+        0,
+        Number(saldoPendienteManual) || 0
+      );
 
-  const deudaCobradaPrevista = cobrarDeuda
-    ? Math.max(0, Number(montoDeuda) || 0)
-    : 0;
-
-  const deudaGeneradaPrevista = modoAbono
+  const importeVentaHoy = modoAbono
     ? tieneVentaNormalEnAbono
-      ? metodoPagoFinal === "deuda"
-        ? totalVentaNormal
-        : restante
+      ? totalVentaNormal
       : 0
-    : vendio
-    ? metodoPago === "deuda"
-      ? total
-      : restante
-    : 0;
+    : total;
+
+  const {
+    ventaHoy,
+    fiadoMarcadoParaCobrar,
+    totalFiadoMasPedido,
+    totalACobrarAhora,
+    deudaCobradaFinal: deudaCobradaPrevista,
+    pagadoVentaHoy: pagadoFinal,
+    deudaGeneradaFinal: deudaGeneradaPrevista,
+    restanteSinPagarHoy,
+    saldoFinalPrevisto,
+  } = calcularLiquidacionVisitaConDeuda({
+    importeVentaHoy,
+    registraVenta,
+    cobrarDeuda,
+    montoDeuda,
+    saldoAnterior: saldoBaseEditado,
+    metodoPago: metodoPagoFinal,
+    montoPagadoInput: montoPagado,
+  });
+
+  const restante = deudaGeneradaPrevista;
 
   const ajusteManualPrevisto =
     saldoBaseEditado - deudaBase;
-
-  const saldoFinalPrevisto = Math.max(
-    0,
-    saldoBaseEditado -
-      deudaCobradaPrevista +
-      deudaGeneradaPrevista
-  );
 
   function actualizarCantidad(idx, valor) {
     const p = PRODUCTOS[idx];
@@ -9002,13 +8996,16 @@ useEffect(() => {
     const saldoManualFinal = saldoBaseEditado;
     const deudaCobradaFinal = deudaCobradaPrevista;
     const deudaGeneradaFinal = deudaGeneradaPrevista;
+    const montoDeudaSolicitado = cobrarDeuda
+      ? Math.max(0, Number(montoDeuda) || 0)
+      : 0;
 
 // No permitimos cobrar más deuda de la que
 // el cliente tiene registrada en este momento.
-if (deudaCobradaFinal > saldoManualFinal) {
+if (montoDeudaSolicitado > saldoManualFinal) {
   setErrorStock(
     `No podés cobrar ${formatMoney(
-      deudaCobradaFinal
+      montoDeudaSolicitado
     )}. El saldo pendiente actual es ${formatMoney(
       saldoManualFinal
     )}.`
@@ -9051,7 +9048,7 @@ const ajusteDeudaManual =
       total: registraVenta ? totalVentaNormal : 0,
       metodoPago: registraVenta && totalVentaNormal > 0 ? metodoPagoFinal : null,
       pagos:
-        registraVenta && totalVentaNormal > 0 && metodoPagoFinal !== "deuda"
+        registraVenta && totalVentaNormal > 0 && metodoPagoFinal !== "deuda" && pagadoFinal > 0
           ? { [metodoPagoFinal]: pagadoFinal }
           : {},
       // Deuda NUEVA generada por esta venta.
@@ -9061,7 +9058,7 @@ const ajusteDeudaManual =
 
 deudaCobrada: deudaCobradaFinal,
 
-      metodoDeuda: cobrarDeuda
+      metodoDeuda: deudaCobradaFinal > 0
         ? metodoDeuda
         : null,
       notas,
@@ -9667,6 +9664,7 @@ deudaCobrada: deudaCobradaFinal,
               setCobrarDeuda(false);
               setMontoDeuda(0);
             }
+            setMontoPagado(null);
           }}
           placeholder="0"
         />
@@ -9704,9 +9702,15 @@ deudaCobrada: deudaCobradaFinal,
             </div>
 
             <button
-              onClick={() =>
-                setCobrarDeuda(!cobrarDeuda)
-              }
+              type="button"
+              onClick={() => {
+                const siguiente = !cobrarDeuda;
+                setCobrarDeuda(siguiente);
+                if (siguiente && !(Number(montoDeuda) > 0)) {
+                  setMontoDeuda(saldoBaseEditado);
+                }
+                setMontoPagado(null);
+              }}
               className="px-2.5 py-1 rounded-lg text-xs font-bold"
               style={{
                 background: cobrarDeuda
@@ -9730,9 +9734,10 @@ deudaCobrada: deudaCobradaFinal,
                 type="number"
                 inputMode="decimal"
                 value={montoDeuda}
-                onChange={(e) =>
-                  setMontoDeuda(e.target.value)
-                }
+                onChange={(e) => {
+                  setMontoDeuda(e.target.value);
+                  setMontoPagado(null);
+                }}
                 style={{ flex: 1 }}
               />
 
@@ -9847,19 +9852,59 @@ deudaCobrada: deudaCobradaFinal,
             })}
           </div>
 
-          {(!modoAbono || tieneVentaNormalEnAbono) && <div
-            className="flex items-center justify-between mb-3 pt-2"
-            style={{
-              borderTop: `1px dashed ${C.border}`,
-            }}
-          >
-            <span className="text-sm font-bold">
-              Total
-            </span>
-            <span className="font-mono font-extrabold text-lg">
-              {formatMoney(modoAbono ? totalVentaNormal : total)}
-            </span>
-          </div>}
+          {(!modoAbono || tieneVentaNormalEnAbono || (cobrarDeuda && fiadoMarcadoParaCobrar > 0)) && (
+            cobrarDeuda && fiadoMarcadoParaCobrar > 0 ? (
+              <div
+                className="rounded-xl p-3 mb-3"
+                style={{
+                  background: C.accentSoft,
+                  border: `1.5px solid ${C.primary}`,
+                }}
+              >
+                <div className="flex items-center justify-between text-xs mb-1">
+                  <span style={{ color: C.muted }}>
+                    Lo que se deja hoy
+                  </span>
+                  <span className="font-mono font-bold" style={{ color: C.ink }}>
+                    {formatMoney(ventaHoy)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-xs mb-2">
+                  <span style={{ color: C.danger }}>
+                    + Fiado a cobrar
+                  </span>
+                  <span className="font-mono font-bold" style={{ color: C.danger }}>
+                    {formatMoney(fiadoMarcadoParaCobrar)}
+                  </span>
+                </div>
+                <div
+                  className="flex items-center justify-between pt-2"
+                  style={{ borderTop: `1px dashed ${C.border}` }}
+                >
+                  <span className="text-sm font-extrabold" style={{ color: C.primary }}>
+                    Total a pagar (fiado + pedido)
+                  </span>
+                  <span className="font-mono font-extrabold text-lg" style={{ color: C.primary }}>
+                    {formatMoney(totalFiadoMasPedido)}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div
+                className="flex items-center justify-between mb-3 pt-2"
+                style={{
+                  borderTop: `1px dashed ${C.border}`,
+                }}
+              >
+                <span className="text-sm font-bold">
+                  Total
+                </span>
+                <span className="font-mono font-extrabold text-lg">
+                  {formatMoney(ventaHoy)}
+                </span>
+              </div>
+            )
+          )}
 
           {registraVenta && totalVentaNormal === 0 && (
             <div className="text-xs font-bold mb-3" style={{ color: C.success }}>
@@ -9914,11 +9959,19 @@ deudaCobrada: deudaCobradaFinal,
             </div>
           </Field>}
 
-          {registraVenta && totalVentaNormal > 0 && metodoPagoFinal !== "deuda" && (
+          {metodoPagoFinal !== "deuda" && (ventaHoy > 0 || fiadoMarcadoParaCobrar > 0) && (
             <Field
               label="Monto pagado ahora"
               hint={
-                restante > 0
+                cobrarDeuda && fiadoMarcadoParaCobrar > 0
+                  ? restanteSinPagarHoy === 0
+                    ? `Incluye ${formatMoney(ventaHoy)} de hoy + ${formatMoney(
+                        fiadoMarcadoParaCobrar
+                      )} de fiado anterior.`
+                    : `Queda pendiente ${formatMoney(
+                        restanteSinPagarHoy
+                      )} de saldo final.`
+                  : restante > 0
                   ? `Queda pendiente ${formatMoney(
                       restante
                     )}, se suma a la deuda.`
@@ -9930,9 +9983,7 @@ deudaCobrada: deudaCobradaFinal,
                 inputMode="decimal"
                 value={
                   montoPagado === null
-                    ? modoAbono
-                      ? totalVentaNormal
-                      : total
+                    ? totalACobrarAhora
                     : montoPagado
                 }
                 onChange={(e) =>
@@ -10226,7 +10277,7 @@ deudaCobrada: deudaCobradaFinal,
             </div>
           )}
 
-          {deudaCobradaPrevista > saldoBaseEditado && (
+          {cobrarDeuda && (Number(montoDeuda) || 0) > saldoBaseEditado && (
             <div
               className="text-[10px] font-semibold mt-1"
               style={{ color: C.danger }}
